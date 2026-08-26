@@ -4,3 +4,4 @@ node_modules/
 *.log
 .DS_Store
 ~/.localsync/
+apps/desktop/src-tauri/gen/
