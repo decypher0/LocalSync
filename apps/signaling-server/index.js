@@ -9,7 +9,10 @@
 // carries handshake metadata (SDP/ICE), never project code.
 const WebSocket = require('ws');
 
-const PORT = process.env.PORT || 8080;
+// 9090, not 8080: sample-project's own app service also publishes on 8080,
+// and running the signaling server + a live demo session on the same
+// machine at once would otherwise collide.
+const PORT = process.env.PORT || 9090;
 const wss = new WebSocket.Server({ port: PORT });
 
 // roomCode -> { clients: [ws, ...], queue: [msg, ...] }
