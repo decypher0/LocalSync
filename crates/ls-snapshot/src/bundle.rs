@@ -1,0 +1,272 @@
+use anyhow::{bail, Context, Result};
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::types::ServiceDef;
+
+/// Git's well-known empty-tree object — diffing against it makes "no parent
+/// commit" just a regular diff (base = empty tree), instead of a separate
+/// code path. Every tracked file comes out as an add, which is exactly the
+/// "no parent given" behavior the manifest contract asks for.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiffStatEntry {
+    pub path: String,
+    pub change_type: String,
+    pub insertions: u64,
+    pub deletions: u64,
+}
+
+pub struct GitBundle {
+    pub payload: Vec<u8>,
+    pub git_commit: String,
+    pub services: Vec<ServiceDef>,
+}
+
+pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Result<GitBundle> {
+    let git_commit = git_text(project_root, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
+
+    let diff_stat = build_diff_stat(project_root, parent_commit)?;
+    let diff_stat_json = serde_json::to_vec_pretty(&diff_stat)?;
+
+    let diff_patch = match parent_commit {
+        Some(parent) => git_text(project_root, &["diff", &format!("{parent}..HEAD")])?,
+        None => String::new(),
+    };
+
+    let compose_path = project_root.join("docker-compose.yml");
+    let compose_bytes = if compose_path.is_file() {
+        Some(fs::read(&compose_path).with_context(|| format!("reading {}", compose_path.display()))?)
+    } else {
+        None
+    };
+    let services = match &compose_bytes {
+        Some(bytes) => parse_compose_services(bytes)?,
+        None => Vec::new(),
+    };
+
+    let db_seed_dir = resolve_db_seed_dir(project_root);
+
+    let gz = GzEncoder::new(Vec::new(), Compression::default());
+    let mut tb = tar::Builder::new(gz);
+
+    let archive_bytes = git_bytes(project_root, &["archive", "--format=tar", "HEAD"])?;
+    append_git_archive(&mut tb, &archive_bytes, "source")?;
+
+    append_bytes(&mut tb, "diff_stat.json", &diff_stat_json)?;
+    append_bytes(&mut tb, "diff.patch", diff_patch.as_bytes())?;
+    if let Some(bytes) = &compose_bytes {
+        append_bytes(&mut tb, "docker-compose.yml", bytes)?;
+    }
+    if let Some(dir) = &db_seed_dir {
+        for file in walk_files(dir)? {
+            let rel = file.strip_prefix(dir).unwrap();
+            let tar_path = Path::new("db-seed").join(rel);
+            let mut f = fs::File::open(&file)?;
+            tb.append_file(&tar_path, &mut f)
+                .with_context(|| format!("adding {} to payload", tar_path.display()))?;
+        }
+    }
+
+    let gz = tb.into_inner().context("finalizing tar")?;
+    let payload = gz.finish().context("finalizing gzip")?;
+
+    Ok(GitBundle {
+        payload,
+        git_commit,
+        services,
+    })
+}
+
+/// `db-seed/` at the project root, falling back to `db/seed/`. Shared by the
+/// bundler (copies the files in) and hash.rs (hashes them).
+pub(crate) fn resolve_db_seed_dir(project_root: &Path) -> Option<PathBuf> {
+    let a = project_root.join("db-seed");
+    if a.is_dir() {
+        return Some(a);
+    }
+    let b = project_root.join("db").join("seed");
+    if b.is_dir() {
+        return Some(b);
+    }
+    None
+}
+
+/// Recursively lists regular files under `dir`, sorted for determinism.
+pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                out.push(entry.path());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn build_diff_stat(project_root: &Path, parent_commit: Option<&str>) -> Result<Vec<DiffStatEntry>> {
+    let base = parent_commit.unwrap_or(EMPTY_TREE);
+
+    // --no-renames: diff_stat's change_type is only added/modified/deleted
+    // (no "renamed" variant), so a rename is simplest as a delete+add pair
+    // rather than teaching the parser `old => new` path syntax.
+    let numstat = git_text(project_root, &["diff", "--no-renames", "--numstat", base, "HEAD"])?;
+    let name_status = git_text(project_root, &["diff", "--no-renames", "--name-status", base, "HEAD"])?;
+
+    let mut status_map: HashMap<String, &str> = HashMap::new();
+    for line in name_status.lines() {
+        let mut parts = line.splitn(2, '\t');
+        if let (Some(status), Some(path)) = (parts.next(), parts.next()) {
+            let change = match status.chars().next() {
+                Some('A') => "added",
+                Some('D') => "deleted",
+                _ => "modified",
+            };
+            status_map.insert(path.to_string(), change);
+        }
+    }
+
+    let mut entries = Vec::new();
+    for line in numstat.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let ins = parts.next().unwrap_or("0");
+        let del = parts.next().unwrap_or("0");
+        let path = parts.next().unwrap_or("").to_string();
+        let change_type = status_map.get(&path).copied().unwrap_or("modified").to_string();
+        entries.push(DiffStatEntry {
+            path,
+            change_type,
+            // Binary files report "-" instead of a count; treat as 0.
+            insertions: ins.parse().unwrap_or(0),
+            deletions: del.parse().unwrap_or(0),
+        });
+    }
+    Ok(entries)
+}
+
+#[derive(Deserialize, Default)]
+struct ComposeFile {
+    #[serde(default)]
+    services: std::collections::BTreeMap<String, ComposeService>,
+}
+
+#[derive(Deserialize, Default)]
+struct ComposeService {
+    image: Option<String>,
+    build: Option<serde_yaml::Value>,
+    #[serde(default)]
+    ports: Vec<serde_yaml::Value>,
+    #[serde(default)]
+    depends_on: serde_yaml::Value,
+}
+
+/// Just enough YAML reading to hand `ls-containers` service name / image /
+/// build / ports / depends_on. Long-form (mapping-style) ports and the full
+/// compose spec (networks, volumes, env...) are out of scope — the raw
+/// docker-compose.yml still ships verbatim in the payload for anything that
+/// needs more.
+fn parse_compose_services(bytes: &[u8]) -> Result<Vec<ServiceDef>> {
+    let compose: ComposeFile = serde_yaml::from_slice(bytes).context("parsing docker-compose.yml")?;
+    let mut out = Vec::with_capacity(compose.services.len());
+    for (name, svc) in compose.services {
+        let image_or_build = if let Some(image) = &svc.image {
+            format!("image:{image}")
+        } else if let Some(build) = &svc.build {
+            match build {
+                serde_yaml::Value::String(s) => format!("build:{s}"),
+                serde_yaml::Value::Mapping(m) => {
+                    let ctx = m
+                        .get(serde_yaml::Value::String("context".to_string()))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(".");
+                    format!("build:{ctx}")
+                }
+                _ => "build:.".to_string(),
+            }
+        } else {
+            String::new()
+        };
+
+        let ports = svc.ports.iter().filter_map(port_to_string).collect();
+
+        let depends_on = match &svc.depends_on {
+            serde_yaml::Value::Sequence(seq) => seq.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+            serde_yaml::Value::Mapping(m) => m.keys().filter_map(|k| k.as_str().map(String::from)).collect(),
+            _ => Vec::new(),
+        };
+
+        out.push(ServiceDef {
+            name,
+            image_or_build,
+            ports,
+            depends_on,
+        });
+    }
+    Ok(out)
+}
+
+fn port_to_string(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn append_bytes<W: Write>(tb: &mut tar::Builder<W>, path: &str, data: &[u8]) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    tb.append_data(&mut header, path, data)
+        .with_context(|| format!("adding {path} to payload"))
+}
+
+/// Re-homes every entry from a `git archive --format=tar` output under
+/// `prefix/` in our own tar builder, so the caller's payload can combine it
+/// with sibling entries (diff_stat.json, docker-compose.yml, ...).
+fn append_git_archive<W: Write>(tb: &mut tar::Builder<W>, archive_bytes: &[u8], prefix: &str) -> Result<()> {
+    let mut archive = tar::Archive::new(archive_bytes);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let new_path = Path::new(prefix).join(&path);
+        let mut header = entry.header().clone();
+        tb.append_data(&mut header, &new_path, &mut entry)
+            .with_context(|| format!("adding {} to payload", new_path.display()))?;
+    }
+    Ok(())
+}
+
+fn git_text(root: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8(git_bytes(root, args)?)?)
+}
+
+fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {args:?}"))?;
+    if !out.status.success() {
+        bail!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    Ok(out.stdout)
+}
