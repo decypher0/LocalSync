@@ -1,0 +1,164 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1a1d23;
+  --muted: #6b7280;
+  --border: #d9dce1;
+  --card: #f5f6f8;
+  --accent: #2b6cb0;
+  --danger: #b0392b;
+  --added: #1f7a3d;
+  --modified: #b0800a;
+  --deleted: #b0392b;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --fg: #e8eaed;
+    --muted: #9aa1ac;
+    --border: #33363d;
+    --card: #1f222a;
+  }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.topbar h1 { font-size: 1.1rem; margin: 0; }
+
+.settings-panel {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.settings-panel.hidden { display: none; }
+
+.tabs { display: flex; gap: 4px; padding: 12px 20px 0; }
+.tab-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+}
+.tab-btn.active { background: var(--card); font-weight: 600; }
+
+.tab-panel { display: none; padding: 20px; max-width: 720px; }
+.tab-panel.active { display: block; }
+.hidden { display: none !important; }
+
+label { display: block; margin: 14px 0 4px; font-size: 0.85rem; color: var(--muted); }
+input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.95rem;
+}
+.inline-row { display: flex; gap: 8px; }
+.inline-row input { flex: 1; }
+
+button { font-size: 0.9rem; cursor: pointer; border-radius: 6px; }
+.primary-btn, .danger-btn {
+  margin-top: 16px;
+  padding: 10px 18px;
+  border: none;
+  color: white;
+  font-weight: 600;
+}
+.primary-btn { background: var(--accent); }
+.danger-btn { background: var(--danger); }
+.ghost-btn {
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+button:disabled { opacity: 0.5; cursor: default; }
+
+.progress-wrap { margin-top: 16px; }
+.progress-track {
+  height: 8px;
+  background: var(--card);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.15s; }
+.hint { font-size: 0.8rem; color: var(--muted); margin: 6px 0 0; }
+
+.result { color: var(--added); font-weight: 600; }
+.error { color: var(--deleted); font-weight: 600; white-space: pre-wrap; }
+.warn {
+  background: var(--card);
+  border-left: 3px solid var(--accent);
+  padding: 10px 14px;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.manifest-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-top: 12px;
+  background: var(--card);
+}
+.manifest-row { display: flex; justify-content: space-between; padding: 4px 0; gap: 12px; }
+.manifest-row .k { color: var(--muted); }
+.manifest-row .v { text-align: right; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
+
+.diff-totals { font-weight: 400; font-size: 0.85rem; color: var(--muted); }
+.diff-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.9rem; }
+.diff-table th {
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.diff-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.diff-table td.path { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
+.diff-table td.ins { color: var(--added); }
+.diff-table td.del { color: var(--deleted); }
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: white;
+}
+.badge.added { background: var(--added); }
+.badge.modified { background: var(--modified); }
+.badge.deleted { background: var(--deleted); }
+
+.ports-list { list-style: none; padding: 0; margin: 8px 0; }
+.ports-list li {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.9rem;
+}
+.ports-list a { color: var(--accent); }
+
+.cache-hit { color: var(--added); font-weight: 600; }
+.cache-cold { color: var(--modified); font-weight: 600; }

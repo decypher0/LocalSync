@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LocalSync</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>LocalSync</h1>
+    <button id="settings-toggle" class="ghost-btn" type="button">Settings</button>
+  </header>
+
+  <section id="settings-panel" class="settings-panel hidden">
+    <label>
+      Signaling server URL
+      <input id="signaling-url" type="text" value="ws://localhost:8080" />
+    </label>
+    <label>
+      LOCALSYNC_DATA_DIR (informational — set as an env var before launch; see README)
+      <input id="data-dir-display" type="text" disabled />
+    </label>
+  </section>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="send">Send</button>
+    <button class="tab-btn" data-tab="receive">Receive</button>
+  </nav>
+
+  <!-- ============ SEND ============ -->
+  <section id="tab-send" class="tab-panel active">
+    <h2>Share a project</h2>
+    <label>
+      Project folder (absolute path)
+      <input id="project-path" type="text" placeholder="/home/you/code/my-project" />
+    </label>
+    <label class="room-row">
+      Room code
+      <span class="inline-row">
+        <input id="send-room-code" type="text" placeholder="e.g. 7421" />
+        <button id="generate-room-code" class="ghost-btn" type="button">Generate</button>
+      </span>
+    </label>
+    <button id="send-btn" class="primary-btn" type="button">Send</button>
+
+    <div id="send-progress-wrap" class="progress-wrap hidden">
+      <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
+      <p id="send-progress-label" class="hint"></p>
+    </div>
+    <p id="send-result" class="result"></p>
+    <p id="send-error" class="error"></p>
+  </section>
+
+  <!-- ============ RECEIVE ============ -->
+  <section id="tab-receive" class="tab-panel">
+    <div id="receive-idle">
+      <h2>Receive a project</h2>
+      <label>
+        Room code
+        <input id="receive-room-code" type="text" placeholder="e.g. 7421" />
+      </label>
+      <button id="receive-btn" class="primary-btn" type="button">Receive</button>
+
+      <div id="receive-progress-wrap" class="progress-wrap hidden">
+        <div class="progress-track"><div id="receive-progress-bar" class="progress-bar"></div></div>
+        <p id="receive-progress-label" class="hint"></p>
+      </div>
+      <p id="receive-error" class="error"></p>
+    </div>
+
+    <!-- ---- Trust gate: diff review, shown only after receive_snapshot resolves ---- -->
+    <div id="review-panel" class="hidden">
+      <h2>Review before you run</h2>
+      <p class="warn">
+        Nothing has executed yet. This project has only been verified and unpacked for
+        inspection — clicking Run is what starts sandboxed containers.
+      </p>
+
+      <div class="manifest-card">
+        <div class="manifest-row"><span class="k">Project</span><span id="m-project" class="v"></span></div>
+        <div class="manifest-row"><span class="k">Commit</span><span id="m-commit" class="v mono"></span></div>
+        <div class="manifest-row"><span class="k">Parent commit</span><span id="m-parent" class="v mono"></span></div>
+        <div class="manifest-row"><span class="k">Services</span><span id="m-services" class="v"></span></div>
+      </div>
+
+      <h3>Diff summary <span id="diff-totals" class="diff-totals"></span></h3>
+      <table class="diff-table">
+        <thead><tr><th>File</th><th>Change</th><th>+</th><th>-</th></tr></thead>
+        <tbody id="diff-body"></tbody>
+      </table>
+
+      <label>
+        Work directory (where the sandbox gets unpacked)
+        <input id="work-dir" type="text" value="/tmp/localsync-work" />
+      </label>
+      <button id="run-btn" class="danger-btn" type="button">Run</button>
+      <p id="run-error" class="error"></p>
+    </div>
+
+    <!-- ---- Running session status ---- -->
+    <div id="session-panel" class="hidden">
+      <h2>Running</h2>
+      <div class="manifest-card">
+        <div class="manifest-row"><span class="k">Project</span><span id="s-project" class="v"></span></div>
+        <div class="manifest-row">
+          <span class="k">DB cache</span>
+          <span id="s-cache" class="v"></span>
+        </div>
+      </div>
+      <h3>Service ports</h3>
+      <ul id="s-ports" class="ports-list"></ul>
+      <button id="stop-btn" class="ghost-btn" type="button">Stop</button>
+      <p id="stop-error" class="error"></p>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

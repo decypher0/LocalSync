@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the main LocalSync window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default"
+  ]
+}

@@ -102,6 +102,7 @@ pub fn apply_policy(
             if let Some(Value::String(image)) = svc_map.get("image").cloned() {
                 svc_map.insert(Value::from("image"), Value::from(canonicalize_image(&image)));
             }
+            rewrite_build_context(svc_map);
 
             svc_map.insert(Value::from("read_only"), Value::from(policy.read_only_rootfs));
             svc_map.insert(
@@ -150,6 +151,35 @@ fn canonicalize_image(image: &str) -> String {
         image.to_string()
     } else {
         format!("docker.io/{image}")
+    }
+}
+
+/// The snapshot's `docker-compose.yml` ships at the payload root, but
+/// `ls_snapshot::bundle` puts the git-tracked project tree it references
+/// (build contexts) under `source/` there instead - `source/` is a `git
+/// archive` of HEAD, kept separate from the top-level compose/db-seed copies
+/// so those still ship even when the sender never committed them. A build
+/// context of "./app" is only valid relative to where the tree actually
+/// ended up post-unpack, i.e. "source/app". Rewrites in place; no-op for
+/// services with no `build` key (image-only services need nothing here).
+fn rewrite_build_context(svc_map: &mut serde_yaml::Mapping) {
+    fn source_prefixed(s: &str) -> String {
+        match s.strip_prefix("./").unwrap_or(s) {
+            "." => "source".to_string(),
+            trimmed => format!("source/{trimmed}"),
+        }
+    }
+
+    if let Some(v) = svc_map.get_mut("build") {
+        match v {
+            Value::String(s) => *s = source_prefixed(s),
+            Value::Mapping(m) => {
+                if let Some(Value::String(ctx)) = m.get_mut("context") {
+                    *ctx = source_prefixed(ctx);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -308,6 +338,22 @@ volumes:
             doc["services"]["db"]["image"].as_str(),
             Some("docker.io/library/mysql:8.0")
         );
+        assert_eq!(doc["services"]["app"]["build"].as_str(), Some("source/app"));
+    }
+
+    #[test]
+    fn rewrites_build_context_mapping_form_too() {
+        let yaml = r#"
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+"#;
+        let policy = ls_security::default_policy();
+        let rewritten = apply_policy(yaml, &policy, &[], "unused").unwrap();
+        let doc: Value = serde_yaml::from_str(&rewritten).unwrap();
+        assert_eq!(doc["services"]["app"]["build"]["context"].as_str(), Some("source"));
     }
 
     #[test]
