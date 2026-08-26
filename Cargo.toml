@@ -5,6 +5,7 @@ members = [
     "crates/ls-net",
     "crates/ls-security",
     "crates/ls-containers",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]
