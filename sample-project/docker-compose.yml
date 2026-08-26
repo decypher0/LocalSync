@@ -1,0 +1,34 @@
+services:
+  app:
+    build: ./app
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/localsync_demo
+      SPRING_DATASOURCE_USERNAME: localsync
+      SPRING_DATASOURCE_PASSWORD: localsync_demo_pw # ponytail: demo-only throwaway credential, not a secret worth managing
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: localsync_demo
+      MYSQL_USER: localsync
+      MYSQL_PASSWORD: localsync_demo_pw # ponytail: demo-only throwaway credential, not a secret worth managing
+      MYSQL_ROOT_PASSWORD: root_demo_pw # ponytail: demo-only throwaway credential, not a secret worth managing
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./db-seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_demo_pw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  # Generic name on purpose — LocalSync's container-orchestration module
+  # rewrites this to a content-hashed volume name at runtime. Standalone
+  # `docker compose up` / `podman-compose up` just uses this name as-is.
+  db-data:
