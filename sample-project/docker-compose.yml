@@ -10,9 +10,17 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+    # podman-compose orders container *starts* by depends_on but doesn't
+    # reliably block until the health check passes, and MySQL restarts
+    # internally partway through first-boot init - so the app can come up
+    # and try to connect before MySQL is really ready. restart: on-failure
+    # is the standard belt-and-suspenders fix: it just tries again.
+    restart: on-failure
 
   mysql:
-    image: mysql:8.0
+    # Fully-qualified: rootless Podman doesn't ship with
+    # unqualified-search-registries configured by default.
+    image: docker.io/library/mysql:8.0
     environment:
       MYSQL_DATABASE: localsync_demo
       MYSQL_USER: localsync
