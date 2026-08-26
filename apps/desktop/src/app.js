@@ -13,7 +13,7 @@ $("settings-toggle").addEventListener("click", () => {
 $("data-dir-display").value = "(read at launch; not editable here)";
 
 function signalingUrl() {
-  return $("signaling-url").value.trim() || "ws://localhost:8080";
+  return $("signaling-url").value.trim() || "ws://localhost:9090";
 }
 
 // ---------- tabs ----------
