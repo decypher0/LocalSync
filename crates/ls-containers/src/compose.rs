@@ -99,6 +99,10 @@ pub fn apply_policy(
                 continue;
             };
 
+            if let Some(Value::String(image)) = svc_map.get("image").cloned() {
+                svc_map.insert(Value::from("image"), Value::from(canonicalize_image(&image)));
+            }
+
             svc_map.insert(Value::from("read_only"), Value::from(policy.read_only_rootfs));
             svc_map.insert(
                 Value::from("tmpfs"),
@@ -122,6 +126,31 @@ pub fn apply_policy(
     }
 
     serde_yaml::to_string(&doc).context("re-serializing docker-compose.yml")
+}
+
+/// Fully-qualifies a short image reference ("mysql:8.0" ->
+/// "docker.io/library/mysql:8.0", "bitnami/mysql" -> "docker.io/bitnami/mysql").
+/// Rootless Podman doesn't ship with unqualified-search-registries configured
+/// by default, so a snapshot built on a machine that *does* have one set up
+/// (or built with Docker, which always assumes Docker Hub) can otherwise ship
+/// a compose file that fails to resolve on the receiver. Already-qualified
+/// references (a registry host, or an explicit scheme) pass through untouched.
+fn canonicalize_image(image: &str) -> String {
+    if image.contains("://") {
+        return image.to_string();
+    }
+    // No '/' at all means no registry/namespace component could be present -
+    // any ':' here is the tag separator ("mysql:8.0"), not a host:port.
+    let Some((first_segment, _)) = image.split_once('/') else {
+        return format!("docker.io/library/{image}");
+    };
+    let looks_qualified =
+        first_segment.contains('.') || first_segment.contains(':') || first_segment == "localhost";
+    if looks_qualified {
+        image.to_string()
+    } else {
+        format!("docker.io/{image}")
+    }
 }
 
 /// Find the top-level volume key a service mounts (its first entry of the
@@ -228,6 +257,16 @@ services:
     }
 
     #[test]
+    fn canonicalizes_short_image_names_but_leaves_qualified_ones_alone() {
+        assert_eq!(canonicalize_image("mysql:8.0"), "docker.io/library/mysql:8.0");
+        assert_eq!(canonicalize_image("nginx"), "docker.io/library/nginx");
+        assert_eq!(canonicalize_image("bitnami/mysql:8.0"), "docker.io/bitnami/mysql:8.0");
+        assert_eq!(canonicalize_image("docker.io/library/mysql:8.0"), "docker.io/library/mysql:8.0");
+        assert_eq!(canonicalize_image("ghcr.io/foo/bar:latest"), "ghcr.io/foo/bar:latest");
+        assert_eq!(canonicalize_image("localhost:5000/foo"), "localhost:5000/foo");
+    }
+
+    #[test]
     fn apply_policy_locks_down_every_service_and_pins_db_volume() {
         let yaml = r#"
 services:
@@ -264,6 +303,10 @@ volumes:
         assert_eq!(
             doc["volumes"]["db-data"]["name"].as_str(),
             Some("localsync-db-abc123")
+        );
+        assert_eq!(
+            doc["services"]["db"]["image"].as_str(),
+            Some("docker.io/library/mysql:8.0")
         );
     }
 
