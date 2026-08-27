@@ -54,6 +54,44 @@ use signaling::{recv_sdp, SignalMsg, SignalingClient};
 /// that regardless of peer.
 const CHUNK_SIZE: usize = 16 * 1024;
 
+/// Ceiling on how much unacknowledged data (`RTCDataChannel::buffered_amount`)
+/// `send_payload` lets pile up in the data channel's local send queue before
+/// pausing to let SCTP actually flush and get it acknowledged. This is the
+/// backpressure every serious WebRTC implementation (browsers included)
+/// requires a sender to observe: `webrtc-sctp`'s outbound `pending_queue` is
+/// unbounded and `RTCDataChannel::send` never blocks on it, so a sender that
+/// just fires chunks in a tight loop can hand hundreds of KB to the SCTP
+/// layer in a few microseconds - a burst that, on the same host across two
+/// real OS processes, provoked real UDP packet loss in testing (verified via
+/// `RUST_LOG=webrtc_sctp=trace`: dozens of fast-retransmits per transfer,
+/// concentrated right after cwnd ramps up). Four chunks' worth caps that
+/// burst while still keeping the channel busy.
+const MAX_BUFFERED_AMOUNT: usize = 4 * CHUNK_SIZE;
+
+/// How often [`wait_for_buffered_amount_below`] re-checks `buffered_amount`
+/// while backpressure is holding it back from queuing more.
+const BUFFERED_AMOUNT_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// Sent by the receiver, as its own message, once it has reassembled the
+/// full payload - `send_payload` waits for this instead of trusting its own
+/// `buffered_amount` alone (see its doc comment for why). Distinct from any
+/// real payload byte: it's never mistaken for chunk data because it's only
+/// ever sent *after* `receive_payload`'s loop has already collected `total`
+/// bytes, as a message (or messages - see [`DONE_ACK_REPEATS`]) of its own.
+const DONE_ACK: &[u8] = b"LSNET:DONE";
+
+/// How many times `receive_payload` sends [`DONE_ACK`] back-to-back.
+/// Redundancy, not a retry loop: testing (`RUST_LOG=webrtc_sctp=trace`
+/// against real two-process transfers) showed that the *last* message sent
+/// before a side goes idle can need several T3-rtx retransmissions to get
+/// through - or fail to arrive within nat_peer's 60s transfer timeout at
+/// all - even on an otherwise healthy connection that had just finished
+/// moving the whole payload without issue. Sending a few redundant copies
+/// up front is cheap (a few dozen bytes) and turns "one message that has to
+/// survive" into "one of several", which is what actually made this
+/// reliable in testing - see `send_payload`, which only needs to see one.
+const DONE_ACK_REPEATS: usize = 5;
+
 /// How long connection setup (signaling + ICE + DTLS + data channel open)
 /// is allowed to take before giving up. Doesn't apply to the payload
 /// transfer itself, which has no timeout - large payloads just take longer.
@@ -318,10 +356,51 @@ async fn connect_as_receiver_inner(
     })
 }
 
+/// Blocks until `conn`'s data channel reports `buffered_amount() <=
+/// threshold`. `buffered_amount` only drops when the peer's SCTP layer
+/// actually acknowledges (SACKs) those bytes - see
+/// `webrtc_sctp::stream::Stream::on_buffer_released`, called from the
+/// association's read loop on SACK receipt - so waiting for it is a real
+/// "the peer has this data" signal, not just "we handed it to a local
+/// queue".
+async fn wait_for_buffered_amount_below(conn: &DataChannelConn, threshold: usize) {
+    tokio::task::yield_now().await;
+    while conn.dc.buffered_amount().await > threshold {
+        tokio::time::sleep(BUFFERED_AMOUNT_POLL_INTERVAL).await;
+    }
+}
+
 /// Sends `data` over the channel, split into chunks of at most
 /// [`CHUNK_SIZE`] bytes, preceded by an 8-byte big-endian length prefix
 /// (its own message) so the receiver knows the total size up front.
-/// `on_progress(bytes_sent, total)` fires after each chunk.
+/// `on_progress(bytes_sent, total)` fires after each chunk. Doesn't return
+/// until the receiver has confirmed (see [`DONE_ACK`]) it has the whole
+/// payload - callers that tear down the connection right after this
+/// returns (as `nat_peer` does) are safe to do so.
+///
+/// Two things this deliberately does that a naive "loop calling `dc.send`"
+/// doesn't, both load-bearing for reliability on payloads past a few KB
+/// (see round 2's stall investigation, reproduced and root-caused with
+/// `RUST_LOG=webrtc_sctp=trace` against two real `nat_peer` OS processes):
+///
+/// 1. Backpressure before each chunk ([`MAX_BUFFERED_AMOUNT`]): webrtc-sctp's
+///    outbound queue is unbounded and never applies backpressure on its own,
+///    so queuing the whole payload in a tight loop bursts it onto the wire
+///    faster than the OS's UDP buffers reliably hold, causing real packet
+///    loss (observed directly in testing: dozens of fast-retransmits per
+///    transfer, concentrated right after `cwnd` ramps up).
+/// 2. Waiting for an explicit [`DONE_ACK`] from the receiver (sent by
+///    [`receive_payload`] only once it has reassembled every byte) instead
+///    of trusting our own `buffered_amount() == 0`. `dc.send` only means
+///    "handed to the local SCTP send queue", not "the peer has it" -
+///    `buffered_amount` reaching zero is a step closer (it only drops once
+///    the peer's SCTP layer SACKs those bytes), but testing showed even
+///    that isn't reliable proof for the *last* message before a side goes
+///    idle: waiting on our own last chunk's SACK left the sender stuck
+///    retransmitting a chunk the receiver had, by every other measure,
+///    already received correctly. An explicit ack the receiver only sends
+///    after full reassembly sidesteps that - if we see it, the receiver
+///    provably has everything, independent of our own SCTP-internal state.
 pub async fn send_payload(
     conn: &DataChannelConn,
     data: &[u8],
@@ -335,6 +414,7 @@ pub async fn send_payload(
 
     let mut sent = 0usize;
     for chunk in data.chunks(CHUNK_SIZE) {
+        wait_for_buffered_amount_below(conn, MAX_BUFFERED_AMOUNT).await;
         conn.dc
             .send(&Bytes::copy_from_slice(chunk))
             .await
@@ -342,13 +422,32 @@ pub async fn send_payload(
         sent += chunk.len();
         on_progress(sent, total);
     }
+
+    // Proof the receiver actually has everything - see the doc comment for
+    // why this, and not our own buffered_amount, is what's waited on here.
+    // DONE_ACK_REPEATS copies may arrive; only the first is needed.
+    let mut incoming = conn.incoming.lock().await;
+    let ack = incoming
+        .recv()
+        .await
+        .context("channel closed before the receiver's completion ack arrived")?;
+    anyhow::ensure!(
+        ack == DONE_ACK,
+        "expected the receiver's completion ack, got {} unexpected bytes",
+        ack.len()
+    );
     Ok(())
 }
 
 /// Receives a full payload: the first message on the channel is always the
 /// 8-byte big-endian total length, followed by chunks until that many bytes
 /// have arrived. `on_progress(bytes_received, total)` fires after each
-/// chunk.
+/// chunk. Before returning, sends [`send_payload`] [`DONE_ACK_REPEATS`]
+/// redundant copies of a completion ack (see `send_payload`'s doc comment
+/// for why one copy alone tested as unreliable) - callers that tear down
+/// the connection right after this returns (as `nat_peer` does) are safe to
+/// do so; by this point `buf` is already known-complete, so there is
+/// nothing further worth blocking the receiver itself on.
 pub async fn receive_payload(
     conn: &DataChannelConn,
     mut on_progress: impl FnMut(usize, usize),
@@ -375,5 +474,14 @@ pub async fn receive_payload(
         buf.extend_from_slice(&chunk);
         on_progress(buf.len(), total);
     }
+    drop(incoming);
+
+    for _ in 0..DONE_ACK_REPEATS {
+        conn.dc
+            .send(&Bytes::from_static(DONE_ACK))
+            .await
+            .context("failed to send completion ack")?;
+    }
+
     Ok(buf)
 }

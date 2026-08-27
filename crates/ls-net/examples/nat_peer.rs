@@ -37,18 +37,28 @@ use ls_net::{
 };
 use sha2::{Digest, Sha256};
 
+// Comfortably covers real snapshot sizes: measured 18,478 bytes for
+// sample-project via `ls-snapshot`'s `make_snapshot` example, and real
+// snapshots (source diff + manifest + signature) run tens of KB to low MB -
+// see `crates/ls-net/tests/nat_peer_process_stress.rs`, which drives this
+// example at 3,000,000 bytes specifically to stay inside that range with
+// margin. `--payload-size` overrides this for driving other sizes.
 const DEFAULT_PAYLOAD_SIZE: usize = 262_144;
 
-// ponytail: lib.rs's receive_payload/send_payload deliberately have no
-// timeout ("large payloads just take longer" - see lib.rs doc comment).
-// Verified during this round: two separate `nat_peer` OS processes on the
-// same host can stall mid-transfer and never recover, even minutes later -
-// same-process transfers (tests/transfer.rs, two tokio tasks) don't show
-// this. Looks like a real reliability gap in webrtc-rs's SCTP retransmission
-// under actual process/OS scheduling, not something pacing or TURN
-// explains (reproduces with TURN unset). Out of scope to fix here; this
-// timeout just keeps a stuck subprocess from hanging an orchestrating test
-// forever. Upgrade: retry the transfer, or fix/replace the SCTP layer.
+// lib.rs's receive_payload/send_payload deliberately have no timeout
+// ("large payloads just take longer" - see lib.rs doc comment). This is a
+// safety net against a stuck subprocess hanging an orchestrating test
+// forever, not a workaround for a known issue: round 2 found that two
+// separate `nat_peer` OS processes on the same host could stall mid-transfer
+// and never recover (same-process transfers in tests/transfer.rs never
+// showed it). That turned out to be two real bugs in `send_payload`/
+// `receive_payload` themselves, both fixed - see lib.rs's doc comments on
+// those two functions for the root causes (unthrottled bursty sends
+// provoking real packet loss, and both functions declaring success before
+// the peer had actually confirmed receipt) and
+// `crates/ls-net/tests/nat_peer_process_stress.rs` for the proof (10
+// consecutive two-process transfers at a realistic size, asserting
+// byte-for-byte correctness every time).
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct Args {
@@ -157,6 +167,11 @@ async fn run(args: Args) -> anyhow::Result<ConnectionPath> {
 
 #[tokio::main]
 async fn main() {
+    // Silent unless RUST_LOG is set (e.g. RUST_LOG=webrtc_sctp=trace) - lets
+    // webrtc-rs/webrtc-sctp's own `log` output through when diagnosing
+    // transport stalls, without adding any noise to normal runs.
+    let _ = env_logger::try_init();
+
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
