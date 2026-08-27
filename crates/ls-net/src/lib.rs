@@ -10,8 +10,11 @@
 //! Connections use a public STUN server (Google's) to discover reachable
 //! addresses. That's enough for peers on the same LAN or behind
 //! "easy" NATs, which is what the MVP demo needs. A TURN relay fallback for
-//! strict/symmetric NATs is a real production requirement but is not
-//! implemented yet - see the `ice_config` TODO below.
+//! strict/symmetric NATs is now wired in via `ice_config` - see there for the
+//! `LOCALSYNC_TURN_*` environment variables that configure it. TURN is
+//! fallback-only: [`DataChannelConn::connection_path`] reports whether an
+//! established connection actually went direct or through the relay, so
+//! that claim is verifiable rather than assumed.
 //!
 //! ## ICE strategy
 //! Candidates are *not* trickled over the signaling channel as they're
@@ -36,10 +39,13 @@ use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::{APIBuilder, API};
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice::candidate::CandidateType;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::stats::StatsReportType;
 
 use signaling::{recv_sdp, SignalMsg, SignalingClient};
 
@@ -59,8 +65,55 @@ pub struct DataChannelConn {
     dc: Arc<RTCDataChannel>,
     incoming: AsyncMutex<mpsc::UnboundedReceiver<Bytes>>,
     // Kept alive for the lifetime of the connection; dropping it tears down
-    // ICE/DTLS/SCTP. Never read directly.
+    // ICE/DTLS/SCTP. Never read directly except by `connection_path`.
     _pc: Arc<RTCPeerConnection>,
+}
+
+/// Which path an established [`DataChannelConn`] actually took. TURN is
+/// meant to be a fallback used only when a direct path isn't reachable;
+/// this makes that contract checkable instead of assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionPath {
+    /// Selected candidate pair used a host, server-reflexive, or
+    /// peer-reflexive local candidate - i.e. no relay involved.
+    Direct,
+    /// Selected candidate pair's local candidate was a TURN relay
+    /// allocation.
+    Relayed,
+    /// No nominated candidate pair was found in the stats report (e.g.
+    /// called before ICE finished selecting a pair), or its local candidate
+    /// stats were missing. Should not happen for a connection returned by
+    /// `connect_as_sender`/`connect_as_receiver`, since those don't return
+    /// until the data channel has opened.
+    Unknown,
+}
+
+impl DataChannelConn {
+    /// Reports whether this connection is going direct (host/srflx/prflx)
+    /// or through a TURN relay, by reading WebRTC stats and cross-referencing
+    /// the nominated ICE candidate pair against its local candidate's type.
+    pub async fn connection_path(&self) -> ConnectionPath {
+        let report = self._pc.get_stats().await;
+
+        let Some(local_candidate_id) = report.reports.values().find_map(|r| match r {
+            StatsReportType::CandidatePair(pair) if pair.nominated => {
+                Some(pair.local_candidate_id.clone())
+            }
+            _ => None,
+        }) else {
+            return ConnectionPath::Unknown;
+        };
+
+        match report.reports.get(&local_candidate_id) {
+            Some(StatsReportType::LocalCandidate(c))
+                if c.candidate_type == CandidateType::Relay =>
+            {
+                ConnectionPath::Relayed
+            }
+            Some(StatsReportType::LocalCandidate(_)) => ConnectionPath::Direct,
+            _ => ConnectionPath::Unknown,
+        }
+    }
 }
 
 fn build_api() -> Result<API> {
@@ -75,18 +128,50 @@ fn build_api() -> Result<API> {
         .build())
 }
 
+/// Reads `LOCALSYNC_TURN_URL`, `LOCALSYNC_TURN_USERNAME`, and
+/// `LOCALSYNC_TURN_CREDENTIAL` from the environment. All three must be set
+/// and non-empty, or TURN is left out entirely (this is what keeps
+/// `connect_as_*` STUN-only by default, unmodified from round 1). Configured
+/// via env vars rather than function parameters so `connect_as_sender` /
+/// `connect_as_receiver` signatures stay untouched - callers (and tests)
+/// control TURN by setting process environment, not by passing it through.
+fn turn_server_from_env() -> Option<RTCIceServer> {
+    let url = std::env::var("LOCALSYNC_TURN_URL")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let username = std::env::var("LOCALSYNC_TURN_USERNAME")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let credential = std::env::var("LOCALSYNC_TURN_CREDENTIAL")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    Some(RTCIceServer {
+        urls: vec![url],
+        username,
+        credential,
+        // Required explicitly: RTCIceServer's Default leaves this
+        // Unspecified, which webrtc-rs rejects at connect time
+        // ("invalid turn server credentials") for any turn:/turns: URL.
+        credential_type: RTCIceCredentialType::Password,
+    })
+}
+
 fn ice_config() -> RTCConfiguration {
+    let mut ice_servers = vec![RTCIceServer {
+        urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+        ..Default::default()
+    }];
+    // TURN relay fallback for strict/symmetric NATs where STUN alone can't
+    // find a reachable address. Listed second: webrtc-rs still tries every
+    // server and picks the best working candidate pair, so this only gets
+    // used when nothing cheaper (host/srflx) succeeds - see
+    // `DataChannelConn::connection_path` for how that's verified rather than
+    // assumed.
+    if let Some(turn) = turn_server_from_env() {
+        ice_servers.push(turn);
+    }
     RTCConfiguration {
-        // TODO(turn): strict/symmetric NATs need a TURN relay to connect at
-        // all; STUN alone only resolves reachable addresses. Add
-        // `RTCIceServer { urls: vec![turn_url], username, credential, .. }`
-        // here (or thread an `Option<TurnConfig>` through connect_as_*) once
-        // TURN infra exists. Deferred for the MVP - STUN-only proves the
-        // core transport loop on a LAN, which is what the demo needs.
-        ice_servers: vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
+        ice_servers,
         ..Default::default()
     }
 }
@@ -164,10 +249,7 @@ async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result
 /// Connects to the signaling server as the WebRTC answerer: waits for the
 /// peer's offer, replies with an answer, and receives the data channel the
 /// peer created.
-pub async fn connect_as_receiver(
-    signaling_url: &str,
-    room_code: &str,
-) -> Result<DataChannelConn> {
+pub async fn connect_as_receiver(signaling_url: &str, room_code: &str) -> Result<DataChannelConn> {
     tokio::time::timeout(
         CONNECT_TIMEOUT,
         connect_as_receiver_inner(signaling_url, room_code),

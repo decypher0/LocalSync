@@ -13,3 +13,8 @@ serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-tungstenite = "0.30.0"
 webrtc = "0.8"
+
+[dev-dependencies]
+# Only used by the nat_peer example (payload integrity check) and the
+# TURN-still-prefers-direct test - not needed by the library itself.
+sha2 = "0.10"
