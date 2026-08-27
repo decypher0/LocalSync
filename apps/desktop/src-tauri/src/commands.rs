@@ -23,7 +23,7 @@ pub struct Progress {
     pub total: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct IncomingSnapshotInfo {
     /// `"<project_name>@<git_commit>"` — hand this back to `run_snapshot`.
     pub snapshot_id: String,

@@ -6,6 +6,13 @@ const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
 
+// ---------- preload (dev shortcut for LOCALSYNC_PRELOAD_SNAPSHOT) ----------
+// Fires the same IncomingSnapshotInfo shape receive_snapshot resolves with,
+// so this reuses renderReview verbatim — the review screen a developer sees
+// this way is the same code path a real P2P receive draws, not a separate
+// mockup. See scripts/demo-review-screen.sh.
+listen("preload-review", (evt) => renderReview(evt.payload));
+
 // ---------- settings ----------
 $("settings-toggle").addEventListener("click", () => {
   $("settings-panel").classList.toggle("hidden");

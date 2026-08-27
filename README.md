@@ -21,6 +21,14 @@ sample-project/       Spring Boot + MySQL reference app used by the demo
 
 The trust chain is enforced at the type level, not just by convention: `ls_containers::run_snapshot` only ever accepts a `VerifiedSnapshot`, which only `ls_security::verify` can construct. Nothing runs until a signature check has passed and — in the app — until a human has seen the diff and clicked Run.
 
+### NAT traversal: STUN first, TURN as a real fallback
+
+Connections try direct P2P (via STUN) first. When that's genuinely unreachable — a strict/symmetric NAT, or a firewall that blocks direct traffic entirely — they fall back to relaying through a TURN server, never the other way around. This isn't assumed: `DataChannelConn::connection_path()` reports whether an established connection actually went `Direct` or `Relayed`, by reading the WebRTC stats for the nominated candidate pair, so the claim is checkable in logs and tests, not just believed.
+
+TURN is off by default (STUN-only, matching earlier behavior) and turns on only when all three of `LOCALSYNC_TURN_URL`, `LOCALSYNC_TURN_USERNAME`, `LOCALSYNC_TURN_CREDENTIAL` are set in the process environment. For interactive use, `scripts/start-turn.sh` runs a local [coturn](https://github.com/coturn/coturn) instance as a Podman container (no `apt install` needed) and prints the env vars to export.
+
+**Proof it actually rescues a blocked connection, not just that it's configured**: `cargo test -p ls-net --test nat_fallback` builds two peer containers on a shared Podman network, each locked down with an in-container `iptables` default-deny (via `--cap-add=NET_ADMIN`, which needs no host root) that blocks everything except the TURN server's control port and the signaling server — a genuine network boundary, not a same-box shortcut. Direct connection is impossible; the test asserts both peers report `PATH=Relayed` and that the transferred bytes match byte-for-byte. See the test file's module doc comment for three narrower designs that were tried and rejected along the way, each ruled out by a real experiment rather than assumed. `cargo test -p ls-net --test turn_configured_still_prefers_direct` is the complementary same-LAN proof: TURN configured *and* reachable still doesn't get used when direct works.
+
 Caching is intentionally not custom-built: Podman's own image-layer cache handles "second build is fast" for free, and the MySQL data volume is named deterministically from a hash of the seed data, so a second snapshot of an unchanged project reuses it instead of reseeding. First run of the sample project cold: ~5 minutes. Same project resent unchanged: ~20 seconds.
 
 ## Prerequisites (Linux, or WSL2 Ubuntu on Windows)
@@ -63,6 +71,16 @@ This starts the signaling server and two app instances (each with its own `LOCAL
 4. The session panel shows the service ports and whether the DB volume was a cache hit. Hit the app's port: `curl http://localhost:8080/api/notes` should return the seeded notes.
 5. Repeat steps 1–4 without changing `sample-project/` — the second run should show a cache hit and come up noticeably faster.
 
+### Jumping straight to the review screen
+
+The diff-review/consent screen normally only appears after a live P2P receive. To check it looks right on a real display without going through Send/Receive first:
+
+```
+scripts/demo-review-screen.sh
+```
+
+This bundles `sample-project/` into a real signed snapshot, then launches the app with `LOCALSYNC_PRELOAD_SNAPSHOT` pointing at it — on startup the app runs that snapshot through the exact same verify+diff path a real receive does (see `apps/desktop/src-tauri/src/main.rs`) and emits it straight to the review screen. It's the same `renderReview()` code path a real receive uses, not a mockup, and Run still works normally from there if you want to go further than just looking.
+
 ## What's not verified here
 
-This was built and tested inside WSL2 Ubuntu, which has no display attached, so `cargo tauri dev`/`build` producing an actual visible window hasn't been confirmed visually — only that it compiles clean and the full command pipeline behind every button works end-to-end (see `apps/desktop/src-tauri/tests/pipeline_test.rs`). TURN relay fallback for strict/symmetric NATs is stubbed but not implemented (STUN-only is enough for same-LAN peers, which is what this demo needs). Windows/macOS support, multi-service stacks beyond app+DB, and anything past a single share→run flow are unbuilt by design — see the MVP scope note above.
+This was built and tested inside WSL2 Ubuntu, which has no display attached, so `cargo tauri dev`/`build` producing an actual visible window — and the review screen actually being legible and correct to a human — hasn't been confirmed visually by an agent; that check is done by hand, on a real machine, using `scripts/demo-review-screen.sh` above. Everything up to that (the app compiling, launching without a panic, and the exact data the screen would render being correct) is verified by `apps/desktop/src-tauri/tests/pipeline_test.rs` and `preload_test.rs`. Windows/macOS support, multi-service stacks beyond app+DB, and anything past a single share→run flow are unbuilt by design — see the MVP scope note above.
