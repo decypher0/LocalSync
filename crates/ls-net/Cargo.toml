@@ -18,3 +18,7 @@ webrtc = "0.8"
 # Only used by the nat_peer example (payload integrity check) and the
 # TURN-still-prefers-direct test - not needed by the library itself.
 sha2 = "0.10"
+# Only used by the nat_peer example, to surface webrtc-rs/webrtc-sctp's
+# `log` output (RUST_LOG=webrtc_sctp=trace) when diagnosing transport
+# stalls - opt-in, silent unless RUST_LOG is set.
+env_logger = "0.11"
