@@ -61,7 +61,7 @@ const SIGNALING_IP: &str = "10.99.99.3";
 const PEER_A_IP: &str = "10.99.99.4";
 const PEER_B_IP: &str = "10.99.99.5";
 const SIGNALING_PORT: u16 = 9090;
-const PAYLOAD_SIZE: usize = 4096; // see nat_peer.rs: larger sizes reproducibly stall cross-process
+const PAYLOAD_SIZE: usize = 20_000; // realistic snapshot scale: sample-project measures ~18,487 bytes (crates/ls-snapshot/examples/make_snapshot.rs); send_payload/receive_payload's backpressure+completion-ack fix (see lib.rs doc comments) removed the former 4096-byte cross-process stall ceiling
 
 const CONTAINERS: &[&str] = &[
     "ls-nat-peer-a",
