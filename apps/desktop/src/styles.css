@@ -71,7 +71,10 @@ input[type="text"] {
   font-size: 0.95rem;
 }
 .inline-row { display: flex; gap: 8px; }
-.inline-row input { flex: 1; }
+.inline-row input[type="text"] { flex: 1; }
+.mode-title { display: block; margin: 14px 0 4px; font-size: 0.85rem; color: var(--muted); }
+.radio-label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 0.9rem; color: var(--fg); }
+.radio-label input { width: auto; }
 
 button { font-size: 0.9rem; cursor: pointer; border-radius: 6px; }
 .primary-btn, .danger-btn {
@@ -123,6 +126,19 @@ button:disabled { opacity: 0.5; cursor: default; }
   font-size: 0.88rem;
   color: var(--muted);
 }
+
+.peer-banner {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--card);
+  border-left: 3px solid var(--accent);
+  font-size: 0.88rem;
+}
+.hint-inline { color: var(--muted); font-size: 0.82rem; margin-left: 4px; }
+.peer-remember-row { margin-top: 8px; }
+.peer-remember-row input[type="text"] { width: auto; flex: 1; }
+.reject-btn { margin-top: 16px; color: var(--danger); border-color: var(--danger); }
 
 .manifest-card {
   border: 1px solid var(--border);

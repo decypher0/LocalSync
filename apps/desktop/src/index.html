@@ -15,15 +15,21 @@
   <p id="firewall-banner" class="warn hidden"></p>
 
   <section id="settings-panel" class="settings-panel hidden">
-    <label>
-      Signaling server URL (optional — advanced/manual setup)
-      <input id="signaling-url" type="text" placeholder="leave blank for automatic LAN discovery" />
-      <span class="hint">
-        LocalSync normally hosts its own signaling relay and derives a room code
-        automatically — you don't need this. Set it only to point at a manually
-        run signaling server instead (e.g. for a non-LAN setup); when set, it
-        overrides automatic discovery on both Send and Receive.
+    <div>
+      <span class="mode-title">Connection mode</span>
+      <span class="inline-row">
+        <label class="radio-label"><input type="radio" name="relay-mode" id="mode-local" value="local" checked /> Local network</label>
+        <label class="radio-label"><input type="radio" name="relay-mode" id="mode-remote" value="remote" /> Remote relay</label>
       </span>
+      <span class="hint">
+        Local network: LocalSync hosts its own signaling relay automatically — nothing to
+        configure. Remote relay: for peers on different networks, both apps must point at
+        the same separately-hosted relay (see README) — enter its address once, it's saved.
+      </span>
+    </div>
+    <label id="relay-url-wrap" class="hidden">
+      Remote relay URL
+      <input id="relay-url" type="text" placeholder="ws://your-vps-ip:9090" />
     </label>
     <label>
       LOCALSYNC_DATA_DIR (informational — set as an env var before launch; see README)
@@ -93,6 +99,21 @@
         <div class="manifest-row"><span class="k">Services</span><span id="m-services" class="v"></span></div>
       </div>
 
+      <!-- ---- Sender identity: recognized-peer banner (connection-level info only) ---- -->
+      <div id="peer-recognized" class="peer-banner hidden">
+        Recognized peer: <strong id="peer-recognized-name"></strong>
+        <span id="peer-recognized-since" class="hint-inline"></span>
+      </div>
+      <div id="peer-new" class="peer-banner hidden">
+        <span>New sender — haven't seen this identity before.</span>
+        <span class="inline-row peer-remember-row">
+          <input id="peer-remember-name" type="text" placeholder="Remember as…" />
+          <button id="peer-remember-btn" class="ghost-btn" type="button">Save</button>
+        </span>
+        <span id="peer-remember-done" class="hint hidden">Saved — future receives from this sender will show as recognized.</span>
+        <p id="peer-remember-error" class="error"></p>
+      </div>
+
       <h3>Diff summary</h3>
       <p id="diff-totals" class="diff-totals"></p>
       <div id="diff-body" class="diff-groups"></div>
@@ -101,7 +122,11 @@
         Work directory (where the sandbox gets unpacked)
         <input id="work-dir" type="text" value="/tmp/localsync-work" />
       </label>
-      <button id="run-btn" class="danger-btn" type="button">Run</button>
+      <span class="inline-row">
+        <button id="run-btn" class="danger-btn" type="button">Run</button>
+        <button id="reject-btn" class="ghost-btn reject-btn" type="button">Reject</button>
+      </span>
+      <p id="reject-error" class="error"></p>
 
       <div id="run-progress-wrap" class="progress-wrap hidden">
         <div class="run-status">

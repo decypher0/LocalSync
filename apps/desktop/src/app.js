@@ -26,13 +26,38 @@ $("settings-toggle").addEventListener("click", () => {
 });
 $("data-dir-display").value = "(read at launch; not editable here)";
 
-// The Settings field is now an optional escape hatch (manual/advanced
-// setup) rather than the normal path — normal Send/Receive derives
-// room_id/signaling_url automatically via start_send_session/decode_room_code
-// below. An empty override means "use automatic LAN discovery".
-function manualSignalingUrl() {
-  return $("signaling-url").value.trim();
+// ---------- relay mode (persisted in localStorage — set once, survives restarts) ----------
+const MODE_KEY = "localsync.relayMode";
+const RELAY_URL_KEY = "localsync.relayUrl";
+
+function relayMode() {
+  return $("mode-remote").checked ? "remote" : "local";
 }
+
+function relayUrl() {
+  return $("relay-url").value.trim();
+}
+
+function updateModeUi() {
+  $("relay-url-wrap").classList.toggle("hidden", relayMode() !== "remote");
+}
+
+$("mode-local").addEventListener("change", () => {
+  updateModeUi();
+  localStorage.setItem(MODE_KEY, relayMode());
+});
+$("mode-remote").addEventListener("change", () => {
+  updateModeUi();
+  localStorage.setItem(MODE_KEY, relayMode());
+});
+$("relay-url").addEventListener("input", () => {
+  localStorage.setItem(RELAY_URL_KEY, relayUrl());
+});
+
+// Restore persisted mode/URL on load.
+if (localStorage.getItem(MODE_KEY) === "remote") $("mode-remote").checked = true;
+$("relay-url").value = localStorage.getItem(RELAY_URL_KEY) || "";
+updateModeUi();
 
 // ---------- tabs ----------
 document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -63,19 +88,24 @@ $("send-btn").addEventListener("click", async () => {
     return;
   }
 
+  const mode = relayMode();
+  const url = relayUrl();
+  if (mode === "remote" && !url) {
+    $("send-error").textContent = "Remote relay URL is required in Settings for Remote relay mode.";
+    return;
+  }
+
   $("send-btn").disabled = true;
 
   try {
-    // start_send_session always hosts the relay + generates a room id (it's
-    // cheap - one bound port). The Settings override, when set, replaces
-    // only the signaling_url handed to share_snapshot below, so the app
-    // still connects through the manually run server instead of the one
-    // just hosted - the escape hatch this round preserves.
-    const info = await invoke("start_send_session");
-    const override = manualSignalingUrl();
+    // "local": hosts an embedded relay + derives a LAN-IP-encoded room code
+    // (unchanged round-8 behavior). "remote": a relay is already running
+    // elsewhere (see README) - only a bare room id is generated, and it IS
+    // the whole paste-able code, since both apps already share the relay URL.
+    const info = await invoke("start_send_session", { mode, relayUrl: mode === "remote" ? url : null });
     const roomId = info.room_id;
-    const signalingUrl = override || info.signaling_url;
-    $("send-room-code-display").textContent = override ? `${roomId} @ ${override}` : info.room_code;
+    const signalingUrl = info.signaling_url;
+    $("send-room-code-display").textContent = info.room_code;
     $("send-code-wrap").classList.remove("hidden");
 
     $("send-progress-wrap").classList.remove("hidden");
@@ -106,6 +136,7 @@ $("send-btn").addEventListener("click", async () => {
 // ---------- receive ----------
 let unlistenReceiveProgress = null;
 let currentSnapshotId = null;
+let currentSenderPubkeyHex = null;
 let currentSessionId = null;
 
 $("receive-btn").addEventListener("click", async () => {
@@ -113,6 +144,13 @@ $("receive-btn").addEventListener("click", async () => {
   $("receive-error").textContent = "";
   if (!roomCode) {
     $("receive-error").textContent = "Room code is required.";
+    return;
+  }
+
+  const mode = relayMode();
+  const url = relayUrl();
+  if (mode === "remote" && !url) {
+    $("receive-error").textContent = "Remote relay URL is required in Settings for Remote relay mode.";
     return;
   }
 
@@ -129,19 +167,9 @@ $("receive-btn").addEventListener("click", async () => {
   });
 
   try {
-    const override = manualSignalingUrl();
-    let roomId;
-    let signalingUrl;
-    if (override) {
-      // Escape hatch, same as today's behavior: the pasted value is the
-      // room id itself, paired with the manually run signaling server.
-      roomId = roomCode;
-      signalingUrl = override;
-    } else {
-      const decoded = await invoke("decode_room_code", { code: roomCode });
-      roomId = decoded.room_id;
-      signalingUrl = decoded.signaling_url;
-    }
+    const decoded = await invoke("decode_room_code", { mode, code: roomCode, relayUrl: mode === "remote" ? url : null });
+    const roomId = decoded.room_id;
+    const signalingUrl = decoded.signaling_url;
 
     // This only verifies + diffs. Nothing from the snapshot executes until
     // the user reviews it below and clicks Run.
@@ -159,12 +187,28 @@ $("receive-btn").addEventListener("click", async () => {
 
 function renderReview(info) {
   currentSnapshotId = info.snapshot_id;
+  currentSenderPubkeyHex = info.sender_pubkey_hex;
   const m = info.manifest;
 
   $("m-project").textContent = m.project_name;
   $("m-commit").textContent = m.git_commit;
   $("m-parent").textContent = m.git_parent_commit || "(none — initial snapshot)";
   $("m-services").textContent = m.services.map((s) => `${s.name} (${s.image_or_build})`).join(", ") || "none";
+
+  // Identity recognition is purely informational - it never affects what's
+  // shown below or what Run/Reject do. See commands::finalize_received_snapshot.
+  $("peer-remember-done").classList.add("hidden");
+  $("peer-remember-error").textContent = "";
+  $("peer-remember-name").value = "";
+  if (info.recognized_peer) {
+    $("peer-recognized").classList.remove("hidden");
+    $("peer-new").classList.add("hidden");
+    $("peer-recognized-name").textContent = info.recognized_peer.name;
+    $("peer-recognized-since").textContent = `(first seen ${info.recognized_peer.first_seen})`;
+  } else {
+    $("peer-recognized").classList.add("hidden");
+    $("peer-new").classList.remove("hidden");
+  }
 
   const diff = info.diff;
   const fileCount = diff.entries.length;
@@ -231,6 +275,42 @@ function renderReview(info) {
   $("review-panel").classList.remove("hidden");
   $("session-panel").classList.add("hidden");
 }
+
+$("peer-remember-btn").addEventListener("click", async () => {
+  $("peer-remember-error").textContent = "";
+  const name = $("peer-remember-name").value.trim();
+  if (!name || !currentSenderPubkeyHex) return;
+  $("peer-remember-btn").disabled = true;
+  try {
+    await invoke("remember_peer", { pubkeyHex: currentSenderPubkeyHex, name });
+    $("peer-remember-done").classList.remove("hidden");
+  } catch (err) {
+    $("peer-remember-done").classList.add("hidden");
+    $("peer-remember-error").textContent = String(err);
+  } finally {
+    $("peer-remember-btn").disabled = false;
+  }
+});
+
+// Connection-level "no" - discards the held snapshot without ever running
+// it, independent of (and no shortcut past) the Run button's own gating.
+$("reject-btn").addEventListener("click", async () => {
+  $("reject-error").textContent = "";
+  if (!currentSnapshotId) return;
+  $("reject-btn").disabled = true;
+  try {
+    await invoke("reject_snapshot", { snapshotId: currentSnapshotId });
+    currentSnapshotId = null;
+    currentSenderPubkeyHex = null;
+    $("review-panel").classList.add("hidden");
+    $("receive-idle").classList.remove("hidden");
+    $("receive-progress-wrap").classList.add("hidden");
+  } catch (err) {
+    $("reject-error").textContent = String(err);
+  } finally {
+    $("reject-btn").disabled = false;
+  }
+});
 
 let unlistenRunProgress = null;
 

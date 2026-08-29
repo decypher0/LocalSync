@@ -47,6 +47,23 @@ fn preload_snapshot(state: &AppState) -> Option<commands::IncomingSnapshotInfo> 
         let diff = ls_security::diff_summary(&verified)?;
         let manifest = verified.snapshot().manifest.clone();
         let snapshot_id = format!("{}@{}", manifest.project_name, manifest.git_commit);
+        let sender_pubkey_hex = manifest.sender_pubkey.iter().map(|b| format!("{b:02x}")).collect();
+
+        // Same non-fatal, informational-only lookup commands::receive_snapshot
+        // does — see its doc comment.
+        let recognized_peer = match ls_security::KnownPeers::load_default() {
+            Ok(peers) => peers.find(&manifest.sender_pubkey).map(|p| commands::RecognizedPeer {
+                name: p.name.clone(),
+                first_seen: p
+                    .first_seen
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| "unknown".to_string()),
+            }),
+            Err(e) => {
+                eprintln!("preload_snapshot: could not load known peers ({e}) — treating as no known peers");
+                None
+            }
+        };
 
         state
             .verified
@@ -54,7 +71,7 @@ fn preload_snapshot(state: &AppState) -> Option<commands::IncomingSnapshotInfo> 
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .insert(snapshot_id.clone(), verified);
 
-        Ok(commands::IncomingSnapshotInfo { snapshot_id, manifest, diff })
+        Ok(commands::IncomingSnapshotInfo { snapshot_id, manifest, diff, sender_pubkey_hex, recognized_peer })
     };
 
     match load() {
@@ -130,6 +147,8 @@ fn main() {
             commands::receive_snapshot,
             commands::run_snapshot,
             commands::stop_session,
+            commands::remember_peer,
+            commands::reject_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");
