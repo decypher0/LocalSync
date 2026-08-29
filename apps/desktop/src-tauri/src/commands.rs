@@ -37,6 +37,21 @@ pub struct IncomingSnapshotInfo {
     pub snapshot_id: String,
     pub manifest: ls_snapshot::Manifest,
     pub diff: ls_security::DiffSummary,
+    /// Hex-encoded `manifest.sender_pubkey` — the frontend needs this to
+    /// round-trip a first-time sender's key into `remember_peer`.
+    pub sender_pubkey_hex: String,
+    /// `Some(...)` if `manifest.sender_pubkey` is already in the local
+    /// known-peers store, `None` for a first-time sender. Purely
+    /// informational — this never affects verification (already done above,
+    /// unconditionally) or the diff-review-then-Run gate below.
+    pub recognized_peer: Option<RecognizedPeer>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RecognizedPeer {
+    pub name: String,
+    /// RFC3339 string — simplest thing that round-trips over IPC/JSON.
+    pub first_seen: String,
 }
 
 /// Returned by [`start_send_session`]. `room_code` is what the user shows
@@ -68,17 +83,37 @@ pub struct RunningSessionInfo {
     pub db_cache_hit: bool,
 }
 
-/// Starts an embedded signaling relay on the LAN and derives a room code
-/// from it, so nobody has to run a separate signaling-server process or
-/// type its address. The frontend shows `room_code` to the user, then
-/// calls the existing, unmodified `share_snapshot(project_path, room_id,
-/// signaling_url)` with the machine-derived `room_id`/`signaling_url`.
+/// Starts a send session in one of two modes:
 ///
-/// The relay's background task is intentionally left detached (dropping a
-/// `tokio::JoinHandle` does not abort it) - see `ls_net::host_ephemeral_relay`'s
-/// doc comment for why that's fine at this app's scale.
+/// - `mode == "local"` (default/round-8 behavior, unchanged): hosts an
+///   embedded signaling relay on the LAN and derives a room code from it, so
+///   nobody has to run a separate signaling-server process or type its
+///   address. `room_code` packs the relay's LAN IP + port + room id.
+/// - `mode == "remote"`: a relay is already running elsewhere (self-hosted
+///   `apps/signaling-server`, see README) at `relay_url` — nothing gets
+///   hosted here. `room_code` is just the bare room id: since both apps
+///   already have the same `relay_url` configured locally, the id alone is
+///   the whole paste-able code.
+///
+/// Either way, the frontend shows `room_code` to the user, then calls the
+/// existing, unmodified `share_snapshot(project_path, room_id,
+/// signaling_url)` with the returned `room_id`/`signaling_url`.
+///
+/// The relay's background task (local mode only) is intentionally left
+/// detached (dropping a `tokio::JoinHandle` does not abort it) - see
+/// `ls_net::host_ephemeral_relay`'s doc comment for why that's fine at this
+/// app's scale.
 #[tauri::command]
-pub async fn start_send_session() -> Result<SendSessionInfo, String> {
+pub async fn start_send_session(mode: String, relay_url: Option<String>) -> Result<SendSessionInfo, String> {
+    if mode == "remote" {
+        let signaling_url = relay_url
+            .filter(|u| !u.trim().is_empty())
+            .ok_or("relay_url is required in remote mode")?;
+        let room_id = ls_net::generate_room_id();
+        log::info!("start_send_session: remote mode, relay={signaling_url}, room_id={room_id}");
+        return Ok(SendSessionInfo { room_code: room_id.clone(), room_id, signaling_url });
+    }
+
     let (port, _relay_task) = ls_net::host_ephemeral_relay().await.map_err(|e| e.to_string())?;
     let lan_ip = ls_net::detect_lan_ip().map_err(|e| e.to_string())?;
     let room_id = ls_net::generate_room_id();
@@ -91,8 +126,20 @@ pub async fn start_send_session() -> Result<SendSessionInfo, String> {
 
 /// Decodes a room code pasted by the user into the `room_id`/`signaling_url`
 /// pair the existing, unmodified `receive_snapshot` needs.
+///
+/// `mode == "local"` (unchanged): `code` is the packed LAN-IP/port/room-id
+/// string `ls_net::decode_room_code` unpacks. `mode == "remote"`: `code` IS
+/// the room id (see `start_send_session`) - paired with the locally
+/// configured `relay_url`.
 #[tauri::command]
-pub fn decode_room_code(code: String) -> Result<DecodedRoomCode, String> {
+pub fn decode_room_code(mode: String, code: String, relay_url: Option<String>) -> Result<DecodedRoomCode, String> {
+    if mode == "remote" {
+        let signaling_url = relay_url
+            .filter(|u| !u.trim().is_empty())
+            .ok_or("relay_url is required in remote mode")?;
+        return Ok(DecodedRoomCode { room_id: code, signaling_url });
+    }
+
     let (addr, room_id) = ls_net::decode_room_code(&code).map_err(|e| e.to_string())?;
     let signaling_url = format!("ws://{}:{}", addr.ip(), addr.port());
     Ok(DecodedRoomCode { room_id, signaling_url })
@@ -190,7 +237,23 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     })?;
 
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let info = finalize_received_snapshot(&state, snapshot)?;
+    log::info!("receive_snapshot: done, id={}", info.snapshot_id);
+    Ok(info)
+}
 
+/// Everything `receive_snapshot` does *after* the bytes are off the wire:
+/// verify, diff, look up the sender's identity in the local known-peers
+/// store, and hold the verified snapshot in `AppState`. Split out from
+/// `receive_snapshot` so this — the actual consent-gate-relevant logic — is
+/// callable from a test without a live P2P connection (`ls_net`'s WebRTC
+/// handshake needs a real network and can't run in every CI/sandbox); the
+/// network hop itself is `ls_net`'s own concern and already covered by
+/// `tests/send_flow_test.rs`.
+pub fn finalize_received_snapshot(
+    state: &State<'_, AppState>,
+    snapshot: ls_snapshot::Snapshot,
+) -> Result<IncomingSnapshotInfo, String> {
     // Trust-on-first-use: empty trusted_keys accepts any signature that
     // checks out. Documented MVP behavior (crates/ls-security/src/verify.rs)
     // — a real keyring UI is out of scope here.
@@ -198,6 +261,25 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     let diff = ls_security::diff_summary(&verified).map_err(|e| e.to_string())?;
     let manifest = verified.snapshot().manifest.clone();
     let snapshot_id = format!("{}@{}", manifest.project_name, manifest.git_commit);
+    let sender_pubkey_hex = to_hex(&manifest.sender_pubkey);
+
+    // Identity *recognition* only — this runs after verification above has
+    // already unconditionally succeeded, and only annotates the info handed
+    // to the review screen. It cannot make receive_snapshot fail, and it
+    // does not touch state.verified/run_snapshot's gate at all.
+    let recognized_peer = match ls_security::KnownPeers::load_default() {
+        Ok(peers) => peers.find(&manifest.sender_pubkey).map(|p| RecognizedPeer {
+            name: p.name.clone(),
+            first_seen: p
+                .first_seen
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| "unknown".to_string()),
+        }),
+        Err(e) => {
+            log::warn!("receive_snapshot: could not load known peers ({e}) — treating as no known peers");
+            None
+        }
+    };
 
     state
         .verified
@@ -205,8 +287,50 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
         .map_err(|e| e.to_string())?
         .insert(snapshot_id.clone(), verified);
 
-    log::info!("receive_snapshot: done, id={snapshot_id}");
-    Ok(IncomingSnapshotInfo { snapshot_id, manifest, diff })
+    Ok(IncomingSnapshotInfo { snapshot_id, manifest, diff, sender_pubkey_hex, recognized_peer })
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(s: &str) -> Result<[u8; 32], String> {
+    if s.len() != 64 {
+        return Err(format!("expected a 64-character hex string, got {} characters", s.len()));
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("invalid hex at byte {i}: {e}"))?;
+    }
+    Ok(out)
+}
+
+/// Saves (or renames) a sender's pubkey in the local known-peers store, so a
+/// future receive from the same key shows up as recognized. Purely local
+/// bookkeeping — does not touch the wire protocol, verification, or any held
+/// snapshot.
+#[tauri::command]
+pub fn remember_peer(pubkey_hex: String, name: String) -> Result<(), String> {
+    let pubkey = from_hex(&pubkey_hex)?;
+    let mut peers = ls_security::KnownPeers::load_default().map_err(|e| e.to_string())?;
+    peers.remember(pubkey, name).map_err(|e| e.to_string())
+}
+
+/// An explicit "no" at the connection-level review gate: discards a held
+/// verified snapshot without ever running it. Independent of (not a
+/// shortcut past) the separate Run gate in `run_snapshot` — this only ever
+/// removes from `state.verified`, the same map `run_snapshot` uses, and
+/// never calls `ls_containers::run_snapshot`.
+#[tauri::command]
+pub fn reject_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Result<(), String> {
+    state
+        .verified
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&snapshot_id)
+        .map(|_| ())
+        .ok_or_else(|| format!("no held snapshot with id {snapshot_id}"))
 }
 
 /// Polls `ls_containers::ProvisioningLog::open_default()`'s file for lines

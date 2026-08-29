@@ -265,3 +265,56 @@ Same as above: the review screen appears on the receiver, click Run, then
 
 Same as the rest of this document — the point of this round's changes is
 resilience/clarity around the existing flow, not a new end state to check.
+
+---
+
+## Round 10 addendum: remote relay mode, and known-peer pairing
+
+### What changed
+
+- **Settings now has a real "Connection mode" choice**: **Local network**
+  (default — round 8's behavior, unchanged) or **Remote relay**, which shows
+  a "Remote relay URL" field. Set once, it's saved (survives restarts) — no
+  more re-typing a manual signaling URL every time.
+- **Remote relay mode is for peers on different networks**, where a LAN IP
+  in the room code is useless. Both apps point at the same self-hosted
+  `apps/signaling-server` instance (see the README's new self-hosting
+  section) — room codes are still one short paste-able string, just without
+  an IP baked in.
+- **The review screen now shows who's sending.** A recognized returning
+  sender shows "Recognized peer: `<name>`"; a first-time sender shows "New
+  sender" with a "Remember as…" field to name and save them for next time.
+  **This is informational only** — it changes nothing about what you need to
+  do before Run. A new **Reject** button next to Run discards the received
+  snapshot immediately without running it, for either case.
+
+### What to redo
+
+1. **Remote relay, same-network stand-in**: on two machines (or two app
+   instances on one machine, different `LOCALSYNC_DATA_DIR`), self-host
+   `apps/signaling-server` per the README, put its address into both apps'
+   Settings → Remote relay, do a normal Send/Receive/Run. Confirm the room
+   code is one short string (no manual URL typed anywhere except the
+   one-time relay setup), and that it works exactly like Local network mode
+   otherwise. If you have access to two genuinely different networks, that's
+   the real test this round exists for — a relay reachable from both sides
+   (a public VPS, or one side's router port-forwarded) is what proves the
+   original "share with anyone, anywhere" case actually works again.
+2. Switch back to **Local network** mode and confirm Send/Receive still work
+   exactly as in round 8/9 — this must be unaffected.
+3. **Peer pairing**: do a Receive from a sender for the first time — confirm
+   the review screen says "New sender", type a name, click Save, confirm it
+   confirms saved. Do another Receive from the *same* sender (same machine's
+   `~/.localsync/identity.key` — don't regenerate it) — confirm this time it
+   shows "Recognized peer: `<the name you saved>`".
+4. On a recognized-peer receive, confirm the diff/Run/Reject buttons behave
+   completely normally — recognizing a peer must never pre-fill, skip, or
+   auto-click anything. Try **Reject** once on a snapshot you don't intend to
+   run — confirm it clears back to the idle Receive screen without touching
+   Podman at all.
+
+### What "success" looks like
+
+Same as the rest of this document for the actual Run flow. The new-this-round
+checks are about the *setup and recognition* steps behaving as described,
+not a new curl/health-check target.
