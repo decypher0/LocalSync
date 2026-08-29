@@ -121,8 +121,13 @@ never received an offer. Here's what changed and what to check on retry.
 ### What to redo
 
 1. Update both machines to this build.
-2. Same setup as before: signaling server reachable from both machines, firewall rule
-   in place on Windows.
+2. Same setup as before: signaling server reachable from both machines. The Windows
+   installer now adds the inbound TCP/UDP firewall rule itself at install time (NSIS
+   post-install hook running `netsh advfirewall firewall add rule ...`, removed again
+   on uninstall) — no manual `New-NetFirewallRule` step needed any more. On Linux, if
+   `ufw` is active the app logs a warning to `send.log` and shows a banner at startup;
+   allow LocalSync through `ufw` if Send/Receive hangs (the port is dynamic — chosen
+   when you click Send, not fixed).
 3. **Use the new Browse button** instead of typing the path, on whichever side is
    sending.
 4. Click Send. If it stalls again, note how long you waited, then check the log
@@ -150,3 +155,72 @@ Same as step 6 above (`curl .../health` → `200 {"status":"UP"}`) — but now r
 from *either* stack: if you're testing with `sample-project-node/` instead of
 `sample-project/`, the equivalent check is `GET /api/notes` returning the seeded rows
 on whatever port the session screen shows.
+
+---
+
+## Round 8 addendum: no more manual signaling server, and a real Linux picker fix
+
+### What changed
+
+- **Signaling is embedded now.** Send no longer needs `apps/signaling-server`
+  running as a separate process anywhere — clicking **Send** hosts an ephemeral
+  relay inside the app itself and shows you one short code (e.g.
+  `0007Y2N5wKp2mQ`) that packs your LAN IP, the relay's port, and a room id.
+  Paste that single code into the receiver's **Room code** field — nothing
+  else to type. Same-box round-trip through this exact path is covered by
+  `crates/ls-net/tests/embedded_relay_test.rs`; real cross-machine reachability
+  is still what *this* checklist is for. The old "Signaling server URL" field
+  still exists under **Settings**, now optional — leave it blank for the
+  normal flow above; set it only if you want to point both sides at a
+  manually run server instead (e.g. relaying through a box neither machine's
+  LAN can reach directly).
+- **Windows Firewall rule is automatic.** The NSIS installer now adds the
+  inbound TCP/UDP rule for the installed binary at install time (and removes
+  it on uninstall) — no manual `New-NetFirewallRule` step. Not re-verified by
+  installing on real Windows hardware this round (that's what this checklist
+  is for) — if Send/Receive still can't connect, check Windows Defender
+  Firewall's inbound rules for "LocalSync" as the first thing to confirm.
+- **Linux `ufw` gets a real warning.** If `ufw` is active, the app now shows a
+  banner at startup and logs it to `send.log` — the port is dynamic (chosen
+  when you click Send), so there's no fixed rule to add in advance; allow
+  LocalSync through `ufw` (or disable it for the test) if the relay never
+  gets reached.
+- **The Linux "Browse…" picker's actual root cause** (silently doing nothing
+  when clicked, since round 7): confirmed by reading the exact pinned
+  `rfd`/`tauri-plugin-dialog` source — the default Linux backend
+  (`gtk3`) drives the file picker through a *second*, privately-spawned GTK
+  thread that's independent of the GTK main loop Tauri's webview already
+  owns on the real main thread. Most desktop Linux setups tolerate this;
+  it's the same class of bug Tauri itself has open issues about
+  (`tauri-apps/tauri#11312`, "GTK may only be used from the main thread").
+  Fixed by switching to the `xdg-portal` backend instead (asks the
+  out-of-process `xdg-desktop-portal` D-Bus service for the picker — no
+  second in-process GTK loop, so this class of bug can't happen). Requires
+  `xdg-desktop-portal` plus a backend for your desktop (`xdg-desktop-portal-gtk`
+  for GNOME/generic, `-kde` for KDE, etc.) — standard on any mainstream
+  Linux desktop, but **please confirm Browse actually opens a picker** on
+  your real machine as part of this retest; a from-scratch sandbox with no
+  desktop environment at all couldn't give a clean interactive confirmation
+  this round the way real hardware can.
+- **Bundling now skips noise directories** (`node_modules`, `.git`, `target`,
+  `build`, `dist`, `__pycache__`, `.venv`, `venv`, `vendor`, `.next`, `.nuxt`)
+  even if they were accidentally committed without a `.gitignore` — nothing
+  to check by hand here, just fewer surprises in the diff you review before
+  clicking Run.
+
+### What to redo
+
+1. Update both machines to this build.
+2. On the sender: click **Send**, pick the project with **Browse…**, click
+   **Send** again. Confirm a picker dialog actually opens for Browse (this is
+   the one item this round couldn't verify without real hardware — see above).
+3. Copy the short code shown after Send starts. On the receiver: paste it
+   into **Room code**, click **Receive**. Nothing else to configure on either
+   side unless you're deliberately using the Settings override.
+4. If it stalls, check `send.log` on **the sending machine** as before — same
+   file, same convention (`share_snapshot: starting` onward).
+
+### What "success" looks like
+
+Same as above: the review screen appears on the receiver, click Run, then
+`curl .../health` (or `GET /api/notes` for the Node stack) succeeds.

@@ -26,6 +26,43 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// "no parent given" behavior the manifest contract asks for.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/// Defensive fallback for noise directories that made it into git history
+/// anyway — the common accidental-commit case (no `.gitignore` was ever set
+/// up, or one was added too late to retroactively untrack an
+/// already-committed `node_modules/`). A project whose `.gitignore` is
+/// respected needs none of this: git's own tracking already keeps
+/// untracked/ignored paths out of `git archive`/`git diff` by construction
+/// (an untracked directory was never in a commit to begin with). This list
+/// only matters once a noise directory is genuinely *tracked*, in which case
+/// git would otherwise faithfully include the whole tree. Reasonable,
+/// common build/dependency-directory conventions — not an exhaustive list.
+/// Extend freely; any path with one of these as a path component (at any
+/// depth) is dropped from the payload and from the diff.
+const NOISE_DIR_NAMES: &[&str] = &[
+    "node_modules", // npm/yarn/pnpm
+    ".git",         // nested/embedded git metadata
+    "target",       // cargo/maven/gradle build output
+    "build",        // generic build output (gradle, many JS tools, ...)
+    "dist",         // generic bundled/distributable output
+    "__pycache__",  // Python bytecode cache
+    ".venv",        // Python virtualenv
+    "venv",         // Python virtualenv (alt name)
+    "vendor",       // PHP/Go vendored dependencies
+    ".next",        // Next.js build output
+    ".nuxt",        // Nuxt build output
+];
+
+/// True if any component of `path` is a known noise directory name (see
+/// [`NOISE_DIR_NAMES`]) — i.e. the path lives inside one, at any depth.
+fn has_noise_component(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(name) => {
+            NOISE_DIR_NAMES.iter().any(|noise| name == std::ffi::OsStr::new(noise))
+        }
+        _ => false,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiffStatEntry {
     pub path: String,
@@ -50,7 +87,7 @@ pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Resul
     let diff_stat_json = serde_json::to_vec_pretty(&diff_stat)?;
 
     let diff_patch = match parent_commit {
-        Some(parent) => git_text(project_root, &["diff", &format!("{parent}..HEAD")])?,
+        Some(parent) => filter_noise_from_patch(&git_text(project_root, &["diff", &format!("{parent}..HEAD")])?),
         None => String::new(),
     };
 
@@ -165,6 +202,9 @@ fn build_diff_stat(project_root: &Path, parent_commit: Option<&str>) -> Result<V
         let ins = parts.next().unwrap_or("0");
         let del = parts.next().unwrap_or("0");
         let path = parts.next().unwrap_or("").to_string();
+        if has_noise_component(Path::new(&path)) {
+            continue;
+        }
         let change_type = status_map.get(&path).copied().unwrap_or("modified").to_string();
         entries.push(DiffStatEntry {
             path,
@@ -175,6 +215,45 @@ fn build_diff_stat(project_root: &Path, parent_commit: Option<&str>) -> Result<V
         });
     }
     Ok(entries)
+}
+
+/// Drops per-file blocks touching a [`NOISE_DIR_NAMES`] path from a `git
+/// diff` text patch. A patch is a sequence of blocks, each starting with a
+/// `diff --git a/<path> b/<path>` header line — that header line (not the
+/// `--- `/`+++ ` lines, which are absent for pure mode-change blocks) is
+/// where every block's path(s) live, so it's what this parses.
+fn filter_noise_from_patch(patch: &str) -> String {
+    if patch.is_empty() {
+        return String::new();
+    }
+    let mut blocks: Vec<&str> = Vec::new();
+    let mut start = 0;
+    for (i, _) in patch.match_indices("\ndiff --git ") {
+        blocks.push(&patch[start..=i]);
+        start = i + 1;
+    }
+    blocks.push(&patch[start..]);
+
+    blocks.into_iter().filter(|b| !block_touches_noise(b)).collect()
+}
+
+/// Parses a patch block's `diff --git a/<old> b/<new>` header line and
+/// checks both sides against [`has_noise_component`]. Splitting `a/<old>
+/// b/<new>` on the first `" b/"` is a well-known heuristic (ambiguous only
+/// for paths that themselves contain the literal substring `" b/"`) — good
+/// enough for a denylist fallback, not worth a full patch-header parser.
+fn block_touches_noise(block: &str) -> bool {
+    let Some(first_line) = block.lines().next() else {
+        return false;
+    };
+    let Some(rest) = first_line.trim_start().strip_prefix("diff --git a/") else {
+        return false;
+    };
+    let Some(idx) = rest.find(" b/") else {
+        return false;
+    };
+    let (old_path, new_path) = (&rest[..idx], &rest[idx + 3..]);
+    has_noise_component(Path::new(old_path)) || has_noise_component(Path::new(new_path))
 }
 
 #[derive(Deserialize, Default)]
@@ -263,6 +342,9 @@ fn append_git_archive<W: Write>(tb: &mut tar::Builder<W>, archive_bytes: &[u8], 
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
+        if has_noise_component(&path) {
+            continue;
+        }
         let new_path = Path::new(prefix).join(&path);
         let mut header = entry.header().clone();
         tb.append_data(&mut header, &new_path, &mut entry)
