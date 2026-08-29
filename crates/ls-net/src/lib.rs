@@ -26,7 +26,12 @@
 //! the MVP; revisit if connection setup time on real NATs becomes a
 //! problem.
 
+mod discovery;
 mod signaling;
+
+pub use discovery::{
+    decode_room_code, detect_lan_ip, encode_room_code, generate_room_id, host_ephemeral_relay,
+};
 
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;

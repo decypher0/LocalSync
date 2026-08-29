@@ -66,6 +66,27 @@ fn preload_snapshot(state: &AppState) -> Option<commands::IncomingSnapshotInfo> 
     }
 }
 
+/// Real friction this covers: on Linux, an active `ufw` firewall silently
+/// drops the incoming P2P connection a Receive needs, with nothing in the
+/// app to explain why it hung. Checks `ufw status` (most machines don't
+/// have `ufw` installed at all - that's not a problem, just skip silently
+/// via `.ok()?`) and returns a user-facing message if it's active. No fixed
+/// port number is named since the signaling/WebRTC ports are dynamic.
+fn ufw_warning() -> Option<String> {
+    let output = std::process::Command::new("ufw").arg("status").output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("Status: active") {
+        Some(
+            "ufw (firewall) is active on this machine. It may block incoming P2P \
+             connections - if Send/Receive hangs, you may need to allow LocalSync \
+             through ufw for the port it uses when you click Send."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 fn main() {
     // As early as possible, so every later stage (bundling, signing,
     // signaling connect, transfer, ...) is captured from the start.
@@ -79,7 +100,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(move |app| {
-            if let Some(info) = preload_info {
+            let firewall_msg = ufw_warning();
+            if let Some(msg) = &firewall_msg {
+                log::warn!("startup: {msg}");
+            }
+            if firewall_msg.is_some() || preload_info.is_some() {
                 let handle = app.handle().clone();
                 // ponytail: fixed delay to dodge the startup race against the
                 // frontend's listen() call (setup() can run before app.js has
@@ -88,12 +113,19 @@ fn main() {
                 // invoke command instead of guessing a delay.
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(400));
-                    let _ = handle.emit("preload-review", info);
+                    if let Some(msg) = firewall_msg {
+                        let _ = handle.emit("firewall-warning", msg);
+                    }
+                    if let Some(info) = preload_info {
+                        let _ = handle.emit("preload-review", info);
+                    }
                 });
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::start_send_session,
+            commands::decode_room_code,
             commands::share_snapshot,
             commands::receive_snapshot,
             commands::run_snapshot,

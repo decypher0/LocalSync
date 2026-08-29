@@ -12,10 +12,18 @@
     <button id="settings-toggle" class="ghost-btn" type="button">Settings</button>
   </header>
 
+  <p id="firewall-banner" class="warn hidden"></p>
+
   <section id="settings-panel" class="settings-panel hidden">
     <label>
-      Signaling server URL
-      <input id="signaling-url" type="text" value="ws://localhost:9090" />
+      Signaling server URL (optional — advanced/manual setup)
+      <input id="signaling-url" type="text" placeholder="leave blank for automatic LAN discovery" />
+      <span class="hint">
+        LocalSync normally hosts its own signaling relay and derives a room code
+        automatically — you don't need this. Set it only to point at a manually
+        run signaling server instead (e.g. for a non-LAN setup); when set, it
+        overrides automatic discovery on both Send and Receive.
+      </span>
     </label>
     <label>
       LOCALSYNC_DATA_DIR (informational — set as an env var before launch; see README)
@@ -38,14 +46,12 @@
         <button id="browse-project-path" class="ghost-btn" type="button">Browse…</button>
       </span>
     </label>
-    <label class="room-row">
-      Room code
-      <span class="inline-row">
-        <input id="send-room-code" type="text" placeholder="e.g. 7421" />
-        <button id="generate-room-code" class="ghost-btn" type="button">Generate</button>
-      </span>
-    </label>
     <button id="send-btn" class="primary-btn" type="button">Send</button>
+
+    <div id="send-code-wrap" class="room-code-wrap hidden">
+      <span class="hint">Share this code with the receiver:</span>
+      <code id="send-room-code-display" class="room-code-display"></code>
+    </div>
 
     <div id="send-progress-wrap" class="progress-wrap hidden">
       <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
@@ -60,8 +66,8 @@
     <div id="receive-idle">
       <h2>Receive a project</h2>
       <label>
-        Room code
-        <input id="receive-room-code" type="text" placeholder="e.g. 7421" />
+        Room code (paste the code the sender gave you)
+        <input id="receive-room-code" type="text" placeholder="e.g. 0007Y2N5wKp2mQ" />
       </label>
       <button id="receive-btn" class="primary-btn" type="button">Receive</button>
 

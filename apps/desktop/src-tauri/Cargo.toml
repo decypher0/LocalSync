@@ -9,7 +9,20 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
+# Real root cause of the Linux "Browse..." picker not appearing (round 8):
+# the default "gtk3" feature drives rfd's dialog through a *second*,
+# privately-spawned GTK thread (rfd::backend::gtk3::utils::GtkGlobalThread
+# calls gtk_init_check + gtk_main_iteration on its own thread) that's
+# independent of the GTK main loop Tauri's webview already owns on the real
+# main thread - the same class of "GTK may only be used from the main
+# thread" hazard Tauri itself has open bugs about (tauri-apps/tauri#11312).
+# Most desktop Linux setups get away with it; WSLg's compositor didn't.
+# "xdg-portal" instead asks the out-of-process xdg-desktop-portal service
+# over D-Bus for the picker - no second in-process GTK loop, so this class
+# of bug can't happen. Needs xdg-desktop-portal + a backend (e.g.
+# xdg-desktop-portal-gtk) installed, which is the standard modern-Linux-DE
+# setup, GNOME/KDE/etc. all ship one out of the box.
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

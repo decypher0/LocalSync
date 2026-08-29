@@ -14,14 +14,24 @@ const $ = (id) => document.getElementById(id);
 // mockup. See scripts/demo-review-screen.sh.
 listen("preload-review", (evt) => renderReview(evt.payload));
 
+// ---------- firewall warning (Linux ufw active at startup) ----------
+listen("firewall-warning", (evt) => {
+  $("firewall-banner").textContent = evt.payload;
+  $("firewall-banner").classList.remove("hidden");
+});
+
 // ---------- settings ----------
 $("settings-toggle").addEventListener("click", () => {
   $("settings-panel").classList.toggle("hidden");
 });
 $("data-dir-display").value = "(read at launch; not editable here)";
 
-function signalingUrl() {
-  return $("signaling-url").value.trim() || "ws://localhost:9090";
+// The Settings field is now an optional escape hatch (manual/advanced
+// setup) rather than the normal path — normal Send/Receive derives
+// room_id/signaling_url automatically via start_send_session/decode_room_code
+// below. An empty override means "use automatic LAN discovery".
+function manualSignalingUrl() {
+  return $("signaling-url").value.trim();
 }
 
 // ---------- tabs ----------
@@ -34,13 +44,6 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
-function randomRoomCode() {
-  return Math.floor(1000 + Math.random() * 9000).toString();
-}
-$("generate-room-code").addEventListener("click", () => {
-  $("send-room-code").value = randomRoomCode();
-});
-
 // ---------- send ----------
 $("browse-project-path").addEventListener("click", async () => {
   const dir = await open({ directory: true, multiple: false });
@@ -51,32 +54,45 @@ let unlistenSendProgress = null;
 
 $("send-btn").addEventListener("click", async () => {
   const projectPath = $("project-path").value.trim();
-  const roomCode = $("send-room-code").value.trim();
   $("send-error").textContent = "";
   $("send-result").textContent = "";
+  $("send-code-wrap").classList.add("hidden");
 
-  if (!projectPath || !roomCode) {
-    $("send-error").textContent = "Project path and room code are both required.";
+  if (!projectPath) {
+    $("send-error").textContent = "Project path is required.";
     return;
   }
 
   $("send-btn").disabled = true;
-  $("send-progress-wrap").classList.remove("hidden");
-  setProgress("send-progress-bar", 0);
-  $("send-progress-label").textContent = "Connecting to peer…";
-
-  if (unlistenSendProgress) unlistenSendProgress();
-  unlistenSendProgress = await listen("share-progress", (evt) => {
-    const { bytes, total } = evt.payload;
-    setProgress("send-progress-bar", total ? (bytes / total) * 100 : 0);
-    $("send-progress-label").textContent = `Sending… ${formatBytes(bytes)} / ${formatBytes(total)}`;
-  });
 
   try {
+    // start_send_session always hosts the relay + generates a room id (it's
+    // cheap - one bound port). The Settings override, when set, replaces
+    // only the signaling_url handed to share_snapshot below, so the app
+    // still connects through the manually run server instead of the one
+    // just hosted - the escape hatch this round preserves.
+    const info = await invoke("start_send_session");
+    const override = manualSignalingUrl();
+    const roomId = info.room_id;
+    const signalingUrl = override || info.signaling_url;
+    $("send-room-code-display").textContent = override ? `${roomId} @ ${override}` : info.room_code;
+    $("send-code-wrap").classList.remove("hidden");
+
+    $("send-progress-wrap").classList.remove("hidden");
+    setProgress("send-progress-bar", 0);
+    $("send-progress-label").textContent = "Connecting to peer…";
+
+    if (unlistenSendProgress) unlistenSendProgress();
+    unlistenSendProgress = await listen("share-progress", (evt) => {
+      const { bytes, total } = evt.payload;
+      setProgress("send-progress-bar", total ? (bytes / total) * 100 : 0);
+      $("send-progress-label").textContent = `Sending… ${formatBytes(bytes)} / ${formatBytes(total)}`;
+    });
+
     const snapshotId = await invoke("share_snapshot", {
       projectPath,
-      roomCode,
-      signalingUrl: signalingUrl(),
+      roomCode: roomId,
+      signalingUrl,
     });
     $("send-progress-label").textContent = "Sent.";
     $("send-result").textContent = `Sent as ${snapshotId}`;
@@ -113,11 +129,25 @@ $("receive-btn").addEventListener("click", async () => {
   });
 
   try {
+    const override = manualSignalingUrl();
+    let roomId;
+    let signalingUrl;
+    if (override) {
+      // Escape hatch, same as today's behavior: the pasted value is the
+      // room id itself, paired with the manually run signaling server.
+      roomId = roomCode;
+      signalingUrl = override;
+    } else {
+      const decoded = await invoke("decode_room_code", { code: roomCode });
+      roomId = decoded.room_id;
+      signalingUrl = decoded.signaling_url;
+    }
+
     // This only verifies + diffs. Nothing from the snapshot executes until
     // the user reviews it below and clicks Run.
     const info = await invoke("receive_snapshot", {
-      roomCode,
-      signalingUrl: signalingUrl(),
+      roomCode: roomId,
+      signalingUrl,
     });
     renderReview(info);
   } catch (err) {

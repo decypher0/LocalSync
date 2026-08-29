@@ -91,6 +91,19 @@ button { font-size: 0.9rem; cursor: pointer; border-radius: 6px; }
 }
 button:disabled { opacity: 0.5; cursor: default; }
 
+.room-code-wrap { margin-top: 16px; }
+.room-code-display {
+  display: block;
+  margin-top: 6px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 1.1rem;
+  letter-spacing: 0.05em;
+  user-select: all;
+}
+
 .progress-wrap { margin-top: 16px; }
 .progress-track {
   height: 8px;

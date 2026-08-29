@@ -31,6 +31,25 @@ pub struct IncomingSnapshotInfo {
     pub diff: ls_security::DiffSummary,
 }
 
+/// Returned by [`start_send_session`]. `room_code` is what the user shows
+/// the receiver (paste-able, spoken aloud); `room_id`/`signaling_url` are
+/// what the frontend hands straight to the existing, unmodified
+/// `share_snapshot`.
+#[derive(Clone, Serialize)]
+pub struct SendSessionInfo {
+    pub room_code: String,
+    pub room_id: String,
+    pub signaling_url: String,
+}
+
+/// Returned by [`decode_room_code`]. Hand straight to the existing,
+/// unmodified `receive_snapshot`.
+#[derive(Clone, Serialize)]
+pub struct DecodedRoomCode {
+    pub room_id: String,
+    pub signaling_url: String,
+}
+
 #[derive(Serialize)]
 pub struct RunningSessionInfo {
     /// Equal to `RunningSession::compose_project_name` — hand this back to
@@ -39,6 +58,36 @@ pub struct RunningSessionInfo {
     pub project_name: String,
     pub service_ports: Vec<(String, String)>,
     pub db_cache_hit: bool,
+}
+
+/// Starts an embedded signaling relay on the LAN and derives a room code
+/// from it, so nobody has to run a separate signaling-server process or
+/// type its address. The frontend shows `room_code` to the user, then
+/// calls the existing, unmodified `share_snapshot(project_path, room_id,
+/// signaling_url)` with the machine-derived `room_id`/`signaling_url`.
+///
+/// The relay's background task is intentionally left detached (dropping a
+/// `tokio::JoinHandle` does not abort it) - see `ls_net::host_ephemeral_relay`'s
+/// doc comment for why that's fine at this app's scale.
+#[tauri::command]
+pub async fn start_send_session() -> Result<SendSessionInfo, String> {
+    let (port, _relay_task) = ls_net::host_ephemeral_relay().await.map_err(|e| e.to_string())?;
+    let lan_ip = ls_net::detect_lan_ip().map_err(|e| e.to_string())?;
+    let room_id = ls_net::generate_room_id();
+    let addr = std::net::SocketAddrV4::new(lan_ip, port);
+    let room_code = ls_net::encode_room_code(addr, &room_id);
+    let signaling_url = format!("ws://{lan_ip}:{port}");
+    log::info!("start_send_session: hosting relay on {signaling_url}, room_code={room_code}");
+    Ok(SendSessionInfo { room_code, room_id, signaling_url })
+}
+
+/// Decodes a room code pasted by the user into the `room_id`/`signaling_url`
+/// pair the existing, unmodified `receive_snapshot` needs.
+#[tauri::command]
+pub fn decode_room_code(code: String) -> Result<DecodedRoomCode, String> {
+    let (addr, room_id) = ls_net::decode_room_code(&code).map_err(|e| e.to_string())?;
+    let signaling_url = format!("ws://{}:{}", addr.ip(), addr.port());
+    Ok(DecodedRoomCode { room_id, signaling_url })
 }
 
 /// Bundles `project_path` into a signed snapshot and sends it to whoever
