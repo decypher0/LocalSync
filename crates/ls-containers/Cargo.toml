@@ -12,10 +12,15 @@ anyhow = "1"
 serde_yaml = "0.9"
 flate2 = "1"
 tar = "0.4"
+time = { version = "0.3", features = ["formatting"] }
+# Cross-platform OS data-dir lookup (%APPDATA%, ~/Library/Application Support,
+# ~/.local/share) for provisioning.rs's log file - avoids hand-rolling
+# per-OS path logic and avoids needing Tauri's AppHandle threaded through
+# run_snapshot just to find a log path.
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"
-time = "0.3"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 serde_json = "1"

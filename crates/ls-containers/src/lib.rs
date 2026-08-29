@@ -10,6 +10,9 @@
 
 mod compose;
 mod podman;
+mod provisioning;
+
+pub use provisioning::{ensure_podman_ready, ProvisioningLog};
 
 use anyhow::{Context, Result};
 use ls_security::VerifiedSnapshot;
@@ -40,14 +43,22 @@ pub struct RunningSession {
 /// this), point any MySQL service at the deterministic seed-hash-keyed
 /// volume, and bring the project up via `podman-compose`.
 pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Result<RunningSession> {
-    anyhow::ensure!(
-        podman::podman_available(),
-        "podman not found on PATH — run scripts/setup-linux-deps.sh"
-    );
-    anyhow::ensure!(
-        podman::podman_compose_available(),
-        "podman-compose not found on PATH — run scripts/setup-linux-deps.sh"
-    );
+    // On Linux this is close to the old bare availability checks; on
+    // Windows/macOS it actually attempts to provision Podman (installing it
+    // and/or starting its VM) rather than just failing. Every step is
+    // logged to ProvisioningLog::open_default()'s file regardless of
+    // platform. Falls back to a stderr-only log if the OS data dir can't be
+    // determined, rather than blocking the run over a logging problem.
+    match ProvisioningLog::open_default() {
+        Ok(log) => provisioning::ensure_podman_ready(&log).await?,
+        Err(e) => {
+            eprintln!("provisioning log unavailable ({e:#}), continuing without one");
+            anyhow::ensure!(
+                podman::podman_available() && podman::podman_compose_available(),
+                "podman/podman-compose not found on PATH"
+            );
+        }
+    }
 
     let manifest = &verified.snapshot().manifest;
 
