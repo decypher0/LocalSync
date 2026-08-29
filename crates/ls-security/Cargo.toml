@@ -13,7 +13,12 @@ sha2 = "0.10"
 tar = "0.4"
 flate2 = "1"
 anyhow = "1"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+# Cross-platform OS data-dir lookup (%APPDATA%, ~/Library/Application
+# Support, ~/.local/share) for peers.rs's known_peers.json - same convention
+# ls-containers's ProvisioningLog already uses for its own log file.
+dirs = "5"
 
 [dev-dependencies]
 rand = "0.8"
-time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+tempfile = "3"
