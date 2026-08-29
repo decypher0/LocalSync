@@ -1,0 +1,42 @@
+services:
+  app:
+    build: ./app
+    ports:
+      - "8080:8080"
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: localsync_demo
+      PGUSER: localsync
+      PGPASSWORD: localsync_demo_pw # ponytail: demo-only throwaway credential, not a secret worth managing
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # podman-compose orders container *starts* by depends_on but doesn't
+    # reliably block until the health check passes, so the app can come up
+    # and try to connect before Postgres is really ready. restart: on-failure
+    # is the standard belt-and-suspenders fix: it just tries again.
+    restart: on-failure
+
+  postgres:
+    # Fully-qualified: rootless Podman doesn't ship with
+    # unqualified-search-registries configured by default.
+    image: docker.io/library/postgres:16
+    environment:
+      POSTGRES_DB: localsync_demo
+      POSTGRES_USER: localsync
+      POSTGRES_PASSWORD: localsync_demo_pw # ponytail: demo-only throwaway credential, not a secret worth managing
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db-seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "localsync", "-d", "localsync_demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  # Generic name on purpose — LocalSync's container-orchestration module
+  # rewrites this to a content-hashed volume name at runtime. Standalone
+  # `docker compose up` / `podman-compose up` just uses this name as-is.
+  db-data:
