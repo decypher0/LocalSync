@@ -45,38 +45,58 @@ pub struct RunningSessionInfo {
 /// joins `room_code` on the signaling server. Returns the id
 /// (`project_name@git_commit`) the sender can use to recognize their own
 /// send in the UI.
+// Generic over the Tauri `Runtime` (defaults to none picked here - the real
+// app binds it to `Wry` via `invoke_handler!`) rather than the concrete
+// `AppHandle` (= `AppHandle<Wry>`) alias, so `tests/send_flow_test.rs` can
+// call this directly with a `tauri::test::mock_app()`'s `AppHandle<MockRuntime>`
+// - the actual point of that test: exercising this exact function, not a
+// re-implementation of it, against a runtime that doesn't need a display.
 #[tauri::command]
-pub async fn share_snapshot(
-    app: AppHandle,
+pub async fn share_snapshot<R: tauri::Runtime>(
+    app: AppHandle<R>,
     project_path: String,
     room_code: String,
     signaling_url: String,
 ) -> Result<String, String> {
+    log::info!("share_snapshot: starting for project_path={project_path} room={room_code}");
     let root = PathBuf::from(project_path);
     // create_snapshot shells out to git and walks the filesystem — blocking
     // work that has no business running on the async command's task.
     let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot(&root, None))
         .await
         .map_err(|e| format!("snapshot task panicked: {e}"))?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::warn!("share_snapshot: create_snapshot failed: {e}");
+            e.to_string()
+        })?;
 
     let snapshot_id = format!("{}@{}", snapshot.manifest.project_name, snapshot.manifest.git_commit);
+    log::info!("share_snapshot: snapshot created, id={snapshot_id}");
 
     // Same wire format ls-snapshot's own save_to_file uses: plain JSON,
     // payload bytes riding along as a JSON byte array. Simplest thing that
     // works with the (de)serializers ls-snapshot already ships.
     let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
 
+    log::info!("share_snapshot: connecting to signaling");
     let conn = ls_net::connect_as_sender(&signaling_url, &room_code)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::warn!("share_snapshot: connect_as_sender failed: {e}");
+            e.to_string()
+        })?;
+    log::info!("share_snapshot: data channel open, sending payload ({} bytes)", bytes.len());
 
     ls_net::send_payload(&conn, &bytes, |sent, total| {
         let _ = app.emit("share-progress", Progress { bytes: sent, total });
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        log::warn!("share_snapshot: send_payload failed: {e}");
+        e.to_string()
+    })?;
 
+    log::info!("share_snapshot: done, id={snapshot_id}");
     Ok(snapshot_id)
 }
 
@@ -85,22 +105,32 @@ pub async fn share_snapshot(
 /// returns the manifest + diff for the review screen. Does **not** unpack
 /// `source/` or touch containers; the verified snapshot is held in
 /// `AppState` until (and unless) the user clicks Run.
+// Generic over `R: tauri::Runtime` for the same reason as share_snapshot
+// above.
 #[tauri::command]
-pub async fn receive_snapshot(
-    app: AppHandle,
+pub async fn receive_snapshot<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     room_code: String,
     signaling_url: String,
 ) -> Result<IncomingSnapshotInfo, String> {
+    log::info!("receive_snapshot: starting for room={room_code}");
     let conn = ls_net::connect_as_receiver(&signaling_url, &room_code)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::warn!("receive_snapshot: connect_as_receiver failed: {e}");
+            e.to_string()
+        })?;
+    log::info!("receive_snapshot: data channel open, receiving payload");
 
     let bytes = ls_net::receive_payload(&conn, |received, total| {
         let _ = app.emit("receive-progress", Progress { bytes: received, total });
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        log::warn!("receive_snapshot: receive_payload failed: {e}");
+        e.to_string()
+    })?;
 
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
 
@@ -118,6 +148,7 @@ pub async fn receive_snapshot(
         .map_err(|e| e.to_string())?
         .insert(snapshot_id.clone(), verified);
 
+    log::info!("receive_snapshot: done, id={snapshot_id}");
     Ok(IncomingSnapshotInfo { snapshot_id, manifest, diff })
 }
 

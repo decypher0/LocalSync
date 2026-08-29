@@ -16,6 +16,13 @@ anyhow = "1"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 # Minimal docker-compose.yml read (service name/image/build/ports/depends_on).
 serde_yaml = "0.9"
+# Pure no-op facade until a logger is installed (apps/desktop/src-tauri does
+# that once, at startup) - lets bundle.rs/sign.rs emit log::info!/warn! calls
+# without this crate depending on Tauri or any file I/O.
+log = "0.4"
+# Timeout on the `git` subprocesses bundle.rs shells out to - see git_bytes's
+# doc comment. std::process::Command has no built-in timeout support.
+wait-timeout = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -9,9 +9,18 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# Pure no-op facade until send_log installs a logger at startup - see
+# src/send_log.rs. "std" feature needed here (only here - this is the one
+# crate that actually installs a logger) for set_boxed_logger.
+log = { version = "0.4", features = ["std"] }
+# OS data-dir lookup for send_log.rs's log file - same crate + convention
+# ls-containers's ProvisioningLog uses for provisioning.log.
+dirs = "5"
+time = { version = "0.3", features = ["formatting"] }
 
 ls-snapshot = { path = "../../../crates/ls-snapshot" }
 ls-net = { path = "../../../crates/ls-net" }
@@ -21,3 +30,8 @@ ls-containers = { path = "../../../crates/ls-containers" }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+# Cargo unifies dev-dependency features into the dependency only for test
+# builds (not the shipped app) - this is what makes tauri::test::mock_app()
+# etc. available to tests/send_flow_test.rs without shipping test scaffolding
+# in the real binary.
+tauri = { version = "2", features = ["test"] }

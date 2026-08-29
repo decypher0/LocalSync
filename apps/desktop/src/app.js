@@ -3,6 +3,7 @@
 // so `window.__TAURI__` is available without an npm dependency.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const { open } = window.__TAURI__.dialog;
 
 const $ = (id) => document.getElementById(id);
 
@@ -41,6 +42,11 @@ $("generate-room-code").addEventListener("click", () => {
 });
 
 // ---------- send ----------
+$("browse-project-path").addEventListener("click", async () => {
+  const dir = await open({ directory: true, multiple: false });
+  if (dir) $("project-path").value = dir;
+});
+
 let unlistenSendProgress = null;
 
 $("send-btn").addEventListener("click", async () => {

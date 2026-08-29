@@ -88,3 +88,65 @@ can't have caught without real hardware.
 
 That's enough for both of us to know exactly where it broke without needing to
 reproduce your machine.
+
+---
+
+## Round 7 addendum: retesting the real Send flow (Windows ⇄ Linux)
+
+This directly follows up the real two-machine test that found the sender stalling
+indefinitely at the bundling step, with the receiver eventually timing out having
+never received an offer. Here's what changed and what to check on retry.
+
+### What changed
+
+- **`git_bytes` (the function behind every git call `create_snapshot` makes) is now
+  hardened**: stdin is explicitly closed (a subprocess can no longer block waiting on
+  input from a GUI app with no terminal), `--no-pager` is passed defensively, and every
+  git call now has a real 30-second timeout instead of none. If bundling ever blocks
+  again, it will fail with a clear, specific error after 30s — not hang forever. (We
+  could not reproduce the original hang on our own test hardware; this is a real,
+  verified hardening pass against the most likely cause, not a confirmed-exact fix —
+  if it happens again, the log below will show exactly which git command it's stuck on
+  this time, which we didn't have before.)
+- **A new `send.log`**, same convention as `provisioning.log` (below), covering the
+  *whole* Send flow: bundling (each git command + timing), signing, connecting to the
+  signaling server, offer/answer creation, ICE gathering, data channel open, and
+  transfer progress. If Send stalls or fails again, this is the file to check first.
+- **A "Browse…" button** next to the project-path field on the Send tab — no more
+  typing an absolute path by hand.
+- STUN was already a real, always-available public server (`stun.l.google.com:19302`,
+  unconditional since round 1) — confirmed this is *not* what caused the original
+  failure, so no change was needed there.
+
+### What to redo
+
+1. Update both machines to this build.
+2. Same setup as before: signaling server reachable from both machines, firewall rule
+   in place on Windows.
+3. **Use the new Browse button** instead of typing the path, on whichever side is
+   sending.
+4. Click Send. If it stalls again, note how long you waited, then check the log
+   (below) *on the sending machine* rather than just the receiving one's timeout
+   message — that's where the useful detail will be this time.
+
+### The new log file
+
+Same location convention as `provisioning.log`, different file:
+- **Windows**: `%APPDATA%\localsync\logs\send.log`
+- **Linux**: `~/.local/share/localsync/logs/send.log`
+- **macOS**: `~/Library/Application Support/localsync/logs/send.log`
+
+Copy everything from the last `share_snapshot: starting` (sender) or
+`receive_snapshot: starting` (receiver) line onward. A healthy run's log looks like:
+bundling started → each git command with its timing → bundling done → signing →
+connecting to signaling → offer created → ICE gathering complete → offer sent → data
+channel open → transfer progress → done. **Whichever of those lines is the *last* one
+in the log is where it actually stopped** — that's the single most useful thing to
+report back, more useful than the error text alone.
+
+### What "success" looks like this time
+
+Same as step 6 above (`curl .../health` → `200 {"status":"UP"}`) — but now reachable
+from *either* stack: if you're testing with `sample-project-node/` instead of
+`sample-project/`, the equivalent check is `GET /api/notes` returning the seeded rows
+on whatever port the session screen shows.

@@ -4,11 +4,21 @@ use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
 
 use crate::types::ServiceDef;
+
+/// Every `git_bytes` call is a fast, local, read-only operation, even
+/// against a large real repo (verified: `git archive --format=tar HEAD`
+/// against this repo itself takes well under a second). 30s is generous
+/// headroom for an unusually large repo while still failing fast, and
+/// firmly finite — see `git_bytes`'s doc comment for what this guards
+/// against.
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Git's well-known empty-tree object — diffing against it makes "no parent
 /// commit" just a regular diff (base = empty tree), instead of a separate
@@ -31,6 +41,7 @@ pub struct GitBundle {
 }
 
 pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Result<GitBundle> {
+    log::info!("bundling started: project_root={}", project_root.display());
     let git_commit = git_text(project_root, &["rev-parse", "HEAD"])?
         .trim()
         .to_string();
@@ -79,6 +90,12 @@ pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Resul
 
     let gz = tb.into_inner().context("finalizing tar")?;
     let payload = gz.finish().context("finalizing gzip")?;
+
+    log::info!(
+        "bundling done: commit={} payload_bytes={}",
+        git_commit,
+        payload.len()
+    );
 
     Ok(GitBundle {
         payload,
@@ -258,15 +275,80 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(git_bytes(root, args)?)?)
 }
 
+/// Runs one read-only `git` subprocess and returns its stdout.
+///
+/// Hardened against a real hang a manual two-machine test hit in the field
+/// (sender stalled indefinitely before ever producing an offer, with
+/// nothing in the network layer to blame): `Command::output()` leaves
+/// **stdin inherited from the parent**, which in the real app is a GUI
+/// process with no controlling terminal, and applies **no timeout** to the
+/// child. If any git invocation ever blocked — an unusual
+/// `core.pager`/credential-helper config, or anything else — `bundle_project`,
+/// and the whole Send flow behind it (`share_snapshot` awaits this before
+/// doing anything else), would hang forever with zero feedback. Three
+/// layers, each closing a different door:
+///   1. `--no-pager` right after `-C <root>`: belt-and-suspenders against a
+///      pager even attempting to start (git only pages when stdout is a
+///      tty, which a piped `Command` never is — verified directly against
+///      this repo with `core.pager` set — but this makes it structurally
+///      impossible rather than "shouldn't happen").
+///   2. `.stdin(Stdio::null())`: a child can't block waiting for input that
+///      is explicitly closed, removing the most likely hang vector outright.
+///   3. A real [`GIT_TIMEOUT`], via the `wait-timeout` crate (`std::process`
+///      has no built-in timeout). stdout/stderr are drained on background
+///      threads *while* waiting — not after, like `Command::output()`'s
+///      approach would suggest — because a large `git archive` can write
+///      more than the OS pipe buffer holds; reading only after `wait`
+///      returns would deadlock the exact way this function exists to avoid.
 fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new("git")
+    let start = Instant::now();
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(root)
+        .arg("--no-pager")
         .args(args)
-        .output()
-        .with_context(|| format!("running git {args:?}"))?;
-    if !out.status.success() {
-        bail!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawning git {args:?}"))?;
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let status = match child
+        .wait_timeout(GIT_TIMEOUT)
+        .with_context(|| format!("waiting on git {args:?}"))?
+    {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            log::warn!("git {args:?} in {} timed out after {GIT_TIMEOUT:?}", root.display());
+            bail!("git {args:?} did not finish within {GIT_TIMEOUT:?} (root: {})", root.display());
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    let elapsed = start.elapsed();
+
+    if !status.success() {
+        log::warn!("git {args:?} failed after {elapsed:?}: {}", String::from_utf8_lossy(&stderr));
+        bail!("git {args:?} failed: {}", String::from_utf8_lossy(&stderr));
     }
-    Ok(out.stdout)
+    log::info!("git {args:?} completed in {elapsed:?} ({} bytes)", stdout.len());
+    Ok(stdout)
 }
