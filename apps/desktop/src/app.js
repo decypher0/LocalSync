@@ -167,19 +167,64 @@ function renderReview(info) {
   $("m-services").textContent = m.services.map((s) => `${s.name} (${s.image_or_build})`).join(", ") || "none";
 
   const diff = info.diff;
-  $("diff-totals").textContent = `+${diff.total_insertions} / -${diff.total_deletions} across ${diff.entries.length} file(s)`;
+  const fileCount = diff.entries.length;
+  $("diff-totals").innerHTML =
+    `<span class="file-count">${fileCount} file${fileCount === 1 ? "" : "s"} changed</span>` +
+    `<span class="ins-del">+${diff.total_insertions} / -${diff.total_deletions}</span>`;
 
   const body = $("diff-body");
   body.innerHTML = "";
+
+  // Group by directory (everything before the last "/" in the path) so a
+  // real project with files spread across many dirs doesn't render as one
+  // flat wall. Files with no "/" (repo-root files) get their own bucket.
+  const groups = new Map();
   for (const entry of diff.entries) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="path">${escapeHtml(entry.path)}</td>
-      <td><span class="badge ${entry.change_type}">${entry.change_type}</span></td>
-      <td class="ins">+${entry.insertions}</td>
-      <td class="del">-${entry.deletions}</td>
-    `;
-    body.appendChild(tr);
+    const slash = entry.path.lastIndexOf("/");
+    const dir = slash === -1 ? "(root)" : entry.path.slice(0, slash);
+    if (!groups.has(dir)) groups.set(dir, []);
+    groups.get(dir).push(entry);
+  }
+  const dirs = [...groups.keys()].sort((a, b) =>
+    a === "(root)" ? -1 : b === "(root)" ? 1 : a.localeCompare(b)
+  );
+
+  // Small diffs (<=12 files total): open everything, nothing to hide.
+  // Larger diffs: only auto-collapse the directories that are themselves
+  // large (>5 files) — small groups stay open since they're cheap to scan.
+  const openAll = fileCount <= 12;
+
+  for (const dir of dirs) {
+    const entries = groups.get(dir);
+    const details = document.createElement("details");
+    details.className = "diff-group";
+    details.open = openAll || entries.length <= 5;
+
+    const summary = document.createElement("summary");
+    summary.innerHTML =
+      `<span class="diff-group-name">${escapeHtml(dir)}</span>` +
+      `<span class="diff-group-count">${entries.length} file${entries.length === 1 ? "" : "s"}</span>`;
+    details.appendChild(summary);
+
+    const table = document.createElement("table");
+    table.className = "diff-table";
+    table.innerHTML = "<thead><tr><th>File</th><th>Change</th><th>+</th><th>-</th></tr></thead><tbody></tbody>";
+    const tbody = table.querySelector("tbody");
+    for (const entry of entries) {
+      // Show the path relative to its group heading — the directory is
+      // already shown once, in the summary.
+      const name = dir === "(root)" ? entry.path : entry.path.slice(dir.length + 1);
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="path">${escapeHtml(name)}</td>
+        <td><span class="badge ${entry.change_type}">${entry.change_type}</span></td>
+        <td class="ins">+${entry.insertions}</td>
+        <td class="del">-${entry.deletions}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+    details.appendChild(table);
+    body.appendChild(details);
   }
 
   $("receive-idle").classList.add("hidden");
@@ -187,13 +232,41 @@ function renderReview(info) {
   $("session-panel").classList.add("hidden");
 }
 
+let unlistenRunProgress = null;
+
+// Collapsed by default — toggling only shows/hides the log already
+// accumulated in #run-log, doesn't (re)fetch anything.
+$("run-details-toggle").addEventListener("click", () => {
+  const expanded = !$("run-log").classList.contains("hidden");
+  $("run-log").classList.toggle("hidden");
+  $("run-details-toggle").textContent = expanded ? "Show details ▾" : "Hide details ▲";
+  $("run-details-toggle").setAttribute("aria-expanded", String(!expanded));
+});
+
 $("run-btn").addEventListener("click", async () => {
   $("run-error").textContent = "";
   const workDir = $("work-dir").value.trim();
   if (!currentSnapshotId || !workDir) return;
 
   $("run-btn").disabled = true;
-  $("run-btn").textContent = "Starting containers…";
+  $("run-progress-wrap").classList.remove("hidden");
+  $("run-progress-label").textContent = "Starting containers…";
+  // Fresh per attempt — retrying after a fixed environment problem
+  // shouldn't show last attempt's log lines glued onto this one.
+  $("run-log").textContent = "";
+  $("run-log").classList.add("hidden");
+  $("run-details-toggle").textContent = "Show details ▾";
+  $("run-details-toggle").setAttribute("aria-expanded", "false");
+
+  // Registered before invoke so no early line from the backend's tailer is
+  // missed.
+  if (unlistenRunProgress) unlistenRunProgress();
+  unlistenRunProgress = await listen("run-progress", (evt) => {
+    const log = $("run-log");
+    log.textContent += (log.textContent ? "\n" : "") + evt.payload.line;
+    log.scrollTop = log.scrollHeight;
+  });
+
   try {
     // The one call in this app that executes received code — only reachable
     // from this explicit click, after the diff above has been shown.
@@ -206,7 +279,11 @@ $("run-btn").addEventListener("click", async () => {
     $("run-error").textContent = String(err);
   } finally {
     $("run-btn").disabled = false;
-    $("run-btn").textContent = "Run";
+    $("run-progress-wrap").classList.add("hidden");
+    if (unlistenRunProgress) {
+      unlistenRunProgress();
+      unlistenRunProgress = null;
+    }
   }
 });
 
