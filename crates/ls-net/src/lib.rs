@@ -240,18 +240,23 @@ fn wire_data_channel(
 /// channel and sends the initial offer. Room-code pairing means it doesn't
 /// matter whether the sender or receiver connects first.
 pub async fn connect_as_sender(signaling_url: &str, room_code: &str) -> Result<DataChannelConn> {
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         CONNECT_TIMEOUT,
         connect_as_sender_inner(signaling_url, room_code),
     )
-    .await
-    .context("timed out connecting to peer")?
+    .await;
+    if result.is_err() {
+        log::warn!("sender: connect timed out after {CONNECT_TIMEOUT:?}");
+    }
+    result.context("timed out connecting to peer")?
 }
 
 async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result<DataChannelConn> {
     let api = build_api()?;
     let pc = Arc::new(api.new_peer_connection(ice_config()).await?);
+    log::info!("sender: connecting to signaling server {signaling_url} (room {room_code})");
     let (signaling, mut inbound_rx) = SignalingClient::connect(signaling_url, room_code).await?;
+    log::info!("sender: connected to signaling server");
 
     let dc = pc.create_data_channel("data", None).await?;
     let (open_rx, msg_rx) = wire_data_channel(&dc);
@@ -261,21 +266,26 @@ async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result
     let mut gather_complete = pc.gathering_complete_promise().await;
     let offer = pc.create_offer(None).await?;
     pc.set_local_description(offer).await?;
+    log::info!("sender: offer created");
     let _ = gather_complete.recv().await;
+    log::info!("sender: ICE gathering complete");
     let local_desc = pc
         .local_description()
         .await
         .context("no local description after ICE gathering completed")?;
     signaling.send(SignalMsg::Offer { data: local_desc })?;
+    log::info!("sender: offer (SDP) sent");
 
     let answer = recv_sdp(&mut inbound_rx)
         .await
         .context("signaling closed before an answer arrived")?;
+    log::info!("sender: answer received");
     pc.set_remote_description(answer).await?;
 
     open_rx
         .await
         .context("data channel closed before it finished opening")?;
+    log::info!("sender: data channel open");
 
     Ok(DataChannelConn {
         dc,
@@ -288,12 +298,15 @@ async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result
 /// peer's offer, replies with an answer, and receives the data channel the
 /// peer created.
 pub async fn connect_as_receiver(signaling_url: &str, room_code: &str) -> Result<DataChannelConn> {
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         CONNECT_TIMEOUT,
         connect_as_receiver_inner(signaling_url, room_code),
     )
-    .await
-    .context("timed out connecting to peer")?
+    .await;
+    if result.is_err() {
+        log::warn!("receiver: connect timed out after {CONNECT_TIMEOUT:?}");
+    }
+    result.context("timed out connecting to peer")?
 }
 
 async fn connect_as_receiver_inner(
@@ -302,7 +315,9 @@ async fn connect_as_receiver_inner(
 ) -> Result<DataChannelConn> {
     let api = build_api()?;
     let pc = Arc::new(api.new_peer_connection(ice_config()).await?);
+    log::info!("receiver: connecting to signaling server {signaling_url} (room {room_code})");
     let (signaling, mut inbound_rx) = SignalingClient::connect(signaling_url, room_code).await?;
+    log::info!("receiver: connected to signaling server");
 
     // The remote data channel arrives asynchronously via this callback. Its
     // on_open/on_message handlers MUST be registered inside the callback,
@@ -330,17 +345,20 @@ async fn connect_as_receiver_inner(
     let offer = recv_sdp(&mut inbound_rx)
         .await
         .context("signaling closed before an offer arrived")?;
+    log::info!("receiver: offer received");
     pc.set_remote_description(offer).await?;
 
     let mut gather_complete = pc.gathering_complete_promise().await;
     let answer = pc.create_answer(None).await?;
     pc.set_local_description(answer).await?;
     let _ = gather_complete.recv().await;
+    log::info!("receiver: ICE gathering complete");
     let local_desc = pc
         .local_description()
         .await
         .context("no local description after ICE gathering completed")?;
     signaling.send(SignalMsg::Answer { data: local_desc })?;
+    log::info!("receiver: answer (SDP) sent");
 
     let (dc, open_rx, msg_rx) = dc_ready_rx
         .await
@@ -348,6 +366,7 @@ async fn connect_as_receiver_inner(
     open_rx
         .await
         .context("data channel closed before it finished opening")?;
+    log::info!("receiver: data channel open");
 
     Ok(DataChannelConn {
         dc,
@@ -407,12 +426,14 @@ pub async fn send_payload(
     mut on_progress: impl FnMut(usize, usize),
 ) -> Result<()> {
     let total = data.len();
+    log::info!("sender: transfer starting, total_bytes={total}");
     conn.dc
         .send(&Bytes::copy_from_slice(&(total as u64).to_be_bytes()))
         .await
         .context("failed to send length prefix")?;
 
     let mut sent = 0usize;
+    let mut last_logged_decile = 0u8;
     for chunk in data.chunks(CHUNK_SIZE) {
         wait_for_buffered_amount_below(conn, MAX_BUFFERED_AMOUNT).await;
         conn.dc
@@ -421,6 +442,13 @@ pub async fn send_payload(
             .context("failed to send chunk")?;
         sent += chunk.len();
         on_progress(sent, total);
+        // Coarse (every ~10%) progress logging - fine-grained per-chunk
+        // logging would flood send.log on any payload past a few MB.
+        let decile = if total == 0 { 10 } else { (10 * sent / total) as u8 };
+        if decile > last_logged_decile {
+            last_logged_decile = decile;
+            log::info!("sender: transfer progress {sent}/{total} bytes");
+        }
     }
 
     // Proof the receiver actually has everything - see the doc comment for
@@ -436,6 +464,7 @@ pub async fn send_payload(
         "expected the receiver's completion ack, got {} unexpected bytes",
         ack.len()
     );
+    log::info!("sender: transfer done, receiver acked {total} bytes");
     Ok(())
 }
 
@@ -464,8 +493,10 @@ pub async fn receive_payload(
         prefix.len()
     );
     let total = u64::from_be_bytes(prefix[..8].try_into().unwrap()) as usize;
+    log::info!("receiver: transfer starting, total_bytes={total}");
 
     let mut buf = Vec::with_capacity(total);
+    let mut last_logged_decile = 0u8;
     while buf.len() < total {
         let chunk = incoming
             .recv()
@@ -473,6 +504,12 @@ pub async fn receive_payload(
             .context("channel closed before the full payload arrived")?;
         buf.extend_from_slice(&chunk);
         on_progress(buf.len(), total);
+        // Coarse (every ~10%) progress logging - see send_payload's matching comment.
+        let decile = if total == 0 { 10 } else { (10 * buf.len() / total) as u8 };
+        if decile > last_logged_decile {
+            last_logged_decile = decile;
+            log::info!("receiver: transfer progress {}/{total} bytes", buf.len());
+        }
     }
     drop(incoming);
 
@@ -482,6 +519,7 @@ pub async fn receive_payload(
             .await
             .context("failed to send completion ack")?;
     }
+    log::info!("receiver: transfer done, {} bytes", buf.len());
 
     Ok(buf)
 }
