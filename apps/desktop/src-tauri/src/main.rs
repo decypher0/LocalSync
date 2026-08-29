@@ -4,10 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod commands;
-mod state;
-
-use state::AppState;
+use localsync_desktop::{commands, send_log, state::AppState};
 use tauri::Emitter;
 
 /// Two demo instances (sender + receiver) commonly run on the same Linux
@@ -70,12 +67,16 @@ fn preload_snapshot(state: &AppState) -> Option<commands::IncomingSnapshotInfo> 
 }
 
 fn main() {
+    // As early as possible, so every later stage (bundling, signing,
+    // signaling connect, transfer, ...) is captured from the start.
+    send_log::install_default();
     isolate_data_dir_if_set();
 
     let state = AppState::default();
     let preload_info = preload_snapshot(&state);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(move |app| {
             if let Some(info) = preload_info {

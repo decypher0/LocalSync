@@ -33,6 +33,7 @@ pub fn create_snapshot(project_root: &Path, parent_commit: Option<&str>) -> Resu
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "project".to_string());
 
+    log::info!("signing started");
     let identity = sign::load_or_create_identity().context("loading sender identity")?;
 
     let manifest = Manifest {
@@ -47,6 +48,7 @@ pub fn create_snapshot(project_root: &Path, parent_commit: Option<&str>) -> Resu
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &bundle.payload)?;
+    log::info!("signing done");
 
     Ok(Snapshot {
         manifest,

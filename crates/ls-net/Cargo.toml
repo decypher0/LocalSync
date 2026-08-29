@@ -13,6 +13,11 @@ serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-tungstenite = "0.30.0"
 webrtc = "0.8"
+# Pure no-op facade until a logger is installed (apps/desktop/src-tauri does
+# that once, at startup) - lets connect_as_sender/connect_as_receiver emit
+# log::info! calls for each connection-setup stage without this crate
+# depending on Tauri or any file I/O.
+log = "0.4"
 
 [dev-dependencies]
 # Only used by the nat_peer example (payload integrity check) and the

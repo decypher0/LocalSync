@@ -41,6 +41,7 @@ pub fn load_or_create_identity() -> Result<SigningKey> {
                 use std::os::unix::fs::PermissionsExt;
                 file.set_permissions(fs::Permissions::from_mode(0o600))?;
             }
+            log::info!("signing: created new sender identity at {}", path.display());
             Ok(key)
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -48,6 +49,7 @@ pub fn load_or_create_identity() -> Result<SigningKey> {
             let arr: [u8; 32] = bytes
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("identity key file {} is corrupt (expected 32 bytes)", path.display()))?;
+            log::info!("signing: loaded existing sender identity from {}", path.display());
             Ok(SigningKey::from_bytes(&arr))
         }
         Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
