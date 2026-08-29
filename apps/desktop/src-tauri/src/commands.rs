@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::AppState;
 
@@ -149,6 +149,15 @@ pub fn decode_room_code(mode: String, code: String, relay_url: Option<String>) -
 /// joins `room_code` on the signaling server. Returns the id
 /// (`project_name@git_commit`) the sender can use to recognize their own
 /// send in the UI.
+///
+/// Round 11: once the initial transfer succeeds, the connection is *kept
+/// open* rather than dropped — added to `state.connected_receivers` under
+/// `room_code` as `peer_id`, with a background task listening for the
+/// receiver's control-channel messages (currently just
+/// [`ls_net::ControlMessage::PullRequest`], surfaced to the frontend as a
+/// `pull-request` event). This is what makes multiple simultaneous
+/// receivers, targeted push (`push_update`), and pull requests
+/// (`respond_to_pull_request`) possible without a fresh room code each time.
 // Generic over the Tauri `Runtime` (defaults to none picked here - the real
 // app binds it to `Wry` via `invoke_handler!`) rather than the concrete
 // `AppHandle` (= `AppHandle<Wry>`) alias, so `tests/send_flow_test.rs` can
@@ -158,12 +167,13 @@ pub fn decode_room_code(mode: String, code: String, relay_url: Option<String>) -
 #[tauri::command]
 pub async fn share_snapshot<R: tauri::Runtime>(
     app: AppHandle<R>,
+    state: State<'_, AppState>,
     project_path: String,
     room_code: String,
     signaling_url: String,
 ) -> Result<String, String> {
     log::info!("share_snapshot: starting for project_path={project_path} room={room_code}");
-    let root = PathBuf::from(project_path);
+    let root = PathBuf::from(&project_path);
     // create_snapshot shells out to git and walks the filesystem — blocking
     // work that has no business running on the async command's task.
     let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot(&root, None))
@@ -201,6 +211,170 @@ pub async fn share_snapshot<R: tauri::Runtime>(
     })?;
 
     log::info!("share_snapshot: done, id={snapshot_id}");
+
+    let conn = std::sync::Arc::new(conn);
+    state.connected_receivers.lock().map_err(|e| e.to_string())?.insert(
+        room_code.clone(),
+        crate::state::ConnectedReceiver {
+            peer_id: room_code.clone(),
+            connected_at: time::OffsetDateTime::now_utc(),
+            conn: conn.clone(),
+            project_path,
+        },
+    );
+    tauri::async_runtime::spawn(listen_for_pull_requests(app, room_code));
+
+    Ok(snapshot_id)
+}
+
+/// Background task (one per connected receiver): waits for control messages
+/// on `peer_id`'s connection and surfaces a [`ls_net::ControlMessage::PullRequest`]
+/// to the frontend as a `pull-request` event. Ends quietly (no panic, no
+/// retry) once the connection closes or `peer_id` is removed from the
+/// roster (e.g. the receiver disconnected) - there's nothing further useful
+/// to listen for at that point.
+async fn listen_for_pull_requests<R: tauri::Runtime>(app: AppHandle<R>, peer_id: String) {
+    loop {
+        let conn = {
+            let receivers = app.state::<AppState>();
+            let Ok(receivers) = receivers.connected_receivers.lock() else { return };
+            let Some(entry) = receivers.get(&peer_id) else { return };
+            entry.conn.clone()
+        };
+
+        match ls_net::recv_control(&conn).await {
+            Ok(ls_net::ControlMessage::PullRequest) => {
+                log::info!("share_snapshot: pull request from peer_id={peer_id}");
+                let _ = app.emit("pull-request", PullRequestNotice { peer_id: peer_id.clone() });
+            }
+            Ok(other) => {
+                // Only PullRequest ever flows receiver -> sender; anything
+                // else on this side is unexpected but not fatal to the
+                // listener - log and keep waiting.
+                log::warn!("share_snapshot: unexpected control message from receiver: {other:?}");
+            }
+            Err(e) => {
+                log::info!("share_snapshot: control channel for peer_id={peer_id} ended: {e:#}");
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct PullRequestNotice {
+    pub peer_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectedReceiverInfo {
+    pub peer_id: String,
+    /// RFC3339 string — simplest thing that round-trips over IPC/JSON.
+    pub connected_at: String,
+}
+
+/// The sender's current roster (round 11): receivers whose connection is
+/// still open, in the order they connected.
+#[tauri::command]
+pub fn list_connected_receivers(state: State<'_, AppState>) -> Result<Vec<ConnectedReceiverInfo>, String> {
+    let receivers = state.connected_receivers.lock().map_err(|e| e.to_string())?;
+    let mut list: Vec<_> = receivers
+        .values()
+        .map(|r| ConnectedReceiverInfo {
+            peer_id: r.peer_id.clone(),
+            connected_at: r
+                .connected_at
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| "unknown".to_string()),
+        })
+        .collect();
+    list.sort_by(|a, b| a.connected_at.cmp(&b.connected_at));
+    Ok(list)
+}
+
+/// Bundles the *current* state of `peer_id`'s original project (re-reading
+/// it from disk right now — not anything cached from the first send) and
+/// pushes it to that one specific connected receiver, reusing exactly the
+/// same bundle/sign pipeline `share_snapshot` uses for its initial send. No
+/// other connected receiver is touched — this is what makes the push
+/// targeted rather than a broadcast.
+#[tauri::command]
+pub async fn push_update<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    peer_id: String,
+) -> Result<String, String> {
+    let (conn, project_path) = {
+        let receivers = state.connected_receivers.lock().map_err(|e| e.to_string())?;
+        let entry = receivers
+            .get(&peer_id)
+            .ok_or_else(|| format!("no connected receiver with id {peer_id}"))?;
+        (entry.conn.clone(), entry.project_path.clone())
+    };
+    bundle_and_push(&app, &conn, &project_path).await
+}
+
+/// The sender's response to a `pull-request` event. Accepting bundles and
+/// sends the current project state — exactly `push_update`'s pipeline, no
+/// shortcuts. Declining does nothing further (no message is even sent back
+/// — see `ls_net::ControlMessage`'s doc comment: a pull request only ever
+/// asks, it never obligates a reply).
+#[tauri::command]
+pub async fn respond_to_pull_request<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    peer_id: String,
+    accept: bool,
+) -> Result<Option<String>, String> {
+    if !accept {
+        log::info!("respond_to_pull_request: declined for peer_id={peer_id}");
+        return Ok(None);
+    }
+    let (conn, project_path) = {
+        let receivers = state.connected_receivers.lock().map_err(|e| e.to_string())?;
+        let entry = receivers
+            .get(&peer_id)
+            .ok_or_else(|| format!("no connected receiver with id {peer_id}"))?;
+        (entry.conn.clone(), entry.project_path.clone())
+    };
+    bundle_and_push(&app, &conn, &project_path).await.map(Some)
+}
+
+/// Shared by `push_update` and an accepted `respond_to_pull_request`:
+/// bundle+sign `project_path` fresh from disk right now, tell the receiver
+/// one is coming (`ControlMessage::IncomingUpdate`, on the *control*
+/// channel), then send it the normal way (`send_payload`, on the *bulk
+/// transfer* channel — the same one `share_snapshot`'s initial send used).
+async fn bundle_and_push<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &ls_net::DataChannelConn,
+    project_path: &str,
+) -> Result<String, String> {
+    log::info!("bundle_and_push: starting for project_path={project_path}");
+    let root = PathBuf::from(project_path);
+    let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot(&root, None))
+        .await
+        .map_err(|e| format!("snapshot task panicked: {e}"))?
+        .map_err(|e| {
+            log::warn!("bundle_and_push: create_snapshot failed: {e}");
+            e.to_string()
+        })?;
+    let snapshot_id = format!("{}@{}", snapshot.manifest.project_name, snapshot.manifest.git_commit);
+    let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+
+    ls_net::send_control(conn, &ls_net::ControlMessage::IncomingUpdate)
+        .await
+        .map_err(|e| e.to_string())?;
+    ls_net::send_payload(conn, &bytes, |sent, total| {
+        let _ = app.emit("share-progress", Progress { bytes: sent, total });
+    })
+    .await
+    .map_err(|e| {
+        log::warn!("bundle_and_push: send_payload failed: {e}");
+        e.to_string()
+    })?;
+
+    log::info!("bundle_and_push: done, id={snapshot_id}");
     Ok(snapshot_id)
 }
 
@@ -209,6 +383,16 @@ pub async fn share_snapshot<R: tauri::Runtime>(
 /// returns the manifest + diff for the review screen. Does **not** unpack
 /// `source/` or touch containers; the verified snapshot is held in
 /// `AppState` until (and unless) the user clicks Run.
+///
+/// Round 11: once the initial transfer is verified and held, the connection
+/// is kept open — stored in `state.outgoing_conn` (replacing any prior
+/// one), with a background task listening for the sender's control-channel
+/// messages. A `PullRequest` can be sent anytime via `send_pull_request`; if
+/// the sender pushes a fresh update (`ControlMessage::IncomingUpdate`), it's
+/// received the normal way and run through this exact same
+/// `finalize_received_snapshot` pipeline — held, not auto-run, exactly like
+/// any other receive — and surfaced to the frontend as a `snapshot-updated`
+/// event.
 // Generic over `R: tauri::Runtime` for the same reason as share_snapshot
 // above.
 #[tauri::command]
@@ -239,7 +423,90 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let info = finalize_received_snapshot(&state, snapshot)?;
     log::info!("receive_snapshot: done, id={}", info.snapshot_id);
+
+    let conn = std::sync::Arc::new(conn);
+    *state.outgoing_conn.lock().map_err(|e| e.to_string())? = Some(conn.clone());
+    tauri::async_runtime::spawn(listen_for_pushed_updates(app, conn));
+
     Ok(info)
+}
+
+/// Background task (receiver side): waits for the sender to push a fresh
+/// update on `conn`'s control channel. Ends quietly once the connection
+/// closes, or once `state.outgoing_conn` no longer points at *this specific*
+/// connection (the receiver moved on to a different sender) — checked before
+/// acting on an `IncomingUpdate` so a stale listener from a superseded
+/// connection can't clobber `state.verified` after the fact.
+async fn listen_for_pushed_updates<R: tauri::Runtime>(app: AppHandle<R>, conn: std::sync::Arc<ls_net::DataChannelConn>) {
+    loop {
+        match ls_net::recv_control(&conn).await {
+            Ok(ls_net::ControlMessage::IncomingUpdate) => {
+                let state = app.state::<AppState>();
+                let still_current = state
+                    .outgoing_conn
+                    .lock()
+                    .ok()
+                    .map(|g| g.as_ref().is_some_and(|c| std::sync::Arc::ptr_eq(c, &conn)))
+                    .unwrap_or(false);
+                if !still_current {
+                    log::info!("receive_snapshot: pushed update arrived on a superseded connection, ignoring");
+                    return;
+                }
+                log::info!("receive_snapshot: sender is pushing an update, receiving it");
+                let bytes = match ls_net::receive_payload(&conn, |received, total| {
+                    let _ = app.emit("receive-progress", Progress { bytes: received, total });
+                })
+                .await
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("receive_snapshot: receiving pushed update failed: {e:#}");
+                        continue;
+                    }
+                };
+                let snapshot: ls_snapshot::Snapshot = match serde_json::from_slice(&bytes) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("receive_snapshot: pushed update was not a valid snapshot: {e}");
+                        continue;
+                    }
+                };
+                match finalize_received_snapshot(&state, snapshot) {
+                    Ok(info) => {
+                        log::info!("receive_snapshot: pushed update held, id={}", info.snapshot_id);
+                        let _ = app.emit("snapshot-updated", info);
+                    }
+                    Err(e) => log::warn!("receive_snapshot: finalizing pushed update failed: {e}"),
+                }
+            }
+            Ok(other) => {
+                log::warn!("receive_snapshot: unexpected control message from sender: {other:?}");
+            }
+            Err(e) => {
+                log::info!("receive_snapshot: control channel ended: {e:#}");
+                return;
+            }
+        }
+    }
+}
+
+/// Sends a pull request ("do you have anything new?") to whichever sender
+/// this receiver last received from. Carries no payload and never can — see
+/// `ls_net::ControlMessage::PullRequest`'s doc comment. Purely a signal; the
+/// sender decides whether to act on it via `respond_to_pull_request`, and
+/// this function has no way to influence that decision beyond the fact that
+/// it was sent.
+#[tauri::command]
+pub async fn send_pull_request(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state
+        .outgoing_conn
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("not currently connected to a sender")?;
+    ls_net::send_control(&conn, &ls_net::ControlMessage::PullRequest)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Everything `receive_snapshot` does *after* the bytes are off the wire:

@@ -318,3 +318,47 @@ resilience/clarity around the existing flow, not a new end state to check.
 Same as the rest of this document for the actual Run flow. The new-this-round
 checks are about the *setup and recognition* steps behaving as described,
 not a new curl/health-check target.
+
+---
+
+## Round 11 addendum: multiple receivers, targeted push, pull requests
+
+### What changed
+
+- **A sender's connection to each receiver now stays open** after the
+  initial Send, instead of closing once the transfer finishes. This is what
+  makes everything below possible without a fresh room code each time.
+- **Multiple receivers at once.** The Send tab now shows a "Connected
+  receivers" list — every receiver who's received from you and is still
+  connected, each with its own **Push update** button.
+- **Targeted push**: clicking **Push update** next to one specific receiver
+  bundles your project's *current* state and sends it to *that receiver
+  only* — the others don't see anything.
+- **Pull requests**: on the Receive tab, after a successful Receive, an
+  **Ask for update** button asks the sender "got anything new?". The sender
+  sees a banner (can appear on any tab) with **Accept**/**Decline** — Accept
+  triggers the same bundle-and-send Push does; Decline does nothing further.
+  A pushed/pulled update shows up on the receiver's review screen exactly
+  like a fresh Receive — same diff, same Run/Reject buttons, nothing
+  auto-runs.
+
+### What to redo
+
+1. From one sender, Send to **two different receivers** (two app instances,
+   two room codes). Confirm both show up in the sender's "Connected
+   receivers" list at once.
+2. Click **Push update** next to just one of them. Confirm only that
+   receiver's review screen updates (a brief banner, then the diff refreshes)
+   — the other receiver should see nothing.
+3. On the *other* receiver, click **Ask for update**. Confirm the sender
+   sees a pull-request banner naming that receiver, click **Accept**, and
+   confirm that receiver's review screen updates the same way step 2's did.
+4. Try **Decline** once on a pull request — confirm nothing happens on the
+   receiver's side (no update, no error, just... nothing).
+5. On any update received this way (pushed or pulled), confirm Run/Reject
+   work exactly as before — a pushed update is never auto-run.
+
+### What "success" looks like
+
+Same as the rest of this document for the actual Run flow — this round is
+about the *push/pull mechanics and targeting* working as described.

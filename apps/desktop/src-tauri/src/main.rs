@@ -149,6 +149,10 @@ fn main() {
             commands::stop_session,
             commands::remember_peer,
             commands::reject_snapshot,
+            commands::list_connected_receivers,
+            commands::push_update,
+            commands::respond_to_pull_request,
+            commands::send_pull_request,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");

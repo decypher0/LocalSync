@@ -108,6 +108,7 @@ async fn remote_mode_transfers_a_real_payload_via_an_already_running_relay() {
 
     // ---- real transfer through the existing, unmodified commands ----
     let sender_app = tauri::test::mock_app();
+    sender_app.manage(AppState::default());
     let sender_handle = sender_app.handle().clone();
     let receiver_app = tauri::test::mock_app();
     receiver_app.manage(AppState::default());
@@ -117,7 +118,8 @@ async fn remote_mode_transfers_a_real_payload_via_an_already_running_relay() {
     let sender_room = send_info.room_id.clone();
     let sender_url = send_info.signaling_url.clone();
     let sender_task = tokio::spawn(async move {
-        commands::share_snapshot(sender_handle, project_path, sender_room, sender_url).await
+        let state = sender_handle.state::<AppState>();
+        commands::share_snapshot(sender_handle.clone(), state, project_path, sender_room, sender_url).await
     });
 
     let receiver_room = decoded.room_id.clone();
