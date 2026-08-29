@@ -224,3 +224,44 @@ on whatever port the session screen shows.
 
 Same as above: the review screen appears on the receiver, click Run, then
 `curl .../health` (or `GET /api/notes` for the Node stack) succeeds.
+
+---
+
+## Round 9 addendum: retry after a failed Run, the details toggle, the diff view
+
+### What changed
+
+- **A failed Run no longer eats the held snapshot.** If Run fails for an
+  environment reason (Podman not found, a bad work directory, a port
+  already in use, ...) the snapshot stays held — fix whatever broke and
+  click **Run** again on the same review screen, no need to redo Send/Receive.
+- **Run now shows a spinner by default**, with a **Show details ▾** toggle
+  that reveals a small scrollable terminal-style log streaming the real
+  provisioning output live (the same content that's always gone to
+  `provisioning.log` — this just also shows it in the app). Collapsed and
+  cleared fresh on every Run click.
+- **The diff-review screen now groups files by directory** (native
+  collapsible sections, one per directory) with a "N files changed" count
+  up top, instead of one flat table — larger directories inside a big diff
+  start collapsed, everything else starts open.
+
+### What to redo
+
+1. Trigger a Run failure on purpose — easiest way: temporarily rename/move
+   `podman` off `PATH`, or point **Work directory** at a path that can't be
+   created (e.g. a path through an existing file). Confirm the error shows
+   and the review screen is still there with **Run** still clickable — not
+   forced back to Send/Receive.
+2. Fix whatever you broke, click **Run** again on the *same* review screen.
+   Confirm it succeeds without a fresh Send/Receive.
+3. Click **Run** on a normal, working snapshot and click **Show details**
+   while it's provisioning — confirm real log lines stream in (not a static
+   placeholder), and that the log is empty again on the next Run attempt.
+4. On the receiver, look at the diff-review screen for a snapshot with files
+   in multiple directories (either sample project works) — confirm it's
+   grouped by directory with an expand/collapse per group, not one flat list.
+
+### What "success" looks like
+
+Same as the rest of this document — the point of this round's changes is
+resilience/clarity around the existing flow, not a new end state to check.

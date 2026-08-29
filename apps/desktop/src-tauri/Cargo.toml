@@ -34,6 +34,12 @@ log = { version = "0.4", features = ["std"] }
 # ls-containers's ProvisioningLog uses for provisioning.log.
 dirs = "5"
 time = { version = "0.3", features = ["formatting"] }
+# Already pulled in transitively by tauri itself (its async_runtime is a
+# tokio runtime) and already a dev-dependency below for the test harness -
+# promoted to a real dependency so run_snapshot's provisioning-log tailer
+# (commands.rs) can poll the file with tokio::fs/tokio::time instead of
+# blocking a worker thread with std::thread::sleep.
+tokio = { version = "1", features = ["fs", "time"] }
 
 ls-snapshot = { path = "../../../crates/ls-snapshot" }
 ls-net = { path = "../../../crates/ls-net" }
