@@ -223,4 +223,176 @@ mod tests {
         assert_eq!(loaded.payload, snap2.payload);
         assert_eq!(loaded.signature, snap2.signature);
     }
+
+    /// Baseline for the noise-directory denylist added below: git's own
+    /// tracking already keeps an untracked, `.gitignore`'d `node_modules/`
+    /// out of both `git archive HEAD` and a commit-to-commit `git diff` —
+    /// it was never in a commit to begin with, regardless of `.gitignore`.
+    /// A project with a working `.gitignore` in place before the first
+    /// commit needs no denylist at all; this proves that empirically rather
+    /// than assuming it.
+    #[test]
+    fn untracked_gitignored_node_modules_never_reaches_git_at_all() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        git(root, &["init"]);
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::write(root.join("README.md"), "hello\n").unwrap();
+        fs::create_dir_all(root.join("node_modules/some-package")).unwrap();
+        fs::write(root.join("node_modules/some-package/index.js"), "module.exports = {};\n").unwrap();
+        // `git add -A` respects .gitignore: only README.md + .gitignore get staged.
+        commit_all(root, "init");
+
+        let snap = create_snapshot(root, None).unwrap();
+        let files = unpack(&snap.payload);
+        assert!(files.contains_key("source/README.md"));
+        assert!(
+            files.keys().all(|k| !k.contains("node_modules")),
+            "an untracked, gitignored node_modules/ should never reach the payload: {:?}",
+            files.keys().collect::<Vec<_>>()
+        );
+
+        let diff_stat: Vec<DiffStatEntry> = serde_json::from_slice(files.get("diff_stat.json").unwrap()).unwrap();
+        assert!(diff_stat.iter().all(|e| !e.path.contains("node_modules")));
+    }
+
+    /// The real gap: a project where node_modules/ (and app/target/) got
+    /// genuinely *committed* — no .gitignore was ever set up. Git's own
+    /// history offers no protection here; this proves bundle.rs's
+    /// NOISE_DIR_NAMES denylist filters them out anyway, from the initial
+    /// payload, diff_stat.json, and diff.patch alike.
+    #[test]
+    fn accidentally_committed_noise_dirs_are_filtered_by_the_denylist() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        git(root, &["init"]);
+        fs::write(root.join("README.md"), "hello\n").unwrap();
+        fs::create_dir_all(root.join("node_modules/some-package")).unwrap();
+        fs::write(root.join("node_modules/some-package/index.js"), "module.exports = {};\n").unwrap();
+        fs::create_dir_all(root.join("app/target/classes")).unwrap();
+        fs::write(root.join("app/target/classes/Main.class"), [0xCAu8, 0xFE, 0xBA, 0xBE]).unwrap();
+        commit_all(root, "init (accidentally includes node_modules and target)");
+        let first_commit = git_output(root, &["rev-parse", "HEAD"]);
+
+        let snap1 = create_snapshot(root, None).unwrap();
+        let files1 = unpack(&snap1.payload);
+        assert!(files1.contains_key("source/README.md"));
+        assert!(
+            files1.keys().all(|k| !k.contains("node_modules") && !k.contains("/target/")),
+            "tracked noise dirs must still be filtered out of the payload: {:?}",
+            files1.keys().collect::<Vec<_>>()
+        );
+        let diff_stat1: Vec<DiffStatEntry> = serde_json::from_slice(files1.get("diff_stat.json").unwrap()).unwrap();
+        assert!(diff_stat1.iter().all(|e| !e.path.contains("node_modules") && !e.path.contains("target/")));
+        assert!(diff_stat1.iter().any(|e| e.path == "README.md"));
+
+        // Modify a real file *and* a (tracked) noise file, then diff.
+        fs::write(root.join("README.md"), "hello world\n").unwrap();
+        fs::write(root.join("node_modules/some-package/index.js"), "module.exports = { v: 2 };\n").unwrap();
+        commit_all(root, "update readme and node_modules");
+
+        let snap2 = create_snapshot(root, Some(&first_commit)).unwrap();
+        let files2 = unpack(&snap2.payload);
+        let diff_stat2: Vec<DiffStatEntry> = serde_json::from_slice(files2.get("diff_stat.json").unwrap()).unwrap();
+        assert_eq!(
+            diff_stat2.len(),
+            1,
+            "only README.md should show up; the node_modules change must be filtered: {diff_stat2:?}"
+        );
+        assert_eq!(diff_stat2[0].path, "README.md");
+
+        let patch = String::from_utf8(files2.get("diff.patch").unwrap().clone()).unwrap();
+        assert!(patch.contains("README.md"));
+        assert!(!patch.contains("node_modules"), "diff.patch must not mention the filtered noise dir");
+    }
+
+    /// Real repro of the field report, against the actual sample-project-node
+    /// fixture: `npm install` for real (so app/node_modules/ has genuine
+    /// content, not a stand-in), then force it into a fresh commit exactly
+    /// like an accidental `git add -A` with no .gitignore ever set up would.
+    /// The payload/diff must not contain any of it despite it being tracked.
+    #[test]
+    fn real_sample_project_node_with_committed_node_modules_is_filtered() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample-project-node");
+        if !repo_root.is_dir() {
+            eprintln!("sample-project-node not found at {} — skipping", repo_root.display());
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let project_dir = dir.path().join("sample-project-node");
+        fs::create_dir(&project_dir).unwrap();
+        let cp_status = Command::new("cp")
+            .args(["-r", &format!("{}/.", repo_root.display()), &project_dir.display().to_string()])
+            .status()
+            .expect("cp should be available on the test platform (WSL2/macOS/Linux)");
+        assert!(cp_status.success());
+
+        let npm_status = Command::new("npm")
+            .args(["install", "--no-audit", "--no-fund"])
+            .current_dir(project_dir.join("app"))
+            .status()
+            .expect("npm should be on PATH for this test");
+        assert!(npm_status.success(), "npm install failed");
+        assert!(project_dir.join("app/node_modules").is_dir(), "npm install should have created app/node_modules");
+
+        git(&project_dir, &["init"]);
+        // No .gitignore in this copy at all — same shape as the real bug:
+        // node_modules/ gets tracked for real.
+        commit_all(&project_dir, "sample-project-node with node_modules committed");
+
+        let snap = create_snapshot(&project_dir, None).unwrap();
+        let files = unpack(&snap.payload);
+        assert!(files.contains_key("source/app/index.js"));
+        let noisy: Vec<&String> = files.keys().filter(|k| k.contains("node_modules")).collect();
+        assert!(
+            noisy.is_empty(),
+            "tracked app/node_modules/ must still be filtered out of the payload ({} noisy entries, e.g. {:?})",
+            noisy.len(),
+            noisy.iter().take(5).collect::<Vec<_>>()
+        );
+
+        let diff_stat: Vec<DiffStatEntry> = serde_json::from_slice(files.get("diff_stat.json").unwrap()).unwrap();
+        assert!(diff_stat.iter().all(|e| !e.path.contains("node_modules")));
+    }
+
+    /// Same accidental-commit shape as the node_modules test above, against
+    /// sample-project's Maven `app/target/` — proves the denylist isn't
+    /// node_modules-specific.
+    #[test]
+    fn real_sample_project_with_committed_build_output_is_filtered() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample-project");
+        if !repo_root.is_dir() {
+            eprintln!("sample-project not found at {} — skipping", repo_root.display());
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let project_dir = dir.path().join("sample-project");
+        fs::create_dir(&project_dir).unwrap();
+        let cp_status = Command::new("cp")
+            .args(["-r", &format!("{}/.", repo_root.display()), &project_dir.display().to_string()])
+            .status()
+            .expect("cp should be available on the test platform (WSL2/macOS/Linux)");
+        assert!(cp_status.success());
+
+        // Simulate a real Maven build having populated app/target/ before
+        // the accidental `git add -A` that first tracked this project.
+        fs::create_dir_all(project_dir.join("app/target/classes")).unwrap();
+        fs::write(project_dir.join("app/target/classes/Main.class"), [0xCAu8, 0xFE, 0xBA, 0xBE]).unwrap();
+
+        git(&project_dir, &["init"]);
+        commit_all(&project_dir, "sample-project with target/ committed");
+
+        let snap = create_snapshot(&project_dir, None).unwrap();
+        let files = unpack(&snap.payload);
+        assert!(files.contains_key("source/app/pom.xml"));
+        let noisy: Vec<&String> = files.keys().filter(|k| k.contains("/target/")).collect();
+        assert!(
+            noisy.is_empty(),
+            "tracked app/target/ must still be filtered out of the payload: {noisy:?}"
+        );
+    }
 }
