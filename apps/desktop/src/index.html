@@ -93,17 +93,25 @@
         <div class="manifest-row"><span class="k">Services</span><span id="m-services" class="v"></span></div>
       </div>
 
-      <h3>Diff summary <span id="diff-totals" class="diff-totals"></span></h3>
-      <table class="diff-table">
-        <thead><tr><th>File</th><th>Change</th><th>+</th><th>-</th></tr></thead>
-        <tbody id="diff-body"></tbody>
-      </table>
+      <h3>Diff summary</h3>
+      <p id="diff-totals" class="diff-totals"></p>
+      <div id="diff-body" class="diff-groups"></div>
 
       <label>
         Work directory (where the sandbox gets unpacked)
         <input id="work-dir" type="text" value="/tmp/localsync-work" />
       </label>
       <button id="run-btn" class="danger-btn" type="button">Run</button>
+
+      <div id="run-progress-wrap" class="progress-wrap hidden">
+        <div class="run-status">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="run-progress-label">Starting containers…</span>
+        </div>
+        <button id="run-details-toggle" class="link-btn" type="button" aria-expanded="false">Show details ▾</button>
+        <pre id="run-log" class="run-log hidden"></pre>
+      </div>
+
       <p id="run-error" class="error"></p>
     </div>
 

@@ -136,7 +136,25 @@ button:disabled { opacity: 0.5; cursor: default; }
 .manifest-row .v { text-align: right; }
 .mono { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
 
-.diff-totals { font-weight: 400; font-size: 0.85rem; color: var(--muted); }
+.diff-totals { margin: 4px 0 10px; }
+.diff-totals .file-count { font-weight: 600; font-size: 1.05rem; }
+.diff-totals .ins-del { font-weight: 400; font-size: 0.85rem; color: var(--muted); margin-left: 10px; }
+
+.diff-groups { display: flex; flex-direction: column; gap: 8px; }
+.diff-group { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.diff-group summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  background: var(--card);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.9rem;
+}
+.diff-group-count { color: var(--muted); font-family: system-ui, sans-serif; font-size: 0.8rem; }
+.diff-group .diff-table { margin-top: 0; border-top: 1px solid var(--border); }
+
 .diff-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.9rem; }
 .diff-table th {
   text-align: left;
@@ -175,3 +193,46 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .cache-hit { color: var(--added); font-weight: 600; }
 .cache-cold { color: var(--modified); font-weight: 600; }
+
+/* ---- Run flow: collapsed-by-default progress + opt-in details ---- */
+.run-status { display: flex; align-items: center; gap: 8px; }
+.spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.link-btn {
+  display: block;
+  margin-top: 8px;
+  padding: 2px 0;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+/* Real terminal styling on purpose (dark, monospace) regardless of the
+   app's own light/dark theme - this is streaming raw provisioning-log
+   output, it should read like a console, not like the rest of the UI. */
+.run-log {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+  background: #14161a;
+  color: #d8dee9;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

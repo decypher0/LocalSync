@@ -23,6 +23,14 @@ pub struct Progress {
     pub total: usize,
 }
 
+/// One `run-progress` event = one new line tailed live from
+/// `ls_containers::ProvisioningLog`'s file while `run_snapshot` is in
+/// flight. See `tail_provisioning_log` below.
+#[derive(Clone, Serialize)]
+pub struct RunProgress {
+    pub line: String,
+}
+
 #[derive(Clone, Serialize)]
 pub struct IncomingSnapshotInfo {
     /// `"<project_name>@<git_commit>"` — hand this back to `run_snapshot`.
@@ -201,12 +209,66 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     Ok(IncomingSnapshotInfo { snapshot_id, manifest, diff })
 }
 
+/// Polls `ls_containers::ProvisioningLog::open_default()`'s file for lines
+/// appended after this task started (never replays lines from a prior Run)
+/// and emits each as a `run-progress` event, so the frontend's optional
+/// details view can stream `ensure_podman_ready()`'s real output live
+/// instead of showing a fake progress bar. There's no OS-level tail/watch
+/// primitive worth a new dependency for a file this small - a plain poll
+/// loop is the whole thing. `run_snapshot` below aborts this the instant
+/// `ls_containers::run_snapshot` resolves, success or failure.
+///
+/// If the OS data dir can't be determined (same rare case
+/// `ls_containers::run_snapshot` itself falls back on), there's no file to
+/// tail — the details view just stays empty, which is fine, this is a
+/// nice-to-have.
+async fn tail_provisioning_log<R: tauri::Runtime>(app: AppHandle<R>) {
+    let path = match ls_containers::ProvisioningLog::open_default() {
+        Ok(log) => log.path().to_path_buf(),
+        Err(_) => return,
+    };
+    // Start from wherever the file already is - don't replay a previous
+    // Run's history into this attempt's details view.
+    let mut offset = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let Ok(contents) = tokio::fs::read(&path).await else { continue };
+        if (contents.len() as u64) <= offset {
+            continue;
+        }
+        let new_bytes = &contents[offset as usize..];
+        // Only emit whole lines - ProvisioningLog::log() writes a line per
+        // call, but a poll could still land mid-write; whatever's after the
+        // last '\n' is picked up on the next iteration instead of emitted
+        // half-formed.
+        if let Some(last_newline) = new_bytes.iter().rposition(|&b| b == b'\n') {
+            for line in String::from_utf8_lossy(&new_bytes[..=last_newline]).lines() {
+                let _ = app.emit("run-progress", RunProgress { line: line.to_string() });
+            }
+            offset += (last_newline + 1) as u64;
+        }
+    }
+}
+
 /// Executes a previously-received, verified snapshot in sandboxed Podman
 /// containers. Only reachable after the user has seen `receive_snapshot`'s
 /// diff and clicked a real Run button — there is no other path to this
 /// function's one call into `ls_containers::run_snapshot`.
+///
+/// Signature/tamper verification already happened back in `receive_snapshot`
+/// — nothing below this point can fail *that* way, only for environment
+/// reasons (Podman missing, a port in use, disk I/O, ...). So the snapshot
+/// is only taken out of `state.verified` for the duration of the attempt and
+/// put back if it fails, rather than discarded up front: a failed Run for a
+/// fixable environment reason must stay retry-able without forcing a fresh
+/// Send/Receive. See `tests/run_retry_test.rs`.
+// Generic over `R: tauri::Runtime` for the same reason as share_snapshot /
+// receive_snapshot above - lets tests/run_retry_test.rs call this directly
+// with a mock_app()'s AppHandle<MockRuntime>.
 #[tauri::command]
-pub async fn run_snapshot(
+pub async fn run_snapshot<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     snapshot_id: String,
     work_dir: String,
@@ -218,9 +280,25 @@ pub async fn run_snapshot(
         .remove(&snapshot_id)
         .ok_or_else(|| format!("no held snapshot with id {snapshot_id}"))?;
 
-    let session = ls_containers::run_snapshot(&verified, &PathBuf::from(work_dir))
-        .await
-        .map_err(|e| e.to_string())?;
+    // Tail the real provisioning log for the duration of the attempt only -
+    // aborted the moment ls_containers::run_snapshot resolves, whichever way.
+    let tail_task = tauri::async_runtime::spawn(tail_provisioning_log(app.clone()));
+    let result = ls_containers::run_snapshot(&verified, &PathBuf::from(work_dir)).await;
+    tail_task.abort();
+
+    let session = match result {
+        Ok(session) => session,
+        Err(e) => {
+            // Put it back so Run can be retried after the user fixes
+            // whatever the environment problem was.
+            state
+                .verified
+                .lock()
+                .map_err(|e| e.to_string())?
+                .insert(snapshot_id, verified);
+            return Err(e.to_string());
+        }
+    };
 
     let info = RunningSessionInfo {
         session_id: session.compose_project_name.clone(),
