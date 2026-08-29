@@ -2,7 +2,7 @@
 
 Send your local project, as it exists right now, straight to a teammate's machine — no cloud, no tunnel to your dev server. They see a diff, review it, and click Run before anything executes, sandboxed in read-only Podman containers with a small seeded dataset. Nothing about the receiving machine syncs back to you.
 
-This is an MVP validating one path end-to-end: **Linux ⇄ Linux**, a **Spring Boot + MySQL** sample project, one flow (share → review → run) — plus Windows/macOS Podman provisioning (round 5, below) so the receiver side isn't Linux-only. Other stacks, code-signing/notarization, an auto-updater, and anything past the first successful run (access revocation, multi-tester analytics, etc.) are explicitly out of scope for now.
+This is an MVP validating one path end-to-end: **Linux ⇄ Linux**, one flow (share → review → run) — plus Windows/macOS Podman provisioning (round 5) so the receiver side isn't Linux-only, and a second reference stack (round 6, below) proving the pipeline isn't secretly specific to the first one. Code-signing/notarization, an auto-updater, and anything past the first successful run (access revocation, multi-tester analytics, etc.) are explicitly out of scope for now.
 
 ## How it fits together
 
@@ -17,6 +17,8 @@ apps/
                       never sees project code or app traffic
   desktop/            Tauri app wiring the four crates together + the UI
 sample-project/       Spring Boot + MySQL reference app used by the demo
+sample-project-node/  Express + PostgreSQL reference app — proves the pipeline
+                       generalizes beyond the first stack (round 6)
 ```
 
 The trust chain is enforced at the type level, not just by convention: `ls_containers::run_snapshot` only ever accepts a `VerifiedSnapshot`, which only `ls_security::verify` can construct. Nothing runs until a signature check has passed and — in the app — until a human has seen the diff and clicked Run.
@@ -101,6 +103,25 @@ The receiver side no longer requires Linux: `ls_containers::run_snapshot` now ca
 **Structured logging**: every provisioning step — not just the final result — is appended to `provisioning.log` under the OS's standard app-data directory (`%APPDATA%\localsync\logs\` on Windows, `~/Library/Application Support/localsync/logs/` on macOS, `~/.local/share/localsync/logs/` on Linux), with the OS/version detected, the exact command run, and its real exit code/output. See `docs/round5-manual-test-checklist.md` for exactly what to copy back if something breaks.
 
 **Builds**: an unsigned Windows installer was produced and confirmed on disk this round (`LocalSync_0.1.0_x64-setup.exe`, NSIS, ~7.25MB) — SmartScreen will warn since it's unsigned, that's expected. A `.dmg` cannot be produced here (Tauri's macOS bundling only works when built on macOS); `docs/macos-build.md` has the steps for a developer to produce one on their own Mac. Update path: no auto-updater — Tauri's NSIS bundler already replaces a prior install of the same product in place, so bumping `version` in `apps/desktop/src-tauri/tauri.conf.json` and rebuilding is the whole process.
+
+## A second stack, to prove the pipeline generalizes (round 6)
+
+Everything through round 5 was only ever proven against one stack (Spring Boot + MySQL) — leaving open whether the snapshot/manifest format and container orchestration actually generalize, or just happen to work because of accidental Spring-Boot/MySQL-specific assumptions. `sample-project-node/` (Express + PostgreSQL, same structural shape as `sample-project/` — `app/` build context, `db-seed/` at the root, its own standalone `docker-compose.yml`) answers that.
+
+**`ls-snapshot`'s dependency-hash/diff logic needed zero changes.** Its lockfile detection was already a priority-tier fallback (`pom.xml` → `build.gradle*` → `package-lock.json`) searched across each compose service's own build-context subdirectory, built that way from round 1 — `crates/ls-snapshot/src/hash.rs`'s `falls_back_to_package_lock_json_in_a_service_build_dir` test proves `app/package-lock.json` hashes correctly through the exact same, unmodified function Maven projects use.
+
+**`ls-containers` had one real, confirmed hardcoded assumption**: `mysql_service_names` detected the database service by checking for the literal string `"mysql"` in its image — for `sample-project-node`'s `postgres` service, that matched nothing, which would have silently disabled the deterministic cache-volume mechanism entirely for any non-MySQL database. Fixed by generalizing to `database_service_names`, matching against a small explicit keyword list (`mysql`, `mariadb`, `postgres`, `postgresql`) instead of one hardcoded engine — not a second parallel function bolted on next to the first. Nothing else in `ls-containers` (image canonicalization, build-context rewriting, volume pinning) turned out to be MySQL-specific; those already operated on YAML structure generically.
+
+**Cache-reuse proof, same style as round 1, now for both stacks:**
+
+| Stack | Cold run | Cached run |
+|---|---|---|
+| Spring Boot + MySQL (`sample-project`, unmodified, re-verified after the fix) | 342.6s | 14.0s |
+| Express + PostgreSQL (`sample-project-node`) | 107.3s | 14.9s |
+
+`apps/desktop/src-tauri/tests/pipeline_node_test.rs` is the new Postgres proof, mirroring `pipeline_test.rs`'s exact structure (create → verify → diff → run → stop → resend the same unchanged snapshot → run again, asserting `db_cache_hit == true` the second time). `pipeline_test.rs` itself was not touched and still passes.
+
+`crates/ls-net`, `crates/ls-security`, and TURN/signaling/consent-gate code were untouched this round by design (`git diff --stat -- crates/ls-net crates/ls-security` is empty) — that code was under active manual two-machine testing outside this session while this round's work happened.
 
 ## What's not verified here
 

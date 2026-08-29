@@ -103,6 +103,27 @@ mod tests {
         );
     }
 
+    /// Round 6: proves `dependency_lock_hash` already generalizes to a
+    /// Node/npm project's `package-lock.json` in a service build dir (e.g.
+    /// `sample-project-node/app/package-lock.json`) via the exact same,
+    /// unmodified tier-fallback + extra_dirs mechanism
+    /// `falls_back_to_a_service_build_dir_for_the_lockfile` already proved
+    /// for Maven's `pom.xml` — no pom.xml/build.gradle present, so it falls
+    /// through tiers 1 and 2 to tier 3 (package-lock.json) with zero code
+    /// changes needed.
+    #[test]
+    fn falls_back_to_package_lock_json_in_a_service_build_dir() {
+        let dir = tempdir().unwrap();
+        let app_dir = dir.path().join("app");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(app_dir.join("package-lock.json"), br#"{"name":"app"}"#).unwrap();
+        let expected = sha256_hex(br#"{"name":"app"}"#);
+        assert_eq!(
+            dependency_lock_hash(dir.path(), &[app_dir]).unwrap(),
+            expected
+        );
+    }
+
     #[test]
     fn db_seed_hash_covers_nested_files() {
         let dir = tempdir().unwrap();

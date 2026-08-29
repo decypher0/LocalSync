@@ -3,10 +3,10 @@
 //! No custom compose parser, no custom image-layer cache: `podman-compose`
 //! does the actual bring-up (shelled out to via `tokio::process`), and
 //! Podman's own build/pull caches image layers by content hash for free.
-//! The one thing this crate manages itself is the MySQL data volume, named
-//! deterministically from `manifest.db_seed_hash` so a second snapshot of
-//! the same project/seed reuses the already-seeded volume instead of
-//! re-running init scripts.
+//! The one thing this crate manages itself is the database data volume
+//! (MySQL, Postgres, ...), named deterministically from
+//! `manifest.db_seed_hash` so a second snapshot of the same project/seed
+//! reuses the already-seeded volume instead of re-running init scripts.
 
 mod compose;
 mod podman;
@@ -28,7 +28,7 @@ pub struct RunningSession {
     /// `docker-compose.yml`, so the caller/UI knows what localhost port to
     /// hit.
     pub service_ports: Vec<(String, String)>,
-    /// Whether the MySQL data volume already existed before this run (a
+    /// Whether the database data volume already existed before this run (a
     /// cache hit on `db_seed_hash`) vs. a cold start that had to re-seed.
     pub db_cache_hit: bool,
     /// Directory holding the unpacked snapshot + rewritten compose file.
@@ -40,7 +40,7 @@ pub struct RunningSession {
 /// Unpack `verified`'s payload into a fresh subdirectory of `work_dir`,
 /// enforce `ls_security::default_policy()` on every service in its
 /// `docker-compose.yml` (never trust the snapshot's own compose settings for
-/// this), point any MySQL service at the deterministic seed-hash-keyed
+/// this), point any database service at the deterministic seed-hash-keyed
 /// volume, and bring the project up via `podman-compose`.
 pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Result<RunningSession> {
     // On Linux this is close to the old bare availability checks; on
@@ -75,16 +75,16 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
         .await
         .context("snapshot payload has no docker-compose.yml")?;
 
-    let mysql_services = compose::mysql_service_names(manifest);
+    let database_services = compose::database_service_names(manifest);
     let db_volume = compose::db_volume_name(&manifest.db_seed_hash);
     let policy = ls_security::default_policy();
-    let rewritten = compose::apply_policy(&original_yaml, &policy, &mysql_services, &db_volume)?;
+    let rewritten = compose::apply_policy(&original_yaml, &policy, &database_services, &db_volume)?;
     tokio::fs::write(&compose_path, &rewritten).await?;
 
     let service_ports = compose::parse_service_ports(&rewritten)?;
 
     // Cache-hit check has to happen before `up` creates/touches the volume.
-    let db_cache_hit = if mysql_services.is_empty() {
+    let db_cache_hit = if database_services.is_empty() {
         false
     } else {
         podman::volume_exists(&db_volume).await.unwrap_or(false)

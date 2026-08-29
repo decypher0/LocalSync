@@ -25,7 +25,7 @@ pub fn podman_compose_available() -> bool {
 }
 
 /// True if a podman volume named `name` already exists — i.e. this is a
-/// cache hit on the MySQL data volume, not a cold start.
+/// cache hit on the database data volume, not a cold start.
 pub async fn volume_exists(name: &str) -> Result<bool> {
     let output = tokio::process::Command::new("podman")
         .args(["volume", "inspect", name])

@@ -10,20 +10,31 @@ use ls_security::SandboxPolicy;
 use ls_snapshot::Manifest;
 use serde_yaml::Value;
 
-/// Deterministic MySQL data-volume name for a given seed hash. Same seed ==
-/// same volume == stock MySQL images skip `/docker-entrypoint-initdb.d/*.sql`
-/// on the second run because the data dir is already populated.
+/// Deterministic database data-volume name for a given seed hash. Same seed
+/// == same volume == stock database images (MySQL, Postgres, ...) skip their
+/// init-script directory on the second run because the data dir is already
+/// populated.
 pub fn db_volume_name(db_seed_hash: &str) -> String {
     format!("localsync-db-{db_seed_hash}")
 }
 
-/// Compose service names the manifest says are MySQL, by inspecting
-/// `ServiceDef::image_or_build` (e.g. "image:mysql:8.0").
-pub fn mysql_service_names(manifest: &Manifest) -> Vec<String> {
+/// Known database image keywords. Deliberately scoped to this repo's two
+/// concrete stacks (MySQL/MariaDB, Postgres) rather than every database
+/// engine that might exist someday — expand when a new stack actually needs
+/// it, not before.
+const DATABASE_IMAGE_KEYWORDS: &[&str] = &["mysql", "mariadb", "postgres", "postgresql"];
+
+/// Compose service names the manifest says are a known database engine, by
+/// inspecting `ServiceDef::image_or_build` (e.g. "image:mysql:8.0",
+/// "image:postgres:16") against `DATABASE_IMAGE_KEYWORDS`.
+pub fn database_service_names(manifest: &Manifest) -> Vec<String> {
     manifest
         .services
         .iter()
-        .filter(|s| s.image_or_build.to_lowercase().contains("mysql"))
+        .filter(|s| {
+            let image = s.image_or_build.to_lowercase();
+            DATABASE_IMAGE_KEYWORDS.iter().any(|kw| image.contains(kw))
+        })
         .map(|s| s.name.clone())
         .collect()
 }
@@ -72,7 +83,7 @@ fn normalize_port_entry(v: &Value) -> Option<String> {
 
 /// Rewrite `yaml` to enforce `policy` on every service, regardless of what
 /// the (untrusted-but-signed) snapshot's own compose file says, and repoint
-/// any MySQL service's named data volume at `db_volume`.
+/// any database service's named data volume at `db_volume`.
 ///
 /// Applied per service: `read_only`, a writable `tmpfs` for `/tmp`,
 /// `mem_limit`, `cpus`, and `network_mode` is stripped so it falls back to
@@ -81,7 +92,7 @@ fn normalize_port_entry(v: &Value) -> Option<String> {
 pub fn apply_policy(
     yaml: &str,
     policy: &SandboxPolicy,
-    mysql_services: &[String],
+    db_services: &[String],
     db_volume: &str,
 ) -> Result<String> {
     let mut doc: Value = serde_yaml::from_str(yaml).context("parsing docker-compose.yml as YAML")?;
@@ -89,8 +100,8 @@ pub fn apply_policy(
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("docker-compose.yml root is not a mapping"))?;
 
-    // Collect (service, named-volume-key) pairs for MySQL services before we
-    // start mutating, so we're not borrowing `services` and `root` at once.
+    // Collect (service, named-volume-key) pairs for database services before
+    // we start mutating, so we're not borrowing `services` and `root` at once.
     let mut volume_keys_to_pin = Vec::new();
 
     if let Some(Value::Mapping(services)) = root.get_mut("services") {
@@ -114,7 +125,7 @@ pub fn apply_policy(
             svc_map.remove("network_mode");
 
             let svc_name = name.as_str().unwrap_or_default();
-            if mysql_services.iter().any(|n| n == svc_name) {
+            if db_services.iter().any(|n| n == svc_name) {
                 if let Some(key) = named_volume_key(svc_map) {
                     volume_keys_to_pin.push(key);
                 }
@@ -244,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_mysql_service_by_image() {
+    fn finds_database_service_by_image_mysql_and_postgres_alike() {
         let manifest = manifest_with_services(vec![
             ServiceDef {
                 name: "app".into(),
@@ -253,13 +264,38 @@ mod tests {
                 depends_on: vec!["db".into()],
             },
             ServiceDef {
+                name: "nginx".into(),
+                image_or_build: "image:nginx:alpine".into(),
+                ports: vec!["80:80".into()],
+                depends_on: vec![],
+            },
+            ServiceDef {
                 name: "db".into(),
                 image_or_build: "image:mysql:8.0".into(),
                 ports: vec!["3306:3306".into()],
                 depends_on: vec![],
             },
         ]);
-        assert_eq!(mysql_service_names(&manifest), vec!["db".to_string()]);
+        assert_eq!(database_service_names(&manifest), vec!["db".to_string()]);
+
+        let manifest_pg = manifest_with_services(vec![
+            ServiceDef {
+                name: "app".into(),
+                image_or_build: "build:./app".into(),
+                ports: vec!["8080:8080".into()],
+                depends_on: vec!["postgres".into()],
+            },
+            ServiceDef {
+                name: "postgres".into(),
+                image_or_build: "image:docker.io/library/postgres:16".into(),
+                ports: vec!["5432:5432".into()],
+                depends_on: vec![],
+            },
+        ]);
+        assert_eq!(
+            database_service_names(&manifest_pg),
+            vec!["postgres".to_string()]
+        );
     }
 
     #[test]
