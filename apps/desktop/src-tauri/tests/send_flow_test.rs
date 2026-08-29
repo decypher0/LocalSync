@@ -130,6 +130,7 @@ async fn run_send_flow(sample_dir: &Path, project_dir_name: &str, port: u16) {
     let (_tempdir, project_dir) = make_git_project_from(sample_dir, project_dir_name);
 
     let sender_app = tauri::test::mock_app();
+    sender_app.manage(AppState::default());
     let sender_handle = sender_app.handle().clone();
 
     let receiver_app = tauri::test::mock_app();
@@ -140,7 +141,8 @@ async fn run_send_flow(sample_dir: &Path, project_dir_name: &str, port: u16) {
     let sender_url = url.clone();
     let project_path = project_dir.display().to_string();
     let sender_task = tokio::spawn(async move {
-        commands::share_snapshot(sender_handle, project_path, sender_room, sender_url).await
+        let state = sender_handle.state::<AppState>();
+        commands::share_snapshot(sender_handle.clone(), state, project_path, sender_room, sender_url).await
     });
 
     let receiver_room = room.clone();

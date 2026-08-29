@@ -20,6 +20,55 @@ listen("firewall-warning", (evt) => {
   $("firewall-banner").classList.remove("hidden");
 });
 
+// ---------- pull requests (sender-side: a connected receiver asked "anything new?") ----------
+// Registered once, globally — a request can arrive on any tab. Rendered as a
+// dismissible row per pending peer_id, since more than one receiver could ask
+// at once; removed once Accept/Decline is handled.
+listen("pull-request", (evt) => {
+  const peerId = evt.payload.peer_id;
+  const existing = [...$("pull-requests").children].find((el) => el.dataset.peer === peerId);
+  if (existing) return; // already showing a pending request for this peer
+  const div = document.createElement("div");
+  div.dataset.peer = peerId;
+  div.className = "peer-banner";
+  div.innerHTML = `
+    <span>Pull request from <strong>${escapeHtml(peerId)}</strong></span>
+    <span class="inline-row">
+      <button class="ghost-btn accept-btn" type="button">Accept</button>
+      <button class="ghost-btn decline-btn" type="button">Decline</button>
+    </span>
+    <p class="error"></p>
+  `;
+  const errorEl = div.querySelector(".error");
+  const respond = async (accept) => {
+    div.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try {
+      await invoke("respond_to_pull_request", { peerId, accept });
+      div.remove();
+      if (accept) refreshReceivers();
+    } catch (err) {
+      errorEl.textContent = String(err);
+      div.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    }
+  };
+  div.querySelector(".accept-btn").addEventListener("click", () => respond(true));
+  div.querySelector(".decline-btn").addEventListener("click", () => respond(false));
+  $("pull-requests").appendChild(div);
+});
+
+// ---------- snapshot updated (receiver-side: sender pushed a fresh snapshot) ----------
+// Same payload shape receive_snapshot resolves with, so this reuses
+// renderReview verbatim - a pushed update goes through the exact same
+// diff-review-then-Run/Reject screen as a normal receive.
+let updateBannerTimeout = null;
+listen("snapshot-updated", (evt) => {
+  renderReview(evt.payload);
+  const banner = $("update-banner");
+  banner.classList.remove("hidden");
+  clearTimeout(updateBannerTimeout);
+  updateBannerTimeout = setTimeout(() => banner.classList.add("hidden"), 4000);
+});
+
 // ---------- settings ----------
 $("settings-toggle").addEventListener("click", () => {
   $("settings-panel").classList.toggle("hidden");
@@ -126,10 +175,56 @@ $("send-btn").addEventListener("click", async () => {
     });
     $("send-progress-label").textContent = "Sent.";
     $("send-result").textContent = `Sent as ${snapshotId}`;
+    refreshReceivers(); // this send may have just added a new roster entry
   } catch (err) {
     $("send-error").textContent = String(err);
   } finally {
     $("send-btn").disabled = false;
+  }
+});
+
+// ---------- connected receivers roster (sender-side) ----------
+async function refreshReceivers() {
+  $("receivers-error").textContent = "";
+  try {
+    const list = await invoke("list_connected_receivers");
+    $("receivers-wrap").classList.remove("hidden");
+    const ul = $("receivers-list");
+    ul.innerHTML = "";
+    for (const r of list) {
+      const li = document.createElement("li");
+      li.innerHTML = `
+        <span class="mono">${escapeHtml(r.peer_id)}</span>
+        <span class="hint-inline">connected ${escapeHtml(r.connected_at)}</span>
+        <button class="ghost-btn push-btn" type="button" data-peer="${escapeHtml(r.peer_id)}">Push update</button>
+        <span class="hint push-status"></span>
+      `;
+      ul.appendChild(li);
+    }
+  } catch (err) {
+    $("receivers-error").textContent = String(err);
+  }
+}
+$("receivers-refresh-btn").addEventListener("click", refreshReceivers);
+
+// Delegated so newly-rendered rows don't need their own listener wiring.
+$("receivers-list").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".push-btn");
+  if (!btn) return;
+  const peerId = btn.dataset.peer;
+  const status = btn.nextElementSibling;
+  btn.disabled = true;
+  status.textContent = "";
+  status.className = "hint push-status";
+  try {
+    const snapshotId = await invoke("push_update", { peerId });
+    status.textContent = `Pushed ${snapshotId}`;
+    status.className = "result push-status";
+  } catch (err) {
+    status.textContent = String(err);
+    status.className = "error push-status";
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -289,6 +384,22 @@ $("peer-remember-btn").addEventListener("click", async () => {
     $("peer-remember-error").textContent = String(err);
   } finally {
     $("peer-remember-btn").disabled = false;
+  }
+});
+
+$("ask-update-btn").addEventListener("click", async () => {
+  const status = $("ask-update-status");
+  status.textContent = "";
+  status.className = "hint";
+  $("ask-update-btn").disabled = true;
+  try {
+    await invoke("send_pull_request");
+    status.textContent = "Request sent.";
+  } catch (err) {
+    status.textContent = String(err);
+    status.className = "error";
+  } finally {
+    $("ask-update-btn").disabled = false;
   }
 });
 

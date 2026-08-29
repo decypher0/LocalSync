@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -102,14 +103,85 @@ const DONE_ACK_REPEATS: usize = 5;
 /// transfer itself, which has no timeout - large payloads just take longer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// An open, encrypted P2P data channel to one peer. Opaque: callers only
-/// ever see bytes in and bytes out via [`send_payload`] / [`receive_payload`].
+/// An open, encrypted P2P connection to one peer, carrying two independent
+/// WebRTC data channels:
+///
+/// - the original bulk-transfer channel ("data") - callers only ever see
+///   bytes in and bytes out via [`send_payload`] / [`receive_payload`],
+///   unchanged since round 2.
+/// - a second, separate "control" channel (round 11), for small session-
+///   level signals ([`send_control`] / [`recv_control`]) that need to be
+///   exchanged *after* the initial transfer, while the connection is kept
+///   open - a round-11 sender's targeted push or a receiver's pull request.
+///
+/// These are deliberately two different `RTCDataChannel`s, not one shared
+/// stream multiplexed by convention: `send_payload`/`receive_payload`'s
+/// `incoming` queue is a single-consumer channel that a caller may block on
+/// for a long time waiting for the next payload chunk or the completion ack
+/// (see their doc comments) - a control message arriving mid-transfer, or a
+/// listener parked waiting for a control message while a push is about to
+/// start, would otherwise race the *same* queue for the *same* messages.
+/// Separate channels make that race structurally impossible instead of
+/// requiring careful protocol discipline to avoid it.
 pub struct DataChannelConn {
     dc: Arc<RTCDataChannel>,
     incoming: AsyncMutex<mpsc::UnboundedReceiver<Bytes>>,
+    control_dc: Arc<RTCDataChannel>,
+    control_incoming: AsyncMutex<mpsc::UnboundedReceiver<Bytes>>,
     // Kept alive for the lifetime of the connection; dropping it tears down
     // ICE/DTLS/SCTP. Never read directly except by `connection_path`.
     _pc: Arc<RTCPeerConnection>,
+}
+
+/// A small session-level signal exchanged over [`DataChannelConn`]'s control
+/// channel, after the initial [`send_payload`]/[`receive_payload`] exchange,
+/// for round 11's multi-receiver sessions: targeted push and pull requests.
+///
+/// **Deliberately payload-free.** [`PullRequest`](ControlMessage::PullRequest)
+/// is a unit variant - there is no field here a receiver could put file
+/// bytes, a project path, or anything else into. The one-way trust model
+/// (sender -> receiver only, since round 1) depends on this: a pull request
+/// can only ever *ask* the sender to send again, never carry data back. See
+/// `tests/pull_request_no_payload_test.rs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum ControlMessage {
+    /// Receiver -> sender: "do you have anything new?"
+    PullRequest,
+    /// Sender -> receiver, only ever sent in reply to a `PullRequest`.
+    PullResponse { accepted: bool },
+    /// Sender -> receiver: "a fresh snapshot follows immediately as a raw
+    /// `send_payload`/`receive_payload` transfer on the *other* (bulk-data)
+    /// channel." Sent right before calling `send_payload` again, so the
+    /// receiver's control-channel listener knows to call `receive_payload`
+    /// next rather than keep waiting on this channel.
+    IncomingUpdate,
+}
+
+/// Sends one [`ControlMessage`] on `conn`'s control channel. Independent of
+/// (never touches) the bulk-transfer channel `send_payload`/`receive_payload`
+/// use.
+pub async fn send_control(conn: &DataChannelConn, msg: &ControlMessage) -> Result<()> {
+    let bytes = serde_json::to_vec(msg).context("failed to encode control message")?;
+    conn.control_dc
+        .send(&Bytes::from(bytes))
+        .await
+        .context("failed to send control message")?;
+    Ok(())
+}
+
+/// Waits for and decodes the next [`ControlMessage`] on `conn`'s control
+/// channel. A non-JSON or unrecognized message is a hard error rather than
+/// silently ignored - the control channel only ever carries
+/// [`ControlMessage`]s by construction on both ends of this crate, so
+/// anything else means a protocol bug worth surfacing, not swallowing.
+pub async fn recv_control(conn: &DataChannelConn) -> Result<ControlMessage> {
+    let mut incoming = conn.control_incoming.lock().await;
+    let bytes = incoming
+        .recv()
+        .await
+        .context("control channel closed before a message arrived")?;
+    serde_json::from_slice(&bytes).context("received bytes were not a valid control message")
 }
 
 /// Which path an established [`DataChannelConn`] actually took. TURN is
@@ -263,8 +335,14 @@ async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result
     let (signaling, mut inbound_rx) = SignalingClient::connect(signaling_url, room_code).await?;
     log::info!("sender: connected to signaling server");
 
+    // The offerer creates both channels; the answerer receives both via
+    // on_data_channel (see connect_as_receiver_inner). Created before the
+    // offer so both are already described in the SDP - no separate
+    // renegotiation round-trip needed for the second channel.
     let dc = pc.create_data_channel("data", None).await?;
     let (open_rx, msg_rx) = wire_data_channel(&dc);
+    let control_dc = pc.create_data_channel("control", None).await?;
+    let (control_open_rx, control_msg_rx) = wire_data_channel(&control_dc);
 
     // Non-trickle ICE: wait for gathering to finish before sending the
     // offer, so it already carries every local candidate.
@@ -291,10 +369,16 @@ async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result
         .await
         .context("data channel closed before it finished opening")?;
     log::info!("sender: data channel open");
+    control_open_rx
+        .await
+        .context("control channel closed before it finished opening")?;
+    log::info!("sender: control channel open");
 
     Ok(DataChannelConn {
         dc,
         incoming: AsyncMutex::new(msg_rx),
+        control_dc,
+        control_incoming: AsyncMutex::new(control_msg_rx),
         _pc: pc,
     })
 }
@@ -324,8 +408,10 @@ async fn connect_as_receiver_inner(
     let (signaling, mut inbound_rx) = SignalingClient::connect(signaling_url, room_code).await?;
     log::info!("receiver: connected to signaling server");
 
-    // The remote data channel arrives asynchronously via this callback. Its
-    // on_open/on_message handlers MUST be registered inside the callback,
+    // Two remote data channels arrive asynchronously via this callback, one
+    // per label ("data", "control") - order isn't guaranteed, so each is
+    // routed to its own oneshot by label rather than assumed to arrive
+    // first/second. Handlers MUST be registered inside the callback,
     // synchronously, before it returns - the underlying transport awaits
     // this callback's future to completion and only then flips the channel
     // to "open" and starts delivering messages. Wiring up handlers any
@@ -338,10 +424,20 @@ async fn connect_as_receiver_inner(
         mpsc::UnboundedReceiver<Bytes>,
     );
     let (dc_ready_tx, dc_ready_rx) = oneshot::channel::<DcReady>();
+    let (control_ready_tx, control_ready_rx) = oneshot::channel::<DcReady>();
     let dc_ready_tx = StdMutex::new(Some(dc_ready_tx));
+    let control_ready_tx = StdMutex::new(Some(control_ready_tx));
     pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
         let (open_rx, msg_rx) = wire_data_channel(&dc);
-        if let Some(tx) = dc_ready_tx.lock().unwrap().take() {
+        let slot = match dc.label() {
+            "data" => &dc_ready_tx,
+            "control" => &control_ready_tx,
+            other => {
+                log::warn!("receiver: ignoring data channel with unexpected label {other:?}");
+                return Box::pin(async {});
+            }
+        };
+        if let Some(tx) = slot.lock().unwrap().take() {
             let _ = tx.send((dc, open_rx, msg_rx));
         }
         Box::pin(async {})
@@ -373,9 +469,19 @@ async fn connect_as_receiver_inner(
         .context("data channel closed before it finished opening")?;
     log::info!("receiver: data channel open");
 
+    let (control_dc, control_open_rx, control_msg_rx) = control_ready_rx
+        .await
+        .context("peer never opened a control channel")?;
+    control_open_rx
+        .await
+        .context("control channel closed before it finished opening")?;
+    log::info!("receiver: control channel open");
+
     Ok(DataChannelConn {
         dc,
         incoming: AsyncMutex::new(msg_rx),
+        control_dc,
+        control_incoming: AsyncMutex::new(control_msg_rx),
         _pc: pc,
     })
 }

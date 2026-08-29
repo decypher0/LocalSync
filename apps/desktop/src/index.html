@@ -14,6 +14,9 @@
 
   <p id="firewall-banner" class="warn hidden"></p>
 
+  <!-- ---- Pull requests from connected receivers (sender-side, can arrive on any tab) ---- -->
+  <div id="pull-requests" class="pull-requests"></div>
+
   <section id="settings-panel" class="settings-panel hidden">
     <div>
       <span class="mode-title">Connection mode</span>
@@ -59,6 +62,15 @@
       <code id="send-room-code-display" class="room-code-display"></code>
     </div>
 
+    <div id="receivers-wrap" class="room-code-wrap hidden">
+      <span class="inline-row receivers-header">
+        <span class="hint">Connected receivers:</span>
+        <button id="receivers-refresh-btn" class="ghost-btn" type="button">Refresh</button>
+      </span>
+      <ul id="receivers-list" class="ports-list"></ul>
+      <p id="receivers-error" class="error"></p>
+    </div>
+
     <div id="send-progress-wrap" class="progress-wrap hidden">
       <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
       <p id="send-progress-label" class="hint"></p>
@@ -85,12 +97,18 @@
     </div>
 
     <!-- ---- Trust gate: diff review, shown only after receive_snapshot resolves ---- -->
+    <p id="update-banner" class="result hidden">A new update just arrived from the sender.</p>
     <div id="review-panel" class="hidden">
       <h2>Review before you run</h2>
       <p class="warn">
         Nothing has executed yet. This project has only been verified and unpacked for
         inspection — clicking Run is what starts sandboxed containers.
       </p>
+
+      <span class="inline-row ask-update-row">
+        <button id="ask-update-btn" class="ghost-btn" type="button">Ask for update</button>
+        <span id="ask-update-status" class="hint"></span>
+      </span>
 
       <div class="manifest-card">
         <div class="manifest-row"><span class="k">Project</span><span id="m-project" class="v"></span></div>

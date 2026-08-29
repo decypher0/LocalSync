@@ -140,6 +140,24 @@ button:disabled { opacity: 0.5; cursor: default; }
 .peer-remember-row input[type="text"] { width: auto; flex: 1; }
 .reject-btn { margin-top: 16px; color: var(--danger); border-color: var(--danger); }
 
+.ask-update-row { margin: 12px 0 0; align-items: center; }
+
+/* ---- Round 11: connected-receivers roster + pull-request banners ---- */
+.receivers-header { justify-content: space-between; align-items: center; }
+#receivers-list li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.push-status { margin: 0; }
+
+.pull-requests { padding: 0 20px; }
+.pull-requests .peer-banner {
+  margin: 12px 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pull-requests .peer-banner .error { margin: 0; flex-basis: 100%; }
+
 .manifest-card {
   border: 1px solid var(--border);
   border-radius: 8px;
