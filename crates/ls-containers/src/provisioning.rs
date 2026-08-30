@@ -21,6 +21,12 @@ use std::path::PathBuf;
 /// `{app_data_dir}/logs/provisioning.log` (or a caller-chosen path — tests
 /// use a tempdir). Deliberately not a rotating/structured-binary log: this
 /// only ever needs to be opened once, read top to bottom, and pasted.
+///
+/// `Clone` (cheap — just the `PathBuf`) so `podman::run_streaming` can hand
+/// one to each of its concurrent stdout/stderr-draining tasks: every write
+/// opens, appends, and closes the file independently (see `log` below), so
+/// there's no shared mutable state that cloning would need to coordinate.
+#[derive(Clone)]
 pub struct ProvisioningLog {
     path: PathBuf,
 }

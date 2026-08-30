@@ -131,6 +131,19 @@ async fn run_snapshot_streams_real_provisioning_log_lines_as_events() {
         lines.iter().any(|l| l.contains("provisioning check")),
         "expected real ensure_podman_ready() log content among the streamed lines, got: {lines:?}"
     );
+    // Round 12: before this round, ensure_podman_ready()'s own preflight
+    // checks were the *only* thing ever logged here - on Linux, a handful
+    // of near-instant lines, then silence for the entire rest of a real Run
+    // (podman-compose actually building/pulling images, which is the slow
+    // part and the whole reason a live details view is useful). Confirm the
+    // real fix: podman-compose's own stdout is now streamed into this same
+    // file live via podman::run_streaming, not just captured and discarded.
+    assert!(
+        lines.iter().any(|l| l.contains("podman-compose") || l.contains("podman run")),
+        "expected real podman-compose output (not just the preflight check) among the \
+         streamed lines - the details panel's actual data source for the slow part of a \
+         Run - got: {lines:?}"
+    );
 
     commands::stop_session(handle.state::<AppState>(), session.session_id)
         .await
