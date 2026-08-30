@@ -115,6 +115,9 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
     $(`tab-${btn.dataset.tab}`).classList.add("active");
+    // Show "Previously connected" the moment someone looks at the Send tab,
+    // not only after they've just sent something or clicked Refresh by hand.
+    if (btn.dataset.tab === "send") refreshReceivers();
   });
 });
 
@@ -125,12 +128,45 @@ $("browse-project-path").addEventListener("click", async () => {
 });
 
 let unlistenSendProgress = null;
+let codeExpiryInterval = null;
+
+// Visible countdown instead of a silent background timer (round 12) - the
+// room code is only good until the sender's connect_as_sender call (started
+// right after this, by share_snapshot below) gives up waiting for a peer.
+// See commands::SendSessionInfo's code_expires_in_seconds doc comment.
+function startCodeExpiryCountdown(totalSeconds) {
+  clearInterval(codeExpiryInterval);
+  const el = $("send-code-expiry");
+  let remaining = totalSeconds;
+  const render = () => {
+    if (remaining <= 0) {
+      el.textContent = "Code expired — click Send again for a new one.";
+      el.className = "hint-inline error-inline";
+      clearInterval(codeExpiryInterval);
+      return;
+    }
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    el.textContent = `Expires in ${m}:${String(s).padStart(2, "0")} — share it before then.`;
+    el.className = "hint-inline";
+  };
+  render();
+  codeExpiryInterval = setInterval(() => {
+    remaining -= 1;
+    render();
+  }, 1000);
+}
+function stopCodeExpiryCountdown() {
+  clearInterval(codeExpiryInterval);
+  $("send-code-expiry").textContent = "";
+}
 
 $("send-btn").addEventListener("click", async () => {
   const projectPath = $("project-path").value.trim();
   $("send-error").textContent = "";
   $("send-result").textContent = "";
   $("send-code-wrap").classList.add("hidden");
+  stopCodeExpiryCountdown();
 
   if (!projectPath) {
     $("send-error").textContent = "Project path is required.";
@@ -156,6 +192,7 @@ $("send-btn").addEventListener("click", async () => {
     const signalingUrl = info.signaling_url;
     $("send-room-code-display").textContent = info.room_code;
     $("send-code-wrap").classList.remove("hidden");
+    startCodeExpiryCountdown(info.code_expires_in_seconds);
 
     $("send-progress-wrap").classList.remove("hidden");
     setProgress("send-progress-bar", 0);
@@ -163,6 +200,10 @@ $("send-btn").addEventListener("click", async () => {
 
     if (unlistenSendProgress) unlistenSendProgress();
     unlistenSendProgress = await listen("share-progress", (evt) => {
+      // First progress event means a peer actually connected and the
+      // transfer started - the code did its job, no need to keep
+      // frightening the user with a ticking clock.
+      stopCodeExpiryCountdown();
       const { bytes, total } = evt.payload;
       setProgress("send-progress-bar", total ? (bytes / total) * 100 : 0);
       $("send-progress-label").textContent = `Sending… ${formatBytes(bytes)} / ${formatBytes(total)}`;
@@ -178,6 +219,7 @@ $("send-btn").addEventListener("click", async () => {
     refreshReceivers(); // this send may have just added a new roster entry
   } catch (err) {
     $("send-error").textContent = String(err);
+    stopCodeExpiryCountdown();
   } finally {
     $("send-btn").disabled = false;
   }

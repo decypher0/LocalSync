@@ -63,6 +63,15 @@ pub struct SendSessionInfo {
     pub room_code: String,
     pub room_id: String,
     pub signaling_url: String,
+    /// How long the receiver has to paste `room_code` and click Receive
+    /// before the sender's `connect_as_sender` call (started by the
+    /// frontend's very next call, `share_snapshot`, right after this one
+    /// resolves) gives up — `ls_net::CONNECT_TIMEOUT`, exposed here so the
+    /// UI's countdown can never drift out of sync with the real backend
+    /// value (round 12: this used to be a silent 30s timer that expired
+    /// during the normal human copy/paste window; see `CONNECT_TIMEOUT`'s
+    /// doc comment for the root cause).
+    pub code_expires_in_seconds: u64,
 }
 
 /// Returned by [`decode_room_code`]. Hand straight to the existing,
@@ -111,7 +120,12 @@ pub async fn start_send_session(mode: String, relay_url: Option<String>) -> Resu
             .ok_or("relay_url is required in remote mode")?;
         let room_id = ls_net::generate_room_id();
         log::info!("start_send_session: remote mode, relay={signaling_url}, room_id={room_id}");
-        return Ok(SendSessionInfo { room_code: room_id.clone(), room_id, signaling_url });
+        return Ok(SendSessionInfo {
+            room_code: room_id.clone(),
+            room_id,
+            signaling_url,
+            code_expires_in_seconds: ls_net::CONNECT_TIMEOUT.as_secs(),
+        });
     }
 
     let (port, _relay_task) = ls_net::host_ephemeral_relay().await.map_err(|e| e.to_string())?;
@@ -121,7 +135,12 @@ pub async fn start_send_session(mode: String, relay_url: Option<String>) -> Resu
     let room_code = ls_net::encode_room_code(addr, &room_id);
     let signaling_url = format!("ws://{lan_ip}:{port}");
     log::info!("start_send_session: hosting relay on {signaling_url}, room_code={room_code}");
-    Ok(SendSessionInfo { room_code, room_id, signaling_url })
+    Ok(SendSessionInfo {
+        room_code,
+        room_id,
+        signaling_url,
+        code_expires_in_seconds: ls_net::CONNECT_TIMEOUT.as_secs(),
+    })
 }
 
 /// Decodes a room code pasted by the user into the `room_id`/`signaling_url`

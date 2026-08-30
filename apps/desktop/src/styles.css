@@ -135,7 +135,28 @@ button:disabled { opacity: 0.5; cursor: default; }
   border-left: 3px solid var(--accent);
   font-size: 0.88rem;
 }
+/* Round 12: the review screen's first two possible states, made visually
+   distinct at a glance - a known sender (calm, green) vs one you've never
+   seen before (a genuine "look before you review" prompt, amber) - neither
+   one changes what's required below (diff review, then Run or Reject). */
+.peer-banner-recognized { border-left-color: var(--added); display: flex; align-items: center; gap: 8px; }
+.peer-banner-new { border-left-color: var(--modified); }
+.peer-banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.peer-banner-recognized .peer-banner-icon { background: var(--added); color: #fff; }
+.peer-banner-new .peer-banner-icon { background: var(--modified); color: #fff; margin-right: 4px; }
 .hint-inline { color: var(--muted); font-size: 0.82rem; margin-left: 4px; }
+.hint-inline.error-inline { color: var(--danger); font-weight: 600; }
+#send-code-expiry { margin: 6px 0 0; }
 .peer-remember-row { margin-top: 8px; }
 .peer-remember-row input[type="text"] { width: auto; flex: 1; }
 .reject-btn { margin-top: 16px; color: var(--danger); border-color: var(--danger); }
