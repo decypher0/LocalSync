@@ -49,16 +49,27 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
     // logged to ProvisioningLog::open_default()'s file regardless of
     // platform. Falls back to a stderr-only log if the OS data dir can't be
     // determined, rather than blocking the run over a logging problem.
-    match ProvisioningLog::open_default() {
-        Ok(log) => provisioning::ensure_podman_ready(&log).await?,
+    //
+    // Kept for the rest of this function (not just this preflight check) so
+    // `podman::compose_up` below can stream its own real, live output into
+    // the same file - previously only the (near-instant, on Linux) preflight
+    // checks ever wrote here, so a live-tailing UI had nothing to show
+    // during the actual slow part of a run (round 12: root cause of the
+    // "Show details" panel going silent almost immediately in real use).
+    let log = match ProvisioningLog::open_default() {
+        Ok(log) => {
+            provisioning::ensure_podman_ready(&log).await?;
+            Some(log)
+        }
         Err(e) => {
             eprintln!("provisioning log unavailable ({e:#}), continuing without one");
             anyhow::ensure!(
                 podman::podman_available() && podman::podman_compose_available(),
                 "podman/podman-compose not found on PATH — run scripts/setup-linux-deps.sh"
             );
+            None
         }
-    }
+    };
 
     let manifest = &verified.snapshot().manifest;
 
@@ -91,7 +102,7 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
     };
 
     let compose_project_name = compose_project_name(&manifest.project_name, &manifest.git_commit);
-    podman::compose_up(&compose_dir, &compose_project_name).await?;
+    podman::compose_up(&compose_dir, &compose_project_name, log.as_ref()).await?;
 
     Ok(RunningSession {
         project_name: manifest.project_name.clone(),
@@ -105,7 +116,11 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
 /// Tear down this run's containers/network. The named DB volume is
 /// intentionally left alone — it's the cache.
 pub async fn stop_session(session: &RunningSession) -> Result<()> {
-    podman::compose_down(&session.compose_dir, &session.compose_project_name).await
+    // Best-effort logging only - a missing/unopenable log must never block
+    // actually tearing the session down (same non-fatal fallback style
+    // `run_snapshot` already uses above).
+    let log = ProvisioningLog::open_default().ok();
+    podman::compose_down(&session.compose_dir, &session.compose_project_name, log.as_ref()).await
 }
 
 async fn unpack_payload(payload: &[u8], dest: &Path) -> Result<()> {

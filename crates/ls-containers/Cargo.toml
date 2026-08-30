@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 ls-snapshot = { path = "../ls-snapshot" }
 ls-security = { path = "../ls-security" }
-tokio = { version = "1", features = ["process", "fs", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["process", "fs", "rt-multi-thread", "macros", "io-util"] }
 anyhow = "1"
 serde_yaml = "0.9"
 flate2 = "1"
