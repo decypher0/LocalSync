@@ -98,10 +98,26 @@ const DONE_ACK: &[u8] = b"LSNET:DONE";
 /// reliable in testing - see `send_payload`, which only needs to see one.
 const DONE_ACK_REPEATS: usize = 5;
 
-/// How long connection setup (signaling + ICE + DTLS + data channel open)
-/// is allowed to take before giving up. Doesn't apply to the payload
-/// transfer itself, which has no timeout - large payloads just take longer.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long connection setup is allowed to take before giving up. Doesn't
+/// apply to the payload transfer itself, which has no timeout - large
+/// payloads just take longer.
+///
+/// Round 12 root cause: this doesn't just cover network/ICE negotiation
+/// (which, once both sides are actually exchanging SDP, is fast - seconds).
+/// `connect_as_sender` is called immediately on clicking Send, before a
+/// human has copied the room code anywhere - the clock was already running
+/// while they were still typing it into a chat app for a teammate to paste
+/// back in. The old 30s value covered essentially none of that real human
+/// handoff window, so a completely normal share would time out before the
+/// receiver ever got a chance to paste the code and click Receive. Bumped
+/// to a genuinely generous window rather than restructuring connection
+/// setup into separate "wait for a peer"/"negotiate" phases - the simpler
+/// fix given everything downstream (signaling, ICE, DTLS) already tolerates
+/// waiting this long, it just never got the chance to before now. See
+/// `commands::start_send_session`'s `code_expires_in_seconds`, which
+/// exposes this same value to the UI for a visible countdown rather than a
+/// silent background timer.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// An open, encrypted P2P connection to one peer, carrying two independent
 /// WebRTC data channels:

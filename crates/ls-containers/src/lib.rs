@@ -55,7 +55,7 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
             eprintln!("provisioning log unavailable ({e:#}), continuing without one");
             anyhow::ensure!(
                 podman::podman_available() && podman::podman_compose_available(),
-                "podman/podman-compose not found on PATH"
+                "podman/podman-compose not found on PATH — run scripts/setup-linux-deps.sh"
             );
         }
     }

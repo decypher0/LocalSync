@@ -362,3 +362,49 @@ not a new curl/health-check target.
 
 Same as the rest of this document for the actual Run flow — this round is
 about the *push/pull mechanics and targeting* working as described.
+
+---
+
+## Round 12 addendum: the room code no longer expires mid-handoff, peer pairing is reachable, Linux setup is more resilient
+
+### What changed
+
+- **The room code lasts 5 minutes, not 30 seconds**, and now shows a visible
+  countdown ("Expires in 4:32 — share it before then.") next to the code
+  instead of a silent timer you only discover by hitting a failure. It
+  disappears once a receiver actually connects; if it hits zero first, it
+  says so plainly ("Code expired — click Send again for a new one.").
+- **The Send tab now has a "Previously connected" section** at the top,
+  above the fresh-code flow — anyone still connected from earlier this app
+  session, with a **Push update** button that reuses that connection
+  directly (no new code to share). Labelled "still connected this session"
+  deliberately — it's round 11's live-connection roster, not a persisted
+  cross-restart history (a receiver has no identity of its own for this app
+  to remember that way; see round 10's *sender*-recognition on the Receive
+  tab for the actual identity-based pairing, now shown more prominently at
+  the very top of the review screen).
+- **`scripts/setup-linux-deps.sh` now has a real fallback if `podman-compose`
+  isn't installable via apt** (some distros/releases don't carry it) — tries
+  `pipx install podman-compose` instead, and tells you to open a new
+  terminal if the freshly-installed binary isn't on this shell's `PATH` yet.
+
+### What to redo
+
+1. Click **Send**, watch the countdown appear next to the room code. Wait
+   past it on purpose once (or check the error text) to confirm it says
+   "expired" clearly rather than a bare connection-failure message.
+2. Send to a receiver, then — **without generating a new code** — go back to
+   the Send tab and confirm that receiver shows up under **Previously
+   connected**. Click **Push update** and confirm the receiver gets it.
+3. Receive from the same sender twice: the first time should show "New
+   sender", the second time (after saving a name the first time) should show
+   "Recognized peer: `<name>`" at the very top of the review screen, above
+   everything else.
+4. If you're setting up a fresh Linux machine and `podman-compose` isn't in
+   your distro's apt repos, confirm `scripts/setup-linux-deps.sh` falls back
+   to `pipx` automatically rather than just failing.
+
+### What "success" looks like
+
+Same as the rest of this document — this round is about resilience/clarity
+around flows that already existed, not a new end state to check.

@@ -48,6 +48,24 @@
   <!-- ============ SEND ============ -->
   <section id="tab-send" class="tab-panel active">
     <h2>Share a project</h2>
+
+    <!-- ---- Previously connected: receivers still connected from earlier
+         this session - reuse that open connection directly instead of
+         generating and re-sharing a fresh room code. Session-scoped, not a
+         persisted history: a receiver has no identity of its own for this
+         app to recognize across restarts (unlike round 10's sender-identity
+         pairing on the Receive tab, below) - labelled accordingly rather
+         than overstating what this is. ---->
+    <div id="receivers-wrap" class="room-code-wrap hidden">
+      <span class="inline-row receivers-header">
+        <span class="hint"><strong>Previously connected</strong> (still connected this session)</span>
+        <button id="receivers-refresh-btn" class="ghost-btn" type="button">Refresh</button>
+      </span>
+      <ul id="receivers-list" class="ports-list"></ul>
+      <p id="receivers-error" class="error"></p>
+      <p class="hint">Or start fresh, for someone new:</p>
+    </div>
+
     <label>
       Project folder (absolute path)
       <span class="inline-row">
@@ -60,15 +78,7 @@
     <div id="send-code-wrap" class="room-code-wrap hidden">
       <span class="hint">Share this code with the receiver:</span>
       <code id="send-room-code-display" class="room-code-display"></code>
-    </div>
-
-    <div id="receivers-wrap" class="room-code-wrap hidden">
-      <span class="inline-row receivers-header">
-        <span class="hint">Connected receivers:</span>
-        <button id="receivers-refresh-btn" class="ghost-btn" type="button">Refresh</button>
-      </span>
-      <ul id="receivers-list" class="ports-list"></ul>
-      <p id="receivers-error" class="error"></p>
+      <p id="send-code-expiry" class="hint-inline"></p>
     </div>
 
     <div id="send-progress-wrap" class="progress-wrap hidden">
@@ -99,6 +109,26 @@
     <!-- ---- Trust gate: diff review, shown only after receive_snapshot resolves ---- -->
     <p id="update-banner" class="result hidden">A new update just arrived from the sender.</p>
     <div id="review-panel" class="hidden">
+      <!-- ---- Sender identity: recognized-peer banner, shown first - who's
+           connecting, before what they sent. Connection-level info only:
+           this never gates or pre-fills anything below; Run/Reject are the
+           only two buttons that actually decide anything here. ---- -->
+      <div id="peer-recognized" class="peer-banner peer-banner-recognized hidden">
+        <span class="peer-banner-icon" aria-hidden="true">✓</span>
+        <span>Recognized peer: <strong id="peer-recognized-name"></strong>
+        <span id="peer-recognized-since" class="hint-inline"></span></span>
+      </div>
+      <div id="peer-new" class="peer-banner peer-banner-new hidden">
+        <span class="peer-banner-icon" aria-hidden="true">?</span>
+        <span>New sender — haven't seen this identity before.</span>
+        <span class="inline-row peer-remember-row">
+          <input id="peer-remember-name" type="text" placeholder="Remember as…" />
+          <button id="peer-remember-btn" class="ghost-btn" type="button">Save</button>
+        </span>
+        <span id="peer-remember-done" class="hint hidden">Saved — future receives from this sender will show as recognized.</span>
+        <p id="peer-remember-error" class="error"></p>
+      </div>
+
       <h2>Review before you run</h2>
       <p class="warn">
         Nothing has executed yet. This project has only been verified and unpacked for
@@ -115,21 +145,6 @@
         <div class="manifest-row"><span class="k">Commit</span><span id="m-commit" class="v mono"></span></div>
         <div class="manifest-row"><span class="k">Parent commit</span><span id="m-parent" class="v mono"></span></div>
         <div class="manifest-row"><span class="k">Services</span><span id="m-services" class="v"></span></div>
-      </div>
-
-      <!-- ---- Sender identity: recognized-peer banner (connection-level info only) ---- -->
-      <div id="peer-recognized" class="peer-banner hidden">
-        Recognized peer: <strong id="peer-recognized-name"></strong>
-        <span id="peer-recognized-since" class="hint-inline"></span>
-      </div>
-      <div id="peer-new" class="peer-banner hidden">
-        <span>New sender — haven't seen this identity before.</span>
-        <span class="inline-row peer-remember-row">
-          <input id="peer-remember-name" type="text" placeholder="Remember as…" />
-          <button id="peer-remember-btn" class="ghost-btn" type="button">Save</button>
-        </span>
-        <span id="peer-remember-done" class="hint hidden">Saved — future receives from this sender will show as recognized.</span>
-        <p id="peer-remember-error" class="error"></p>
       </div>
 
       <h3>Diff summary</h3>
