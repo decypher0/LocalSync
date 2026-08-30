@@ -484,6 +484,7 @@ $("run-btn").addEventListener("click", async () => {
   $("run-btn").disabled = true;
   $("run-progress-wrap").classList.remove("hidden");
   $("run-progress-label").textContent = "Starting containers…";
+  document.querySelector("#run-progress-wrap .spinner")?.classList.remove("hidden");
   // Fresh per attempt — retrying after a fixed environment problem
   // shouldn't show last attempt's log lines glued onto this one.
   $("run-log").textContent = "";
@@ -508,11 +509,24 @@ $("run-btn").addEventListener("click", async () => {
       workDir,
     });
     renderSession(session);
+    // Only hide the progress/details panel on success - renderSession has
+    // already moved the user on to the running-session screen, so there's
+    // nothing left in it worth keeping visible.
+    $("run-progress-wrap").classList.add("hidden");
   } catch (err) {
     $("run-error").textContent = String(err);
+    $("run-progress-label").textContent = "Failed — see details below.";
+    document.querySelector("#run-progress-wrap .spinner")?.classList.add("hidden");
+    // Round 12: deliberately does NOT hide #run-progress-wrap here. This
+    // used to happen unconditionally in `finally` below, which meant the
+    // one moment the streamed log content was most useful - right after a
+    // real failure, when it likely explains why - it vanished instantly,
+    // leaving only the bare error string. Left visible (spinner included,
+    // which just stops looking meaningful - a cosmetic wart, not worth
+    // extra code to also swap it for a static icon) until the next Run
+    // attempt clears it at the top of this handler.
   } finally {
     $("run-btn").disabled = false;
-    $("run-progress-wrap").classList.add("hidden");
     if (unlistenRunProgress) {
       unlistenRunProgress();
       unlistenRunProgress = null;

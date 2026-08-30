@@ -18,6 +18,29 @@
 
 use super::ProvisioningLog;
 use anyhow::{Context, Result};
+use std::os::windows::process::CommandExt;
+
+/// Prevents a spawned console-mode child (`winget`, `podman`, `wsl.exe`,
+/// `reg.exe` — everything this file shells out to) from popping its own
+/// visible console window when this GUI app has no console of its own
+/// (Windows' documented default otherwise). Round 12's audit: every
+/// subprocess spawn in this codebase now goes through a helper like this
+/// one rather than a bare `Command::new` — see the identical fix/comment in
+/// `crates/ls-containers/src/podman.rs` and
+/// `crates/ls-snapshot/src/bundle.rs`.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn tokio_command(program: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+fn sync_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
 
 /// Runs `program args...`, logging the command line and its exit
 /// status/stdout/stderr before returning the raw [`std::process::Output`].
@@ -31,7 +54,7 @@ async fn run_logged(
 ) -> Result<std::process::Output> {
     let cmdline = format!("{program} {}", args.join(" "));
     log.info(&format!("running: {cmdline}"));
-    let output = tokio::process::Command::new(program)
+    let output = tokio_command(program)
         .args(args)
         .output()
         .await
@@ -49,7 +72,7 @@ async fn run_logged(
 /// with every Windows install — avoids pulling in a registry crate for a
 /// couple of string reads.
 fn reg_query_value(key: &str, name: &str) -> Option<String> {
-    let out = std::process::Command::new("reg").args(["query", key, "/v", name]).output().ok()?;
+    let out = sync_command("reg").args(["query", key, "/v", name]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -177,7 +200,7 @@ async fn ensure_podman_installed(log: &ProvisioningLog) -> Result<()> {
 /// (`EF BB BF`) followed by the text in UTF-16LE, not UTF-8 — decoded for
 /// real below, not assumed.
 async fn check_wsl2_usable(log: &ProvisioningLog) -> Result<()> {
-    let output = match tokio::process::Command::new("wsl").arg("--status").output().await {
+    let output = match tokio_command("wsl").arg("--status").output().await {
         Ok(o) => o,
         Err(e) => {
             log.error(&format!("`wsl --status` could not even be run: {e}"));

@@ -12,6 +12,26 @@ use wait_timeout::ChildExt;
 
 use crate::types::ServiceDef;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Same fix, same reasoning, as `crates/ls-containers/src/podman.rs`'s
+/// identical constant: prevents `git` (a console-mode binary) from popping
+/// its own visible console window when spawned from this GUI app on
+/// Windows. `git_bytes` runs on every Send, including from a Windows
+/// sender - round 12's audit found `podman-compose` wasn't the only
+/// unsuppressed spawn point in this codebase.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg_attr(not(windows), allow(unused_mut))]
+fn git_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /// Every `git_bytes` call is a fast, local, read-only operation, even
 /// against a large real repo (verified: `git archive --format=tar HEAD`
 /// against this repo itself takes well under a second). 30s is generous
@@ -384,7 +404,7 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 ///      returns would deadlock the exact way this function exists to avoid.
 fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let start = Instant::now();
-    let mut child = Command::new("git")
+    let mut child = git_command("git")
         .arg("-C")
         .arg(root)
         .arg("--no-pager")

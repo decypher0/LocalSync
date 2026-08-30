@@ -408,3 +408,62 @@ about the *push/pull mechanics and targeting* working as described.
 
 Same as the rest of this document — this round is about resilience/clarity
 around flows that already existed, not a new end state to check.
+
+---
+
+## Round 13 addendum: no more Windows console windows, a details panel that actually shows something
+
+**This round could not visually confirm either fix — there is no real display
+in the environment that built it.** Everything below is real, but real at the
+code/process level (a subprocess actually spawns with the right flag; a real
+`podman-compose` process's stdout is actually captured into the log a live
+view tails) — not "we saw it and it looked right." That confirmation is
+squarely what this checklist entry is for.
+
+### What changed, and why (root causes, not guesses)
+
+- **Every subprocess spawn in this codebase now goes through a small
+  `CREATE_NO_WINDOW`-setting helper on Windows** (`podman`, `podman-compose`,
+  `git`, `winget`, `wsl.exe`, `reg.exe` — audited, not assumed to be just
+  one call site) instead of a bare `Command::new`. Verified: the Windows-only
+  provisioning module (`windows_impl.rs`) was actually compiled for real on a
+  native Windows host as part of this round (it's `#[cfg(target_os =
+  "windows")]`-gated, so WSL2 alone can't even compile it) — a real build
+  check, not just "the diff looks right."
+- **Root cause of the Linux "Show details" panel showing (almost) nothing**:
+  round 9's live-tailer only ever watched `ensure_podman_ready()`'s own
+  preflight-check logging — on Linux that's a handful of near-instant lines
+  ("podman found on PATH", ...), then total silence for the rest of a real
+  Run, because the actual slow part (`podman-compose up` pulling/building
+  images) was never logged anywhere at all. Fixed: `podman-compose`'s real
+  stdout/stderr now streams into the same log file live, line by line, as it
+  runs — the exact data source the existing tailer already watches, so no
+  separate plumbing was needed on the UI side once this was fixed.
+- **A second, independent bug found while investigating**: the details panel
+  was being hidden the instant a Run finished — *including on failure*,
+  which is exactly the moment its content (now real) would matter most.
+  Fixed: it now stays visible after a failure (clearing only when you start
+  a fresh Run attempt), and only auto-hides on success, where the screen has
+  already moved on to the running-session view anyway.
+
+### What to check on real hardware
+
+1. **Windows**: receive a project and click Run. Watch closely during
+   provisioning and container bring-up — **no terminal/console window should
+   flash or appear at any point**, however briefly.
+2. **Either platform**: click Run, then **Show details** while it's still
+   provisioning. Confirm real, moving text appears — not a static/empty box
+   — and that it looks like actual `podman-compose` output (image
+   pulls, container names, etc.), not just a couple of static lines that
+   stop.
+3. **Trigger a Run failure on purpose** (same trick as the round 9 addendum
+   above — rename `podman-compose` off `PATH` temporarily, or similar).
+   Confirm the details panel **stays visible with its content intact** after
+   the error appears, instead of vanishing the instant it fails.
+
+### What "success" looks like
+
+Step 1: genuinely nothing flashes on screen, the whole time. Steps 2–3: the
+panel shows real, live-updating content during a run, and that content is
+still there to read after a failure — not just before you'd sworn you saw
+something.
