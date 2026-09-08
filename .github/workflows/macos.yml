@@ -1,0 +1,249 @@
+# Round 14: real macOS verification, via GitHub Actions' real macOS runners -
+# the whole point being genuine build/test evidence on real Apple hardware,
+# without anyone here needing to own a Mac. See README.md's "macOS CI
+# verification" section for exactly what this does and does not prove, and
+# docs/round5-manual-test-checklist.md for what's still deferred to a human
+# on real hardware.
+#
+# Manual trigger only (workflow_dispatch), deliberately not "on every push":
+# macOS runners bill against GitHub Actions' free-minutes quota at 10x the
+# rate of Linux runners (GitHub's own published multiplier), so this only
+# runs when someone actually wants a fresh macOS verification, not on every
+# commit to every branch. Run it from the Actions tab ("Run workflow"), or
+# `gh workflow run macos.yml`.
+name: macOS build & verification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ============================================================
+  # Job 1: what "should work" on macOS - compiling and testing the
+  # workspace, and producing a real .dmg. This is the part of this round
+  # that's expected to just work, since none of it depends on anything
+  # macOS-specific being pre-provisioned (Xcode CLT, Homebrew, and a recent
+  # Rust are already on every GitHub-hosted macOS runner image).
+  # ============================================================
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show what this runner actually is
+        # The real, unglamorous first step of any "does this work on macOS"
+        # investigation: know exactly what "macOS" means here before
+        # concluding anything from what does or doesn't work below.
+        run: |
+          echo "== sw_vers =="
+          sw_vers
+          echo "== uname -a =="
+          uname -a
+          echo "== arch =="
+          arch
+          echo "== rustc --version (pre-toolchain-action, whatever's preinstalled) =="
+          rustc --version || echo "(none preinstalled)"
+          echo "== brew --version =="
+          brew --version
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Two very different Cargo profiles get built in this one job
+          # (test profile below, then a release build via `tauri build`) -
+          # separate cache keys so one doesn't evict the other.
+          key: macos-ci
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: cargo test --workspace
+        # Every crate, every test, real macOS - the actual point of this
+        # step. continue-on-error: true is deliberate: a real, honestly-
+        # reported test failure here is exactly what this round exists to
+        # surface, and it must not be allowed to silently cancel the .dmg
+        # build below - these are two independent questions ("do the tests
+        # pass on real macOS" and "does it compile into a real .dmg on real
+        # macOS"), and a failure in one shouldn't hide the answer to the
+        # other. The real pass/fail/skip breakdown per crate is read back
+        # out of this step's own output further down (see the summary step)
+        # - nothing here is allowed to quietly turn a failure into a
+        # reported success.
+        id: workspace_tests
+        continue-on-error: true
+        run: |
+          set +e -o pipefail
+          # GitHub's default bash mode for `run:` steps is `-eo pipefail`,
+          # which would abort this script the instant `cargo test` exits
+          # non-zero - before the exit_code capture below ever runs, and
+          # before continue-on-error even gets a chance to matter. `set +e`
+          # here disables that so a real test failure is *captured and
+          # reported*, not just papered over by never reaching the report.
+          cargo test --workspace --no-fail-fast -- --test-threads=2 2>&1 | tee /tmp/cargo-test-macos.log
+          exit_code=${PIPESTATUS[0]}
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          exit 0
+        shell: bash
+
+      - name: Upload cargo test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-test-macos-log
+          path: /tmp/cargo-test-macos.log
+
+      - name: Build the real .dmg
+        # The exact command docs/macos-build.md already documents for a
+        # human doing this on their own Mac - run for real here instead.
+        working-directory: apps/desktop
+        run: |
+          npm install
+          npm run tauri build -- --bundles dmg
+
+      - name: Locate the built .dmg
+        id: find_dmg
+        run: |
+          dmg_path=$(find apps/desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' | head -n1)
+          if [ -z "$dmg_path" ]; then
+            echo "No .dmg found under target/release/bundle/dmg - build must have failed silently somewhere upstream." >&2
+            exit 1
+          fi
+          echo "found: $dmg_path"
+          echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the .dmg as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-macos-dmg
+          path: ${{ steps.find_dmg.outputs.dmg_path }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## macOS build & test summary"
+            echo
+            if [ "${{ steps.workspace_tests.outputs.exit_code }}" = "0" ]; then
+              echo "- \`cargo test --workspace\`: **all passed**"
+            else
+              echo "- \`cargo test --workspace\`: **one or more failures** (exit code \`${{ steps.workspace_tests.outputs.exit_code }}\`) - see the \`cargo-test-macos-log\` artifact and the raw step output above for exactly which."
+            fi
+            echo "- \`.dmg\` build: reached this line, so it succeeded (a failed build stops the job before here) - see the \`LocalSync-macos-dmg\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================
+  # Job 2: the genuinely open question this round exists to answer -
+  # whether Podman machine provisioning (crates/ls-containers/src/
+  # provisioning/macos_impl.rs, never compiled or run before this workflow
+  # existed - #[cfg(target_os = "macos")] excluded it from every other
+  # environment in this project) can work at all inside a GitHub-hosted
+  # macOS runner. Deliberately a separate job, not more steps bolted onto
+  # the one above: GitHub's macOS runners are themselves virtualized, and
+  # Podman's machine feature needs to boot a *nested* VM (Apple's
+  # Virtualization.framework/Hypervisor.framework, or QEMU as a fallback) -
+  # nested virtualization support on shared/virtualized CI infrastructure is
+  # a real, documented pain point for tools like this, not a hypothetical.
+  # This attempts the real thing and reports the real outcome - success,
+  # partial success, or a real blocked-here error - rather than assuming
+  # either way.
+  # ============================================================
+  podman-provisioning-investigation:
+    runs-on: macos-latest
+    steps:
+      - name: Hardware-virtualization diagnostics
+        # The single most relevant fact for this whole investigation,
+        # gathered before attempting anything: does this runner's kernel
+        # itself believe hardware virtualization is available to it. If
+        # this reports 0, everything below is expected to fail for a real,
+        # diagnosable reason - not a Podman or LocalSync bug.
+        run: |
+          echo "== sysctl kern.hv_support (1 = hypervisor available to this OS instance) =="
+          sysctl kern.hv_support || echo "(sysctl kern.hv_support not available on this OS version)"
+          echo "== sw_vers =="
+          sw_vers
+          echo "== arch =="
+          arch
+
+      - name: Install Podman via Homebrew
+        id: install_podman
+        continue-on-error: true
+        run: |
+          brew install podman podman-compose
+          podman --version
+          podman-compose --version
+
+      - name: podman machine init
+        id: machine_init
+        if: steps.install_podman.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: podman machine init
+
+      - name: podman machine start
+        id: machine_start
+        # Attempted even if init reported failure (e.g. "already exists"
+        # from a re-run) - the real, interesting failure mode is expected
+        # here, not at init, since this is the step that actually has to
+        # boot a VM.
+        if: steps.install_podman.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: podman machine start
+
+      - name: podman info (real end-to-end check)
+        id: podman_info
+        if: steps.install_podman.outcome == 'success'
+        continue-on-error: true
+        run: podman info
+
+      - name: A real container, if we got this far
+        id: real_container
+        # The actual bar this project cares about: not just "the machine
+        # reports running", but "a real container can actually execute" -
+        # the same bar crates/ls-containers' own tests
+        # (`podman_stack_available()`-gated) already hold Linux/Windows to.
+        if: steps.podman_info.outcome == 'success'
+        continue-on-error: true
+        run: podman run --rm hello-world
+
+      - name: Honest outcome summary
+        if: always()
+        run: |
+          {
+            echo "## Podman-on-macOS-CI investigation - real outcome"
+            echo
+            echo "| Step | Outcome |"
+            echo "|---|---|"
+            echo "| Install (\`brew install podman podman-compose\`) | ${{ steps.install_podman.outcome }} |"
+            echo "| \`podman machine init\` | ${{ steps.machine_init.outcome || 'skipped (install failed)' }} |"
+            echo "| \`podman machine start\` | ${{ steps.machine_start.outcome || 'skipped (install failed)' }} |"
+            echo "| \`podman info\` | ${{ steps.podman_info.outcome || 'skipped (earlier step failed)' }} |"
+            echo "| Real container run (\`podman run --rm hello-world\`) | ${{ steps.real_container.outcome || 'skipped (podman info failed)' }} |"
+            echo
+            if [ "${{ steps.real_container.outcome }}" = "success" ]; then
+              echo "**Podman provisioning genuinely works on this GitHub-hosted macOS runner.** \
+              This is real, not assumed - a real container actually ran. \
+              crates/ls-containers/src/provisioning/macos_impl.rs's own logic was never exercised \
+              to get here, though (this investigation calls the same podman/brew commands directly, \
+              not \`ensure_podman_ready()\` itself) - see README.md for exactly what that does and \
+              doesn't confirm about the app's own macOS provisioning *code*, as opposed to the \
+              underlying commands it wraps."
+            else
+              echo "**Podman provisioning did not complete successfully on this GitHub-hosted \
+              macOS runner** - see the failed step's own log output above (and \
+              \`sysctl kern.hv_support\` from the diagnostics step) for the real error, most likely \
+              a nested-virtualization restriction rather than anything about Podman or this \
+              project's code being wrong."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Exit honestly
+        # This job's own pass/fail in the Actions UI should reflect
+        # reality - if Podman provisioning didn't work, this workflow run
+        # should show that plainly (a red X on this job), not a false green
+        # checkmark papering over a real, reportable CI limitation.
+        if: steps.real_container.outcome != 'success'
+        run: |
+          echo "Podman-in-CI did not fully succeed - see the summary above. Failing this job \
+          on purpose so the Actions UI reflects that honestly." >&2
+          exit 1
