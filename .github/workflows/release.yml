@@ -140,16 +140,30 @@ jobs:
       - name: Locate the built installers
         id: find_installers
         run: |
-          deb_path=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' | head -n1)
-          appimage_path=$(find apps/desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' | head -n1)
-          if [ -z "$deb_path" ]; then
-            echo "No .deb found under target/release/bundle/deb" >&2
-            exit 1
-          fi
-          if [ -z "$appimage_path" ]; then
-            echo "No .AppImage found under target/release/bundle/appimage" >&2
-            exit 1
-          fi
+          # Same real bug the macOS .dmg lookup had, same fix: not
+          # target/release/bundle/<fmt> specifically - when the build
+          # resolves to an explicit target triple rather than the host's
+          # implicit one, Cargo/Tauri nest the whole build under
+          # target/<triple>/release/... instead. Matching on the
+          # bundle/<fmt>/*.<ext> path suffix under the whole target/ tree
+          # finds it regardless of which triple the build step used.
+          find_one() {
+            local fmt="$1" ext="$2"
+            local matches
+            matches=$(find apps/desktop/src-tauri/target -type f -path "*/bundle/$fmt/*.$ext" 2>/dev/null)
+            if [ -z "$matches" ]; then
+              echo "No .$ext found anywhere under apps/desktop/src-tauri/target (looked for */bundle/$fmt/*.$ext) - build must have failed silently somewhere upstream." >&2
+              return 1
+            fi
+            if [ "$(echo "$matches" | wc -l)" -gt 1 ]; then
+              echo "Note: more than one .$ext found, using the first - all matches:" >&2
+              echo "$matches" >&2
+            fi
+            echo "$matches" | head -n1
+          }
+
+          deb_path=$(find_one deb deb) || exit 1
+          appimage_path=$(find_one appimage AppImage) || exit 1
           echo "found deb: $deb_path"
           echo "found appimage: $appimage_path"
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
