@@ -37,10 +37,25 @@ runs:
       id: find_dmg
       shell: bash
       run: |
-        dmg_path=$(find apps/desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' | head -n1)
-        if [ -z "$dmg_path" ]; then
-          echo "No .dmg found under target/release/bundle/dmg - build must have failed silently somewhere upstream." >&2
+        # Not target/release/bundle/dmg specifically - when `tauri build`
+        # is given (or defaults to) a specific target triple rather than
+        # the host's implicit one, Cargo/Tauri nest the whole build under
+        # target/<triple>/release/... instead (e.g.
+        # target/aarch64-apple-darwin/release/bundle/dmg,
+        # target/universal-apple-darwin/release/bundle/dmg) - exactly what
+        # docs/macos-build.md already documents as possible, but this
+        # lookup wasn't accounting for. Matching on the `bundle/dmg/*.dmg`
+        # suffix instead of the full path finds it under any triple
+        # (or none) without needing to know which one the build step used.
+        matches=$(find apps/desktop/src-tauri/target -type f -path '*/bundle/dmg/*.dmg' 2>/dev/null)
+        if [ -z "$matches" ]; then
+          echo "No .dmg found anywhere under apps/desktop/src-tauri/target - build must have failed silently somewhere upstream." >&2
           exit 1
+        fi
+        dmg_path=$(echo "$matches" | head -n1)
+        if [ "$(echo "$matches" | wc -l)" -gt 1 ]; then
+          echo "Note: more than one .dmg found, using the first - all matches:" >&2
+          echo "$matches" >&2
         fi
         echo "found: $dmg_path"
         echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
