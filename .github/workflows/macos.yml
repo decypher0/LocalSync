@@ -49,13 +49,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # Two very different Cargo profiles get built in this one job
-          # (test profile below, then a release build via `tauri build`) -
-          # separate cache keys so one doesn't evict the other.
+          # (test profile below, then a release build via the composite
+          # action's `tauri build`) - separate cache keys so one doesn't
+          # evict the other.
           key: macos-ci
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 'lts/*'
 
       - name: cargo test --workspace
         # Every crate, every test, real macOS - the actual point of this
@@ -93,29 +90,17 @@ jobs:
           path: /tmp/cargo-test-macos.log
 
       - name: Build the real .dmg
-        # The exact command docs/macos-build.md already documents for a
-        # human doing this on their own Mac - run for real here instead.
-        working-directory: apps/desktop
-        run: |
-          npm install
-          npm run tauri build -- --bundles dmg
-
-      - name: Locate the built .dmg
-        id: find_dmg
-        run: |
-          dmg_path=$(find apps/desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' | head -n1)
-          if [ -z "$dmg_path" ]; then
-            echo "No .dmg found under target/release/bundle/dmg - build must have failed silently somewhere upstream." >&2
-            exit 1
-          fi
-          echo "found: $dmg_path"
-          echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
+        # Round 15 extracted this into a composite action so the release
+        # pipeline (release.yml) can build the same .dmg the same way,
+        # without a second, drift-prone copy of these steps.
+        id: build_dmg
+        uses: ./.github/actions/build-macos-dmg
 
       - name: Upload the .dmg as a workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: LocalSync-macos-dmg
-          path: ${{ steps.find_dmg.outputs.dmg_path }}
+          path: ${{ steps.build_dmg.outputs.dmg_path }}
 
       - name: Summary
         if: always()
