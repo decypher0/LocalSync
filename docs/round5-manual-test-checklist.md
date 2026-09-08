@@ -467,3 +467,48 @@ Step 1: genuinely nothing flashes on screen, the whole time. Steps 2–3: the
 panel shows real, live-updating content during a run, and that content is
 still there to read after a failure — not just before you'd sworn you saw
 something.
+
+---
+
+## Round 14 addendum: real macOS verification via CI (no Mac needed to check)
+
+Unlike every other addendum in this file, this one doesn't need real hardware
+you're sitting in front of — it needs you to click a button on GitHub and
+read the result.
+
+### What to do
+
+1. Go to the repo's **Actions** tab on GitHub → **macOS build & verification**
+   → **Run workflow** (it's `workflow_dispatch`-only on purpose, see the
+   workflow file's own comment — it doesn't run automatically, so this step
+   is required before anything below exists to check).
+2. Wait for both jobs to finish (`build-and-test` and
+   `podman-provisioning-investigation` run independently and don't block
+   each other).
+
+### What to check
+
+- **`build-and-test`**: green means the workspace actually compiled and its
+  tests actually ran on real macOS. Open the job's own step summary for the
+  real `cargo test --workspace` pass/fail breakdown (the `cargo-test-macos-log`
+  artifact has the full raw output if a summary line isn't enough). Download
+  the `LocalSync-macos-dmg` artifact and confirm it's a real `.dmg` — you
+  don't need a Mac to check the file exists and has a real size; opening/
+  installing it does need one.
+- **`podman-provisioning-investigation`**: read its step summary regardless
+  of whether the job shows green or red — **red here is an expected, honest
+  possible outcome**, not a bug in this round's work. It means Podman
+  couldn't fully provision inside GitHub's macOS runner (most likely a
+  nested-virtualization restriction — check the `sysctl kern.hv_support`
+  output in the first step's log for the real diagnostic signal), which is
+  itself the real answer to a real, previously-unknown question. Green means
+  a real container genuinely ran (`podman run --rm hello-world` succeeded).
+
+### What "success" looks like
+
+Note: "success" here doesn't mean "both jobs are green." It means you can
+now state, for the first time, a **real, evidence-based answer** — for both
+"does LocalSync build and pass its tests on real macOS" and "does Podman
+provisioning work inside macOS CI" — instead of the "should work by analogy"
+this project has had since round 5. If either investigation was blocked,
+that itself is the useful, honest outcome to record here.
