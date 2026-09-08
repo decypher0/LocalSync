@@ -1,0 +1,220 @@
+# Round 15: on-demand release pipeline. Builds a real installer for
+# Windows, Linux, and macOS and publishes them together as one GitHub
+# Release - the "developer clicks one button, gets three real, downloadable
+# installers a few minutes later" this round exists to deliver. See
+# README.md's "Download & Install" section for what a non-technical end
+# user actually does with what this produces.
+#
+# Two ways to trigger, both supported rather than forcing one:
+#   - workflow_dispatch: the "Run workflow" button in the Actions tab - no
+#     git tag syntax to remember, just a click.
+#   - push a tag matching v* (e.g. `git tag v0.1.0 && git push origin v0.1.0`)
+#     - for anyone who prefers the tag-based flow.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  # A manual run has no tag to name the release after - generate a real,
+  # non-colliding identifier (date + short commit SHA) rather than reusing
+  # a fixed name that would silently overwrite a previous manual release's
+  # assets. A tag push just uses the pushed tag, unchanged.
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${{ github.ref_name }}"
+          else
+            version="local-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Release version for this run: $version"
+
+  # ------------------------------------------------------------
+  # Windows: NSIS only, deliberately - see the comment on --bundles below.
+  # ------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Build the NSIS installer
+        # Deliberately `--bundles nsis`, not the config's default `"all"` -
+        # tauri.conf.json's `bundle.targets: "all"` would otherwise also
+        # attempt a WiX-based .msi, which needs Tauri's bundler to download
+        # the ~40MB WiX toolset on first use - a well-documented source of
+        # CI flakiness/timeouts for exactly this kind of on-demand pipeline,
+        # and not something this project has ever needed: NSIS (with round
+        # 8's firewall-rule install hook, apps/desktop/src-tauri/windows/hooks.nsh)
+        # is what's actually been built and proven reliable here since round 5.
+        # Restricting the bundle target avoids the whole flakiness question
+        # rather than adding retry/timeout logic around a build nobody asked
+        # for the output of.
+        working-directory: apps/desktop
+        run: |
+          npm install
+          npm run tauri build -- --bundles nsis
+
+      - name: Locate the built installer
+        id: find_installer
+        shell: bash
+        run: |
+          exe_path=$(find apps/desktop/src-tauri/target/release/bundle/nsis -name '*.exe' | head -n1)
+          if [ -z "$exe_path" ]; then
+            echo "No .exe found under target/release/bundle/nsis - build must have failed silently somewhere upstream." >&2
+            exit 1
+          fi
+          echo "found: $exe_path"
+          echo "exe_path=$exe_path" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-windows-installer
+          path: ${{ steps.find_installer.outputs.exe_path }}
+
+  # ------------------------------------------------------------
+  # Linux: .deb + AppImage, built on ubuntu-22.04 (not ubuntu-latest/24.04)
+  # on purpose - see the comment below.
+  # ------------------------------------------------------------
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        # Same package list scripts/setup-linux-deps.sh already documents
+        # for a human building this by hand, minus podman/podman-compose/
+        # uidmap/slirp4netns - those are the *running* app's runtime
+        # dependencies (Run-flow container orchestration), not needed to
+        # compile and bundle it.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Build the .deb and AppImage
+        # ubuntu-22.04, not ubuntu-latest (24.04 as of this writing):
+        # building against a newer glibc raises the *minimum* glibc version
+        # the resulting binary needs at runtime - an AppImage bundles its
+        # other dependencies but not glibc itself, so a binary built on
+        # 24.04 would refuse to run on a 22.04 (or older-but-still-common)
+        # target machine with a real "GLIBC_2.3x not found" error. Building
+        # on the oldest still-supported base (22.04 is Tauri v2's own
+        # documented minimum, since it's the oldest Ubuntu LTS whose repos
+        # carry the libwebkit2gtk-4.1 this app needs) is what keeps the
+        # built installer runnable on the widest range of real Linux
+        # machines - the actual point of shipping a downloadable installer
+        # to people who aren't going to `cargo build` it themselves.
+        working-directory: apps/desktop
+        run: |
+          npm install
+          npm run tauri build -- --bundles deb,appimage
+
+      - name: Locate the built installers
+        id: find_installers
+        run: |
+          deb_path=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' | head -n1)
+          appimage_path=$(find apps/desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' | head -n1)
+          if [ -z "$deb_path" ]; then
+            echo "No .deb found under target/release/bundle/deb" >&2
+            exit 1
+          fi
+          if [ -z "$appimage_path" ]; then
+            echo "No .AppImage found under target/release/bundle/appimage" >&2
+            exit 1
+          fi
+          echo "found deb: $deb_path"
+          echo "found appimage: $appimage_path"
+          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+          echo "appimage_path=$appimage_path" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-linux-deb
+          path: ${{ steps.find_installers.outputs.deb_path }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-linux-appimage
+          path: ${{ steps.find_installers.outputs.appimage_path }}
+
+  # ------------------------------------------------------------
+  # macOS: reuses round 14's own build steps via the composite action
+  # extracted from macos.yml (.github/actions/build-macos-dmg) - the exact
+  # same build, not a second copy of it that could drift.
+  # ------------------------------------------------------------
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: build_dmg
+        uses: ./.github/actions/build-macos-dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-macos-dmg
+          path: ${{ steps.build_dmg.outputs.dmg_path }}
+
+  # ------------------------------------------------------------
+  # Publish: only this job gets contents:write, and only for as long as it
+  # needs it - the three build jobs above never touch the release itself.
+  # ------------------------------------------------------------
+  release:
+    needs: [determine-version, build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List what's about to be released
+        run: ls -la dist/
+
+      - name: Create the GitHub Release
+        # softprops/action-gh-release: actions/create-release (the original
+        # GitHub-maintained one) is archived and no longer recommended;
+        # this is the actively-maintained, current standard replacement.
+        # Pinned to the v2 major tag (not the brand-new v3, released within
+        # the last couple of weeks as of this writing) for a release
+        # pipeline that's meant to be trustworthy on day one, not an early
+        # adopter of a major version bump.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.determine-version.outputs.version }}
+          name: LocalSync ${{ needs.determine-version.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+          # A workflow_dispatch build of an unreleased dev snapshot isn't a
+          # tagged version bump - marked as a pre-release so it's clearly
+          # distinguished from a real `vX.Y.Z` tag push on the Releases
+          # page, without needing two different release-creation steps.
+          prerelease: ${{ github.ref_type != 'tag' }}

@@ -1,0 +1,46 @@
+name: Build LocalSync .dmg (macOS)
+description: >
+  Installs the Rust/Node toolchains and builds the real .dmg via the exact
+  command docs/macos-build.md documents for a human doing this by hand
+  (npm run tauri build -- --bundles dmg). Extracted from round 14's
+  macos.yml so round 15's release.yml can reuse the same setup/build steps
+  instead of duplicating them in a second file that could drift out of sync -
+  this is the one place "how do you build the macOS .dmg in CI" lives.
+  Assumes the caller has already checked out the repo (a composite action
+  runs in whatever's already on disk, checkout stays the caller's job).
+
+outputs:
+  dmg_path:
+    description: Path to the built .dmg
+    value: ${{ steps.find_dmg.outputs.dmg_path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: macos-build
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 'lts/*'
+
+    - name: Build the .dmg
+      shell: bash
+      working-directory: apps/desktop
+      run: |
+        npm install
+        npm run tauri build -- --bundles dmg
+
+    - name: Locate the built .dmg
+      id: find_dmg
+      shell: bash
+      run: |
+        dmg_path=$(find apps/desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' | head -n1)
+        if [ -z "$dmg_path" ]; then
+          echo "No .dmg found under target/release/bundle/dmg - build must have failed silently somewhere upstream." >&2
+          exit 1
+        fi
+        echo "found: $dmg_path"
+        echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"

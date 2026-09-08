@@ -512,3 +512,48 @@ now state, for the first time, a **real, evidence-based answer** — for both
 provisioning work inside macOS CI" — instead of the "should work by analogy"
 this project has had since round 5. If either investigation was blocked,
 that itself is the useful, honest outcome to record here.
+
+---
+
+## Round 15 addendum: the release pipeline, and the new Download & Install steps
+
+Also doesn't need you sitting at a specific machine to check the pipeline
+itself — but the *install steps* genuinely do, on all three OSes, since
+they're brand new and aimed at a first-time, non-technical user for the
+first time in this project.
+
+### What to do
+
+1. Go to the repo's **Actions** tab → **Release** → **Run workflow** (or
+   push a tag: `git tag v0.1.0 && git push origin v0.1.0` — either
+   triggers it). Wait for all four build/release jobs to finish.
+2. Confirm a new entry appears on the **Releases** page with three files
+   attached: a Windows `.exe`, a macOS `.dmg`, and both a Linux `.deb` and
+   `.AppImage`.
+
+### What to check
+
+- **On a real Windows machine you haven't already set up for development**:
+  download the `.exe` from the Release, run it, confirm SmartScreen shows
+  up and "More info" → "Run anyway" actually gets you through it, and that
+  the app installs and opens.
+- **On a real Mac**: download the `.dmg`, confirm the drag-to-Applications
+  step works as described, and that double-clicking normally really does
+  fail first (confirming the warning text in the README is accurate) before
+  right-click → Open succeeds.
+- **On a real Linux machine** (ideally one you haven't already installed
+  build dependencies on): try both the `.deb` and the AppImage per the
+  README's steps, including on a distro that doesn't ship `libfuse2` by
+  default if you have one handy, to confirm that specific guidance is
+  accurate too.
+- Confirm the version-naming scheme reads sensibly on the Releases page
+  either way you triggered it (a real `vX.Y.Z` tag, or the generated
+  `local-<date>-<sha>` name from a manual run) and that re-running a manual
+  build doesn't silently clobber a previous one's assets.
+
+### What "success" looks like
+
+A person who has never seen this project, following only the README's
+**Download & Install** section (not this checklist, not anything
+developer-facing), ends up with a running LocalSync on their machine,
+without ever feeling like something was broken versus merely unsigned.
