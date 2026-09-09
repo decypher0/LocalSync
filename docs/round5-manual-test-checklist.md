@@ -613,3 +613,112 @@ Someone with an older installed build, doing nothing except opening the
 app, sees a real, real update offered — reviews it, clicks once, and
 ends up on the new version without ever touching a terminal or
 re-downloading anything by hand.
+
+---
+
+## Round 17 addendum: guided database-source wizard for Send
+
+Round 17 replaces the Send tab's single-folder input with a real,
+multi-step wizard, and adds a new database-dump path into the snapshot
+manifest/payload. Everything below is verified in this build environment
+via real automated tests (multi-folder bundling, a real disposable local
+MariaDB instance, real connect/list/export, a real round-trip reimport,
+and the full command-layer flow via `wizard_send_flow_test.rs`) — what's
+deferred to real hardware is purely the *visual* click-through (does the
+wizard's UI actually render and step through correctly in a real running
+app), the same category of gap every prior round's UI work has had.
+
+### What changed
+
+- **Multi-folder Send.** The Send tab's "Browse…" now opens a real
+  multi-select directory picker; selected folders show in a removable
+  list before moving on.
+- **The wizard flow.** "Does this project need database access?" (asked
+  once) → per-folder detection (Spring Boot's `application.properties`/
+  `.yml`) → dump-already-exists vs. connect-and-export → manual entry
+  when detection fails, feeding into the same subsequent flow → a final
+  summary before the real Send.
+- **Real live database browsing.** When exporting, the wizard shows the
+  actual tables in the developer's own database (with approximate row
+  counts) before asking which to include — never a blind guess. Export
+  is always the full table content, never sampled.
+- **Manifest extension.** `Manifest.folders` and `Manifest.database_dumps`
+  are new, additive fields (old manifests deserialize fine without them;
+  old code reading a new manifest ignores them) carrying the per-folder
+  breakdown and `{folder, schema, dump_file, hash}` for each packaged
+  dump.
+- **A real bug found and fixed in the same area**: round 16's own
+  auto-update banner reused the id `update-banner`, silently colliding
+  with an older Receive-tab element of the same id (round 11's "a new
+  update just arrived from the sender" notification) — `document.
+  getElementById` was silently resolving to the wrong element for one of
+  the two. Renamed round 16's banner to `app-update-banner`; the Receive
+  tab's own push-update notification is unaffected but now actually
+  correct again.
+
+### What to do
+
+1. On the Send tab, click **Add folder(s)…** and select two or more
+   independent project folders in one picker (e.g. copies of this repo's
+   `sample-project`/`sample-project-node` fixtures, or your own real
+   multi-folder Spring Boot setup) — confirm they all show in the list
+   with working **Remove** buttons.
+2. Click **Next**, answer **Yes** to "Does this project need database
+   access?" — confirm the wizard walks each folder one at a time,
+   showing "Folder N of M".
+3. Point one folder at a real local MySQL/MariaDB with a Spring Boot
+   `application.properties`/`.yml` already configured — confirm the
+   wizard auto-detects and displays the real host/port/database/username
+   before asking anything.
+4. Choose **No, connect and export** — confirm a real table list appears
+   (with row-count estimates), select a subset, click **Export selected
+   tables**, and confirm a real size is reported.
+5. On a second folder, delete/rename its config so detection fails —
+   confirm manual entry is offered, and that submitting it re-attempts a
+   real connection before continuing into the same "do you have a dump"
+   question.
+6. On a third folder, answer **Yes, I have a dump file** and browse to
+   an existing `.sql` file directly — confirm no connection is attempted
+   for that folder.
+7. Reach the final **Ready to send** summary, confirm it correctly
+   labels each folder's outcome (no database / supplied dump / exported
+   dump), then click **Send** and complete a real receive on the other
+   side — confirm the diff review shows entries from every folder,
+   correctly prefixed by folder name.
+
+### What changed, and why (root causes, not guesses)
+
+`ls_security::diff_summary` originally hard-errored ("payload does not
+contain diff_stat.json") for any snapshot without a single top-level
+`diff_stat.json` — which is exactly what a multi-folder snapshot produces
+(each folder ships its own, at `<folder>/diff_stat.json`). Without
+fixing this, `receive_snapshot` itself would fail outright for every
+multi-folder send, before a human ever saw a review screen — found and
+fixed as part of this round's own work, verified by a real end-to-end
+test (`wizard_send_flow_test.rs`) that would fail immediately if this
+regressed.
+
+A second real, environment-specific finding (not a code bug, but worth
+recording exactly like the pasta-segfault and podman-storage-path issues
+documented earlier): this sandbox's `mariadbd` binary runs under an
+AppArmor profile that denies *any* process — including its own direct
+parent — from delivering it a signal at all (confirmed via `dmesg`'s
+audit log). A disposable test server's `Child::kill()` fails silently
+there, and the matching `Child::wait()` then hangs forever. Both new
+live-database test files stop their disposable server with a real SQL
+`SHUTDOWN` instead, which isn't a signal and isn't subject to that
+mediation — real hardware without this specific AppArmor confinement
+would never have hit this at all, but the fix is correct and harmless
+either way.
+
+### What "success" looks like
+
+A developer with several raw, uncontainerized project folders — some
+with a database, some without, some with an existing dump, some needing
+a fresh export — can go from "select folders" to "sent" without ever
+leaving the guided flow or being asked to decide anything about a
+database blind. The receiver can review the resulting diff, correctly
+broken out per folder, exactly as informatively as a single-folder send
+always could. Building and running whatever was received — especially
+several raw, non-containerized folders with no `docker-compose.yml`
+between them — is explicitly not yet solved; that's the next round's job.

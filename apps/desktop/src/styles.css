@@ -310,3 +310,23 @@ button:disabled { opacity: 0.5; cursor: default; }
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* Round 17: the Send-side database-source wizard. One `.wizard-step` visible
+   at a time (app.js toggles `.hidden`); each step reuses existing card/list/
+   button styles rather than inventing new ones, so it reads as part of the
+   same app, not a bolted-on dialog. */
+.wizard { margin-top: 8px; }
+.wizard-step h3 { margin: 0 0 6px; font-size: 1rem; }
+.wizard-step { padding-bottom: 4px; }
+.wizard-step .primary-btn,
+.wizard-step .ghost-btn { margin-top: 8px; margin-right: 8px; }
+#wiz-folder-list li,
+#wiz-tables-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+#wiz-folder-list .remove-folder-btn { flex-shrink: 0; }
+#wiz-tables-list label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; color: var(--fg); }
+#wiz-db-folder-progress { margin: -4px 0 10px; }

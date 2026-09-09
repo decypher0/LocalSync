@@ -345,6 +345,61 @@ fn port_to_string(v: &serde_yaml::Value) -> Option<String> {
     }
 }
 
+/// Round 17: combines each folder's already-built tar.gz payload (each one
+/// a complete, independently-valid `bundle_project` output — `source/`,
+/// `diff_stat.json`, `diff.patch`, `docker-compose.yml`, `db-seed/`) into
+/// one tar.gz for a multi-folder snapshot, with every entry re-homed under
+/// `<label>/...` so two independent projects sent together (the developer's
+/// real case: several standalone Spring Boot folders) never collide on path
+/// — without this prefixing, two folders would both try to write
+/// `source/README.md` into the same combined tar. Deliberately re-decodes
+/// and re-encodes each bundle's tar.gz rather than reworking
+/// `bundle_project` itself to take a shared builder + prefix: `bundle_project`
+/// is exercised by five existing, passing tests against its exact
+/// unprefixed output, and re-plumbing a prefix through every one of its
+/// internal helpers risked those tests silently changing behavior for a
+/// feature (multi-folder) those tests don't exist to cover. This function
+/// is the one new, independently testable seam instead.
+///
+/// Any `dumps` are appended as one more tar entry each, at
+/// `db-dumps/<folder>/<schema>.sql` — matching `DatabaseDumpEntry.dump_file`
+/// exactly, since that's what a receiver needs to actually find the bytes.
+pub(crate) fn merge_folder_payloads(
+    bundles: &[(String, GitBundle)],
+    dumps: &[(String, String, Vec<u8>)],
+) -> Result<Vec<u8>> {
+    let gz = GzEncoder::new(Vec::new(), Compression::default());
+    let mut tb = tar::Builder::new(gz);
+
+    for (label, bundle) in bundles {
+        let decoder = flate2::read::GzDecoder::new(bundle.payload.as_slice());
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive
+            .entries()
+            .with_context(|| format!("reading {label}'s bundle payload"))?
+        {
+            let mut entry = entry?;
+            let path = entry.path()?.into_owned();
+            let new_path = Path::new(label).join(&path);
+            let mut header = entry.header().clone();
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            header.set_size(buf.len() as u64);
+            header.set_cksum();
+            tb.append_data(&mut header, &new_path, buf.as_slice())
+                .with_context(|| format!("adding {} to merged payload", new_path.display()))?;
+        }
+    }
+
+    for (folder, schema, dump_bytes) in dumps {
+        let tar_path = format!("db-dumps/{folder}/{schema}.sql");
+        append_bytes(&mut tb, &tar_path, dump_bytes)?;
+    }
+
+    let gz = tb.into_inner().context("finalizing merged tar")?;
+    gz.finish().context("finalizing merged gzip")
+}
+
 fn append_bytes<W: Write>(tb: &mut tar::Builder<W>, path: &str, data: &[u8]) -> Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_size(data.len() as u64);

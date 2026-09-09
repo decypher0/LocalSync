@@ -44,7 +44,7 @@ async function runUpdateCheck(reportStatus) {
     if (update) {
       pendingUpdate = update;
       $("update-banner-text").textContent = `Update available: v${update.version}`;
-      $("update-banner").classList.remove("hidden");
+      $("app-update-banner").classList.remove("hidden");
       if (reportStatus) $("check-updates-status").textContent = `v${update.version} available.`;
     } else {
       pendingUpdate = null;
@@ -70,7 +70,7 @@ $("check-updates-btn").addEventListener("click", () => {
 });
 
 $("update-dismiss-btn").addEventListener("click", () => {
-  $("update-banner").classList.add("hidden");
+  $("app-update-banner").classList.add("hidden");
 });
 
 $("update-install-btn").addEventListener("click", async () => {
@@ -211,10 +211,312 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
-// ---------- send ----------
-$("browse-project-path").addEventListener("click", async () => {
-  const dir = await open({ directory: true, multiple: false });
-  if (dir) $("project-path").value = dir;
+// ---------- send: round 17 database-source wizard ----------
+//
+// wizardFolders is the one source of truth for the whole wizard: each entry
+// is { path, needsDb, details, sourceLabel, dump } where `dump`, once set,
+// is either { schema, filePath } from a developer-supplied file or from a
+// real export — share_snapshot_wizard treats both identically, so nothing
+// downstream needs to know which one it was.
+let wizardFolders = [];
+let wizardFolderIndex = 0;
+let wizardDbSubState = null; // tracks the per-folder sub-panel for Back
+let wizardSelectedTables = [];
+
+function wizFolderLabel(path) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function showWizardStep(id) {
+  document.querySelectorAll("#send-wizard .wizard-step").forEach((el) => el.classList.add("hidden"));
+  $(id).classList.remove("hidden");
+}
+
+function hideAllDbSubPanels() {
+  ["wiz-db-detecting", "wiz-db-detected-info", "wiz-db-manual", "wiz-db-ask-has-dump", "wiz-db-pick-dump", "wiz-db-connecting", "wiz-db-tables"].forEach(
+    (id) => $(id).classList.add("hidden")
+  );
+  $("wiz-db-connect-error").textContent = "";
+}
+
+function renderWizardFolderList() {
+  const ul = $("wiz-folder-list");
+  ul.innerHTML = "";
+  for (const [i, f] of wizardFolders.entries()) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="mono">${escapeHtml(f.path)}</span>`;
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "ghost-btn remove-folder-btn";
+    removeBtn.type = "button";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => {
+      wizardFolders.splice(i, 1);
+      renderWizardFolderList();
+    });
+    li.appendChild(removeBtn);
+    ul.appendChild(li);
+  }
+}
+
+$("wiz-add-folders-btn").addEventListener("click", async () => {
+  const dirs = await open({ directory: true, multiple: true });
+  if (!dirs) return;
+  const picked = Array.isArray(dirs) ? dirs : [dirs];
+  for (const p of picked) {
+    if (!wizardFolders.some((f) => f.path === p)) {
+      wizardFolders.push({ path: p, needsDb: null, details: null, sourceLabel: null, dump: null });
+    }
+  }
+  renderWizardFolderList();
+});
+
+$("wiz-folders-next-btn").addEventListener("click", () => {
+  if (wizardFolders.length === 0) {
+    $("wiz-folders-error").textContent = "Select at least one project folder.";
+    return;
+  }
+  $("wiz-folders-error").textContent = "";
+  showWizardStep("wiz-step-needs-db");
+});
+
+$("wiz-needs-db-back-btn").addEventListener("click", () => showWizardStep("wiz-step-folders"));
+
+$("wiz-needs-db-no-btn").addEventListener("click", () => {
+  for (const f of wizardFolders) f.needsDb = false;
+  renderWizardReadyStep();
+});
+
+$("wiz-needs-db-yes-btn").addEventListener("click", () => {
+  for (const f of wizardFolders) f.needsDb = true;
+  wizardFolderIndex = 0;
+  advanceDbWizard();
+});
+
+// ---------- per-folder database detection / connection / export ----------
+
+async function advanceDbWizard() {
+  if (wizardFolderIndex >= wizardFolders.length) {
+    renderWizardReadyStep();
+    return;
+  }
+  const folder = wizardFolders[wizardFolderIndex];
+  showWizardStep("wiz-step-db-folder");
+  hideAllDbSubPanels();
+  $("wiz-db-folder-title").textContent = wizFolderLabel(folder.path);
+  $("wiz-db-folder-progress").textContent = `Folder ${wizardFolderIndex + 1} of ${wizardFolders.length}`;
+  wizardDbSubState = "detecting";
+  $("wiz-db-detecting").classList.remove("hidden");
+
+  let detected = null;
+  try {
+    detected = await invoke("detect_db_connection", { folderPath: folder.path });
+  } catch (err) {
+    // Detection is pure local file parsing - a thrown error here means
+    // something unexpected (e.g. an unreadable path), not "no config
+    // found". Either way, manual entry is always the safe fallback.
+    detected = null;
+  }
+
+  hideAllDbSubPanels();
+  if (detected) {
+    folder.details = detected.details;
+    folder.sourceLabel = detected.source_file;
+    showDetectedInfo(detected);
+    showAskHasDump();
+  } else {
+    showManualEntry(folder);
+  }
+}
+
+function showDetectedInfo(detected) {
+  wizardDbSubState = "detected";
+  $("wiz-db-detected-source").textContent = detected.source_file;
+  $("wiz-db-detected-engine").textContent = detected.details.engine;
+  $("wiz-db-detected-host").textContent = detected.details.host;
+  $("wiz-db-detected-port").textContent = String(detected.details.port);
+  $("wiz-db-detected-database").textContent = detected.details.database;
+  $("wiz-db-detected-username").textContent = detected.details.username;
+  $("wiz-db-detected-info").classList.remove("hidden");
+}
+
+function showAskHasDump() {
+  wizardDbSubState = "ask";
+  $("wiz-db-ask-has-dump").classList.remove("hidden");
+}
+
+function showManualEntry(folder) {
+  wizardDbSubState = "manual";
+  $("wiz-manual-host").value = folder.details?.host || "";
+  $("wiz-manual-port").value = folder.details?.port || 3306;
+  $("wiz-manual-database").value = folder.details?.database || "";
+  $("wiz-manual-username").value = folder.details?.username || "";
+  $("wiz-manual-password").value = folder.details?.password || "";
+  $("wiz-manual-status").textContent = "";
+  $("wiz-manual-error").textContent = "";
+  $("wiz-db-manual").classList.remove("hidden");
+}
+
+$("wiz-ask-edit-btn").addEventListener("click", () => {
+  hideAllDbSubPanels();
+  showManualEntry(wizardFolders[wizardFolderIndex]);
+});
+
+$("wiz-manual-continue-btn").addEventListener("click", async () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  const details = {
+    engine: "mysql",
+    host: $("wiz-manual-host").value.trim(),
+    port: parseInt($("wiz-manual-port").value, 10) || 3306,
+    database: $("wiz-manual-database").value.trim(),
+    username: $("wiz-manual-username").value.trim(),
+    password: $("wiz-manual-password").value,
+  };
+  if (!details.host || !details.database || !details.username) {
+    $("wiz-manual-error").textContent = "Host, database, and username are required.";
+    return;
+  }
+  $("wiz-manual-error").textContent = "";
+  $("wiz-manual-status").textContent = "Testing connection…";
+  $("wiz-manual-continue-btn").disabled = true;
+  try {
+    await invoke("test_db_connection", { details });
+    folder.details = details;
+    folder.sourceLabel = "Manually entered";
+    $("wiz-manual-status").textContent = "";
+    hideAllDbSubPanels();
+    showAskHasDump();
+  } catch (err) {
+    $("wiz-manual-status").textContent = "";
+    $("wiz-manual-error").textContent = String(err);
+  } finally {
+    $("wiz-manual-continue-btn").disabled = false;
+  }
+});
+
+$("wiz-has-dump-yes-btn").addEventListener("click", () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  hideAllDbSubPanels();
+  wizardDbSubState = "pick-dump";
+  $("wiz-dump-schema").value = folder.details?.database || "";
+  $("wiz-dump-file-path").value = "";
+  $("wiz-dump-error").textContent = "";
+  $("wiz-db-pick-dump").classList.remove("hidden");
+});
+
+$("wiz-dump-browse-btn").addEventListener("click", async () => {
+  const file = await open({ directory: false, multiple: false });
+  if (file) $("wiz-dump-file-path").value = file;
+});
+
+$("wiz-dump-confirm-btn").addEventListener("click", () => {
+  const schema = $("wiz-dump-schema").value.trim();
+  const filePath = $("wiz-dump-file-path").value.trim();
+  if (!schema || !filePath) {
+    $("wiz-dump-error").textContent = "A schema name and a dump file are both required.";
+    return;
+  }
+  wizardFolders[wizardFolderIndex].dump = { schema, filePath };
+  wizardFolderIndex += 1;
+  advanceDbWizard();
+});
+
+$("wiz-has-dump-no-btn").addEventListener("click", async () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  hideAllDbSubPanels();
+  wizardDbSubState = "connecting";
+  $("wiz-db-connecting").classList.remove("hidden");
+  try {
+    await invoke("test_db_connection", { details: folder.details });
+    const tables = await invoke("list_db_tables", { details: folder.details });
+    hideAllDbSubPanels();
+    wizardDbSubState = "tables";
+    $("wiz-tables-database").textContent = folder.details.database;
+    const ul = $("wiz-tables-list");
+    ul.innerHTML = "";
+    for (const t of tables) {
+      const li = document.createElement("li");
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = true;
+      cb.dataset.table = t.name;
+      const rowCount = t.approx_row_count == null ? "" : ` (~${t.approx_row_count} rows)`;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(`${t.name}${rowCount}`));
+      li.appendChild(label);
+      ul.appendChild(li);
+    }
+    $("wiz-export-status").textContent = "";
+    $("wiz-tables-error").textContent = "";
+    $("wiz-db-tables").classList.remove("hidden");
+  } catch (err) {
+    hideAllDbSubPanels();
+    wizardDbSubState = "ask";
+    $("wiz-db-connect-error").textContent = String(err);
+    showAskHasDump();
+  }
+});
+
+$("wiz-export-btn").addEventListener("click", async () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  const checked = Array.from($("wiz-tables-list").querySelectorAll("input[type=checkbox]:checked")).map(
+    (cb) => cb.dataset.table
+  );
+  if (checked.length === 0) {
+    $("wiz-tables-error").textContent = "Select at least one table.";
+    return;
+  }
+  $("wiz-tables-error").textContent = "";
+  $("wiz-export-status").textContent = "Exporting full table content…";
+  $("wiz-export-btn").disabled = true;
+  try {
+    const result = await invoke("export_db_tables", { details: folder.details, tables: checked });
+    folder.dump = { schema: folder.details.database, filePath: result.file_path };
+    $("wiz-export-status").textContent = `Exported ${formatBytes(result.size_bytes)}.`;
+    wizardFolderIndex += 1;
+    advanceDbWizard();
+  } catch (err) {
+    $("wiz-export-status").textContent = "";
+    $("wiz-tables-error").textContent = String(err);
+  } finally {
+    $("wiz-export-btn").disabled = false;
+  }
+});
+
+$("wiz-db-back-btn").addEventListener("click", () => {
+  if (wizardFolderIndex === 0) {
+    showWizardStep("wiz-step-needs-db");
+    return;
+  }
+  wizardFolderIndex -= 1;
+  advanceDbWizard();
+});
+
+// ---------- final step: summary + real Send ----------
+
+function renderWizardReadyStep() {
+  const ul = $("wiz-ready-summary");
+  ul.innerHTML = "";
+  for (const f of wizardFolders) {
+    const li = document.createElement("li");
+    let status;
+    if (!f.needsDb) status = "no database";
+    else if (f.dump) status = `database: ${escapeHtml(f.dump.schema)} (${escapeHtml(f.dump.filePath)})`;
+    else status = "database: none selected";
+    li.innerHTML = `<span class="mono">${escapeHtml(wizFolderLabel(f.path))}</span> — ${status}`;
+    ul.appendChild(li);
+  }
+  showWizardStep("wiz-step-ready");
+}
+
+$("wiz-ready-back-btn").addEventListener("click", () => {
+  const anyDb = wizardFolders.some((f) => f.needsDb);
+  if (anyDb) {
+    wizardFolderIndex = wizardFolders.length - 1;
+    advanceDbWizard();
+  } else {
+    showWizardStep("wiz-step-needs-db");
+  }
 });
 
 let unlistenSendProgress = null;
@@ -251,15 +553,24 @@ function stopCodeExpiryCountdown() {
   $("send-code-expiry").textContent = "";
 }
 
+// Resets the wizard back to step 1, for the next send after this one
+// finishes (or after a failure the developer wants to redo from scratch).
+function resetSendWizard() {
+  wizardFolders = [];
+  wizardFolderIndex = 0;
+  renderWizardFolderList();
+  $("wiz-folders-error").textContent = "";
+  showWizardStep("wiz-step-folders");
+}
+
 $("send-btn").addEventListener("click", async () => {
-  const projectPath = $("project-path").value.trim();
   $("send-error").textContent = "";
   $("send-result").textContent = "";
   $("send-code-wrap").classList.add("hidden");
   stopCodeExpiryCountdown();
 
-  if (!projectPath) {
-    $("send-error").textContent = "Project path is required.";
+  if (wizardFolders.length === 0) {
+    $("send-error").textContent = "Select at least one project folder.";
     return;
   }
 
@@ -299,14 +610,19 @@ $("send-btn").addEventListener("click", async () => {
       $("send-progress-label").textContent = `Sending… ${formatBytes(bytes)} / ${formatBytes(total)}`;
     });
 
-    const snapshotId = await invoke("share_snapshot", {
-      projectPath,
+    const folders = wizardFolders.map((f) => ({
+      path: f.path,
+      dump: f.needsDb && f.dump ? { schema: f.dump.schema, filePath: f.dump.filePath } : null,
+    }));
+    const snapshotId = await invoke("share_snapshot_wizard", {
+      folders,
       roomCode: roomId,
       signalingUrl,
     });
     $("send-progress-label").textContent = "Sent.";
     $("send-result").textContent = `Sent as ${snapshotId}`;
     refreshReceivers(); // this send may have just added a new roster entry
+    resetSendWizard();
   } catch (err) {
     $("send-error").textContent = String(err);
     stopCodeExpiryCountdown();

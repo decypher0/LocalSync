@@ -162,6 +162,11 @@ fn main() {
             commands::push_update,
             commands::respond_to_pull_request,
             commands::send_pull_request,
+            commands::detect_db_connection,
+            commands::test_db_connection,
+            commands::list_db_tables,
+            commands::export_db_tables,
+            commands::share_snapshot_wizard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");

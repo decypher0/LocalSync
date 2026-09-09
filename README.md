@@ -313,6 +313,101 @@ Every installer this pipeline has ever produced, including this round's, remains
 
 This round touches no other application code beyond what's described above; rounds 1–15's tests were re-run in this environment. `run_retry_test`'s full multi-container compose lifecycle hit the same pre-existing, sandbox-specific segfaulting-`pasta` issue round 15 already documented (confirmed non-regression: the simpler single-container `ls-containers` podman test, and every non-container-orchestration test, pass cleanly) — not something this round's changes touch or caused.
 
+## A guided database-source wizard for Send (round 17)
+
+The developer's real case doesn't look like "one project with a
+`docker-compose.yml`" — it looks like several independent, raw framework
+projects (e.g. three separate Spring Boot folders), each pointing at its
+own real local MySQL, with no containerization set up at all. Round 17
+builds the Send-side experience for exactly that: a real, multi-step
+wizard, not a single dialog, that discovers what's there and shows it to
+the developer before asking them to decide anything.
+
+**The flow**: select one or more project folders → answer "does this
+need database access?" once → for each folder independently, try to
+auto-detect its connection details (Spring Boot's
+`application.properties`/`.yml`, parsing the JDBC URL for host/port/
+database) → if detected, ask whether the developer already has a dump
+file (if so, just use it) or wants to connect and export (if so, show
+the real live table list with row-count estimates and let them pick
+before exporting the full, non-sampled content) → if detection fails,
+collect connection details manually and feed into the exact same
+subsequent flow → a final summary before the real Send.
+
+**What's real here**: `crates/ls-dbsource` is a new crate doing real
+work — Spring config parsing (8 passing unit tests, no live DB needed),
+and a real MySQL/MariaDB client (the `mysql` crate) for connecting,
+listing tables via `information_schema`, and exporting full table
+content as `CREATE`/`INSERT` SQL, with binary columns going through
+`X'...'` hex literals for exact, encoding-safe round-tripping. Proven
+with a real, disposable local MariaDB instance: connect, list, export,
+then **replay the generated dump into a second empty database and
+assert the reimported content matches byte-for-byte** — including a
+string with an embedded quote and backslash, a real NULL, and a
+VARBINARY column's exact bytes. `crates/ls-snapshot` gained
+`create_snapshot_multi`, bundling any number of folders (each fully
+tested, existing `bundle_project` logic, just re-homed under a
+`<folder>/` prefix in the combined tar so independent projects never
+collide on path) plus any database dumps into one signed `Snapshot`,
+with `Manifest.folders`/`Manifest.database_dumps` as new, purely
+additive fields (`#[serde(default)]` — an old manifest deserializes
+fine without them, old code reading a new manifest ignores them). The
+whole thing is proven end to end through the real Tauri command layer
+in `apps/desktop/src-tauri/tests/wizard_send_flow_test.rs`: one test
+bundles two folders with no database at all, another runs the *complete*
+wizard sequence — real auto-detection against a real
+`application.properties`, real `test_db_connection`/`list_db_tables`/
+`export_db_tables` commands, real packaging, a real send and receive —
+and confirms the manifest and the received payload both carry the exact
+dump bytes, correctly hashed and correctly placed.
+
+**A real bug found and fixed along the way**: `ls_security::diff_summary`
+originally hard-errored for any snapshot without a single top-level
+`diff_stat.json` — which is exactly what a multi-folder snapshot
+produces (each folder ships its own, nested). Left unfixed, receiving
+*any* multi-folder snapshot would have failed outright before a human
+ever saw a review screen, making this round's own feature unusable
+end to end. Fixed additively (single-folder snapshots behave exactly as
+before; a multi-folder snapshot's diff is the real merge of every
+folder's own `diff_stat.json`, each entry prefixed by its folder), and
+proven by the same end-to-end test above actually succeeding rather than
+erroring at that exact point.
+
+**A second real bug, unrelated to the wizard itself but found while
+working in this same area**: round 16's own auto-update banner used the
+DOM id `update-banner`, which silently collided with an older, unrelated
+Receive-tab element of the same id (round 11's "a new update just
+arrived from the sender" push notification) — `document.getElementById`
+was quietly resolving to whichever one came first in the document for
+both features. Fixed by renaming round 16's banner to `app-update-banner`.
+
+**A genuine sandbox-specific finding, not a code bug**, in the same
+spirit as the pasta-segfault and podman-storage-path issues documented
+elsewhere in this README: this development sandbox's `mariadbd` binary
+runs under an AppArmor profile that denies *any* process — including
+its own direct parent — from delivering it a signal at all (confirmed
+via `dmesg`'s kernel audit log). A disposable test server's ordinary
+`Child::kill()` cleanup call fails silently there, and the matching
+`wait()` then hangs forever waiting for a process nothing can signal.
+Both live-database test files stop their disposable server with a real
+SQL `SHUTDOWN` instead — not a signal, so not subject to that mediation
+— which is both the correct fix and one that works identically on real
+hardware without this specific confinement.
+
+**Explicitly out of scope, on purpose**: making the *receiver* able to
+actually build and run several raw, non-containerized folders together
+— that needs auto-generated containerization and rewriting each app's
+datasource config to point at a containerized hostname instead of
+`localhost`, which is real, substantial, and deliberately deferred to a
+future round. This round's job ends at producing a correctly packaged,
+correctly reviewable snapshot; compression, resumable transfer, and
+incremental dump sync are similarly deferred, on top of what this round
+produces. The wizard's own visual click-through (does the multi-step UI
+actually render and step through correctly) is deferred to
+`docs/round5-manual-test-checklist.md` like every other UI claim in this
+project — everything above it is proven through real, automated,
+non-UI tests.
+
 ## What's not verified here
 
-Multi-service stacks beyond app+DB and anything past a single share→run flow are unbuilt by design — see the MVP scope note above. Windows/macOS provisioning code exists now (above) but real-machine proof beyond this round's single verified Windows pass is deliberately deferred to `docs/round5-manual-test-checklist.md`, run by a human on real hardware — not simulated here, by design, per that round's explicit budget rule. A minor, separately-tracked finding from round 2: `crates/ls-net`'s `CONNECT_TIMEOUT` was seen to trip once in 7 back-to-back `nat_fallback` test runs under heavy host contention (multiple container lifecycles in quick succession) — not the transport bug that round fixed (it failed before any transfer began), not reproduced outside of rapid repeated automated testing. Round 12 raised this same constant from 30s to 5 minutes for an unrelated reason (a real UX bug — the human room-code handoff window, see below) which happens to give this old finding far more headroom too; not re-tested under contention specifically, but the arithmetic alone makes a recurrence far less likely. Round 8's Linux file-picker fix (above) is verified by source inspection and a clean build, not by a live click — no real desktop environment was available this round to confirm a picker dialog actually appears; that's the one round-8 item still deferred to `docs/round5-manual-test-checklist.md`. The Windows NSIS firewall hook is verified by config/macro-name correctness against Tauri's documented schema, not by installing the built package and inspecting Windows Defender Firewall's rule list — also deferred to that checklist. Round 11's multi-receiver/push/pull-request flow is proven same-box (real network stack, real Podman-free receivers, but one process) per that round's explicit budget rule — a real test across genuinely separate machines, with real connection drops/reconnects over time, is deferred to `docs/round5-manual-test-checklist.md` like every other multi-machine claim in this project. Round 12's countdown timer, the "Previously connected" list, and the recognized-peer banner's new placement are all real, additive UI code with no JS test harness in this repo (consistent with every prior round's UI work) — build-verified and manually traced, not visually observed in a running app; that's deferred to the checklist too. Round 13 is the starkest example of this project's real-hardware division of labor yet: neither "does a console window actually flash on Windows" nor "does the details panel actually render live text" can be observed in this environment at all — both fixes are proven at the process/data level (a real subprocess spawned with the right creation flag; a real log file receiving real `podman-compose` output live) but the actual visual behavior is deferred entirely to `docs/round5-manual-test-checklist.md`. Round 14's `.github/workflows/macos.yml` was written and statically validated (`actionlint` + `shellcheck`, zero findings) but has not actually been run as of this writing — it's `workflow_dispatch`-only by design (macOS CI minutes cost real quota), so someone has to deliberately trigger it from the Actions tab before any of its results (real `cargo test --workspace` pass/fail on macOS, whether the `.dmg` build succeeds, whether Podman provisioning works inside GitHub's macOS runners) exist to report. Until then, macOS remains exactly where round 5 left it: real, documented, unverified code. Round 15's release pipeline has the identical status one level up: written, statically validated, not yet triggered — no real Release, no real installers, and no confirmation the Windows/Linux builds (their first-ever CI runs) actually succeed exist until someone runs it. The end-user install steps in the new **Download & Install** section were written from the real, documented behavior of SmartScreen/Gatekeeper/AppImage's FUSE dependency, not observed against a real downloaded LocalSync build — that's the same real-hardware gap as everything else on this list, just for a brand-new audience (a non-technical downloader) rather than a developer. Round 16 splits into two very different confidence levels: the auto-update wiring itself (plugin registration, the signing keypair, `latest.json` generation) is verified as far as this environment allows — real local builds, a real `.sig` produced and inspected, the manifest script run against real and synthetic data — but the actual click-through (does the in-app banner appear, does clicking "Install update" really replace a running installed copy and relaunch it) has never been observed against two real, different-versioned builds on real hardware, and is deferred to `docs/round5-manual-test-checklist.md` like every other real-machine claim here. Code-signing is a different, starker case: it is infrastructure only, by design, per that round's explicit instructions — no certificate, Apple Developer account, or credential of any kind has touched this project, so every installer this pipeline has ever produced, including this round's, remains unsigned; see `docs/code-signing.md` for exactly what adding real credentials would take.
+Multi-service stacks beyond app+DB and anything past a single share→run flow are unbuilt by design — see the MVP scope note above. Windows/macOS provisioning code exists now (above) but real-machine proof beyond this round's single verified Windows pass is deliberately deferred to `docs/round5-manual-test-checklist.md`, run by a human on real hardware — not simulated here, by design, per that round's explicit budget rule. A minor, separately-tracked finding from round 2: `crates/ls-net`'s `CONNECT_TIMEOUT` was seen to trip once in 7 back-to-back `nat_fallback` test runs under heavy host contention (multiple container lifecycles in quick succession) — not the transport bug that round fixed (it failed before any transfer began), not reproduced outside of rapid repeated automated testing. Round 12 raised this same constant from 30s to 5 minutes for an unrelated reason (a real UX bug — the human room-code handoff window, see below) which happens to give this old finding far more headroom too; not re-tested under contention specifically, but the arithmetic alone makes a recurrence far less likely. Round 8's Linux file-picker fix (above) is verified by source inspection and a clean build, not by a live click — no real desktop environment was available this round to confirm a picker dialog actually appears; that's the one round-8 item still deferred to `docs/round5-manual-test-checklist.md`. The Windows NSIS firewall hook is verified by config/macro-name correctness against Tauri's documented schema, not by installing the built package and inspecting Windows Defender Firewall's rule list — also deferred to that checklist. Round 11's multi-receiver/push/pull-request flow is proven same-box (real network stack, real Podman-free receivers, but one process) per that round's explicit budget rule — a real test across genuinely separate machines, with real connection drops/reconnects over time, is deferred to `docs/round5-manual-test-checklist.md` like every other multi-machine claim in this project. Round 12's countdown timer, the "Previously connected" list, and the recognized-peer banner's new placement are all real, additive UI code with no JS test harness in this repo (consistent with every prior round's UI work) — build-verified and manually traced, not visually observed in a running app; that's deferred to the checklist too. Round 13 is the starkest example of this project's real-hardware division of labor yet: neither "does a console window actually flash on Windows" nor "does the details panel actually render live text" can be observed in this environment at all — both fixes are proven at the process/data level (a real subprocess spawned with the right creation flag; a real log file receiving real `podman-compose` output live) but the actual visual behavior is deferred entirely to `docs/round5-manual-test-checklist.md`. Round 14's `.github/workflows/macos.yml` was written and statically validated (`actionlint` + `shellcheck`, zero findings) but has not actually been run as of this writing — it's `workflow_dispatch`-only by design (macOS CI minutes cost real quota), so someone has to deliberately trigger it from the Actions tab before any of its results (real `cargo test --workspace` pass/fail on macOS, whether the `.dmg` build succeeds, whether Podman provisioning works inside GitHub's macOS runners) exist to report. Until then, macOS remains exactly where round 5 left it: real, documented, unverified code. Round 15's release pipeline has the identical status one level up: written, statically validated, not yet triggered — no real Release, no real installers, and no confirmation the Windows/Linux builds (their first-ever CI runs) actually succeed exist until someone runs it. The end-user install steps in the new **Download & Install** section were written from the real, documented behavior of SmartScreen/Gatekeeper/AppImage's FUSE dependency, not observed against a real downloaded LocalSync build — that's the same real-hardware gap as everything else on this list, just for a brand-new audience (a non-technical downloader) rather than a developer. Round 16 splits into two very different confidence levels: the auto-update wiring itself (plugin registration, the signing keypair, `latest.json` generation) is verified as far as this environment allows — real local builds, a real `.sig` produced and inspected, the manifest script run against real and synthetic data — but the actual click-through (does the in-app banner appear, does clicking "Install update" really replace a running installed copy and relaunch it) has never been observed against two real, different-versioned builds on real hardware, and is deferred to `docs/round5-manual-test-checklist.md` like every other real-machine claim here. Code-signing is a different, starker case: it is infrastructure only, by design, per that round's explicit instructions — no certificate, Apple Developer account, or credential of any kind has touched this project, so every installer this pipeline has ever produced, including this round's, remains unsigned; see `docs/code-signing.md` for exactly what adding real credentials would take. Round 17's database-source wizard is, unusually, verified more thoroughly by automated tests than most prior rounds' UI work — real multi-folder bundling, a real disposable database, a real round-trip export/reimport, and the full command-layer flow all pass as real, non-fabricated tests — precisely because none of that needed a live GUI to prove; only the wizard's own visual step-through (does the UI actually render and advance correctly when clicked) is deferred to `docs/round5-manual-test-checklist.md`, the same real-hardware gap as every other round's UI claims. Separately, and entirely out of scope by this round's own design: nothing here makes the receiver able to build or run several raw, non-containerized folders together — that's real, substantial, unbuilt work for a future round.

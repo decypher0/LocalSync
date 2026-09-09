@@ -65,10 +65,24 @@ ls-snapshot = { path = "../../../crates/ls-snapshot" }
 ls-net = { path = "../../../crates/ls-net" }
 ls-security = { path = "../../../crates/ls-security" }
 ls-containers = { path = "../../../crates/ls-containers" }
+ls-dbsource = { path = "../../../crates/ls-dbsource" }
+# Only for hashing a freshly-exported dump file (round 17) - already a
+# dependency two crates down the graph (ls-snapshot, ls-security); promoted
+# to a direct dependency here too rather than reaching through them.
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+# wizard_send_flow_test.rs's own disposable TestServer talks to it directly
+# (to seed data and to shut it down gracefully) - same crate ls-dbsource
+# already depends on, not a new one.
+mysql = { version = "25", default-features = false, features = ["minimal"] }
+# Same two crates ls-snapshot already depends on, to unpack a received
+# snapshot's tar.gz payload and check the packaged dump's bytes directly -
+# not a new format, just verifying one this test already produced.
+flate2 = "1"
+tar = "0.4"
 # Cargo unifies dev-dependency features into the dependency only for test
 # builds (not the shipped app) - this is what makes tauri::test::mock_app()
 # etc. available to tests/send_flow_test.rs without shipping test scaffolding

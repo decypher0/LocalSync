@@ -5,6 +5,7 @@ members = [
     "crates/ls-net",
     "crates/ls-security",
     "crates/ls-containers",
+    "crates/ls-dbsource",
     "apps/desktop/src-tauri",
 ]
 
