@@ -14,6 +14,23 @@
 
   <p id="firewall-banner" class="warn hidden"></p>
 
+  <!-- ---- Round 16: update available - shown on any tab, never auto-installs.
+       Install/download only happens if the user clicks "Install update" here
+       or in Settings; checking for one (on launch, or via the Settings
+       button) never downloads or applies anything by itself. ---- -->
+  <div id="update-banner" class="update-banner hidden">
+    <span id="update-banner-text"></span>
+    <span class="inline-row">
+      <button id="update-install-btn" class="primary-btn" type="button">Install update</button>
+      <button id="update-dismiss-btn" class="ghost-btn" type="button">Later</button>
+    </span>
+    <div id="update-progress-wrap" class="progress-wrap hidden">
+      <div class="progress-track"><div id="update-progress-bar" class="progress-bar"></div></div>
+      <p id="update-progress-label" class="hint"></p>
+    </div>
+    <p id="update-error" class="error"></p>
+  </div>
+
   <!-- ---- Pull requests from connected receivers (sender-side, can arrive on any tab) ---- -->
   <div id="pull-requests" class="pull-requests"></div>
 
@@ -38,6 +55,13 @@
       LOCALSYNC_DATA_DIR (informational — set as an env var before launch; see README)
       <input id="data-dir-display" type="text" disabled />
     </label>
+    <div>
+      <span class="mode-title">Updates</span>
+      <span class="inline-row">
+        <button id="check-updates-btn" class="ghost-btn" type="button">Check for updates</button>
+        <span id="check-updates-status" class="hint-inline"></span>
+      </span>
+    </div>
   </section>
 
   <nav class="tabs">

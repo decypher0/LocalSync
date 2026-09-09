@@ -557,3 +557,59 @@ A person who has never seen this project, following only the README's
 **Download & Install** section (not this checklist, not anything
 developer-facing), ends up with a running LocalSync on their machine,
 without ever feeling like something was broken versus merely unsigned.
+
+---
+
+## Round 16 addendum: real auto-update, and code-signing infrastructure
+
+Real hardware is the only way to check the actual update-and-restart
+click-through (nothing in this project's build/test environment has a
+display reliable enough for that final step — see the round's own commit
+for exactly what *could* be verified without one, which is most of it).
+
+### What to do
+
+1. Push a `v*` tag (or run the Release workflow manually) once
+   `TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are
+   added as repository secrets (see the values generated this round —
+   ask whoever ran round 16 for them, or generate a fresh pair yourself
+   with `npx tauri signer generate` and update `tauri.conf.json`'s
+   `plugins.updater.pubkey` to match if you do).
+2. Confirm the Release page gets a real `latest.json` asset attached
+   alongside the installers, and that its `platforms` object has real
+   (non-empty) `signature` values for `windows-x86_64`, `linux-x86_64`,
+   and `darwin-aarch64`.
+3. Install that release's build on a real machine, then intentionally
+   publish a *newer* one (bump `tauri.conf.json`'s `version` field first —
+   the updater compares real semver, so two same-version builds
+   correctly won't show an update between them). Open the installed
+   app: within a few seconds, the "Update available" banner should
+   appear on its own, unprompted but not auto-installing anything.
+4. Click **Install update**, confirm real download progress shows, and
+   that the app actually relaunches on the new version afterward.
+5. Click **Check for updates** manually (in Settings) when already on
+   the latest version — confirm it says "up to date" rather than
+   silently doing nothing.
+
+### Code-signing (part B) - only once you have real credentials
+
+See `docs/code-signing.md` for exactly what to obtain and which GitHub
+secrets to add. Once added:
+
+1. Re-run the release workflow, confirm the `build-windows`/`build-macos`
+   logs show "Imported certificate..." rather than "No ... secret
+   configured".
+2. On the built installer, verify the signature for real (not just "the
+   log said it worked") — `docs/code-signing.md`'s last section has the
+   exact `codesign`/`spctl`/right-click-Properties steps for each OS.
+3. Confirm SmartScreen/Gatekeeper's warning either disappears entirely
+   (EV cert / notarized build) or changes to show your real
+   organization name instead of "Unknown Publisher" (OV cert, before
+   SmartScreen reputation has built up).
+
+### What "success" looks like
+
+Someone with an older installed build, doing nothing except opening the
+app, sees a real, real update offered — reviews it, clicks once, and
+ends up on the new version without ever touching a terminal or
+re-downloading anything by hand.
