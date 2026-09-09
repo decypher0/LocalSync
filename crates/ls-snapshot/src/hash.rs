@@ -68,6 +68,18 @@ pub fn db_seed_hash(project_root: &Path) -> Result<String> {
     Ok(sha256_hex(&buf))
 }
 
+/// Round 17: `create_snapshot_multi`'s way of turning N per-folder hex
+/// hashes (each already a real `dependency_lock_hash`/`db_seed_hash` result)
+/// into one manifest-level value, without exposing `sha256_hex` itself
+/// outside this module. Concatenates the hex strings in the given order
+/// (caller is responsible for a deterministic order, e.g. by folder name)
+/// and hashes the result — same "empty input hashes to sha256(\"\")"
+/// behavior as the two functions above, for free, since an empty slice
+/// concatenates to an empty string.
+pub(crate) fn combine_hex_hashes(hashes: &[String]) -> String {
+    sha256_hex(hashes.concat().as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
