@@ -1,9 +1,17 @@
 // Vanilla JS, no bundler: Tauri serves this directory as-is
 // (`build.frontendDist` in tauri.conf.json) and `app.withGlobalTauri` is set
-// so `window.__TAURI__` is available without an npm dependency.
+// so `window.__TAURI__` is available without an npm dependency. Plugin
+// namespaces (dialog/updater/process below) are real objects here at this
+// point in execution - verified directly with a real running app rather
+// than assumed, since they're non-enumerable properties (don't show up in
+// `Object.keys(window.__TAURI__)`, which only lists the core API - app,
+// core, event, ... - misleadingly suggesting they're missing if you check
+// that way instead of a direct property/typeof check).
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const { open } = window.__TAURI__.dialog;
+const { check: checkForUpdate } = window.__TAURI__.updater;
+const { relaunch } = window.__TAURI__.process;
 
 const $ = (id) => document.getElementById(id);
 
@@ -18,6 +26,88 @@ listen("preload-review", (evt) => renderReview(evt.payload));
 listen("firewall-warning", (evt) => {
   $("firewall-banner").textContent = evt.payload;
   $("firewall-banner").classList.remove("hidden");
+});
+
+// ---------- round 16: auto-update (checking is silent; installing is never) ----------
+// pendingUpdate holds the real Update object check() returned - only
+// downloadAndInstall() (called from the Install button below, never
+// automatically) actually fetches or applies anything. Checking alone -
+// on launch, or via the Settings button - never downloads/installs by
+// itself, matching the same explicit-consent shape every other
+// state-changing action in this app already holds to (Run, Reject, Push
+// update, ...).
+let pendingUpdate = null;
+
+async function runUpdateCheck(reportStatus) {
+  try {
+    const update = await checkForUpdate();
+    if (update) {
+      pendingUpdate = update;
+      $("update-banner-text").textContent = `Update available: v${update.version}`;
+      $("update-banner").classList.remove("hidden");
+      if (reportStatus) $("check-updates-status").textContent = `v${update.version} available.`;
+    } else {
+      pendingUpdate = null;
+      if (reportStatus) $("check-updates-status").textContent = "You're up to date.";
+    }
+  } catch (err) {
+    // Quiet on the launch check (no endpoint configured yet, offline, a
+    // dev build with no matching release, etc. shouldn't nag on startup) -
+    // only surfaced when the user explicitly asked, via the Settings button.
+    if (reportStatus) $("check-updates-status").textContent = String(err);
+  }
+}
+
+// Launch check: a few seconds after startup, not the very first thing
+// competing with initial render, and quiet either way (see reportStatus
+// above) - if one's found, the banner appears; if not, or if it fails,
+// nothing interrupts anyone.
+setTimeout(() => runUpdateCheck(false), 3000);
+
+$("check-updates-btn").addEventListener("click", () => {
+  $("check-updates-status").textContent = "Checking…";
+  runUpdateCheck(true);
+});
+
+$("update-dismiss-btn").addEventListener("click", () => {
+  $("update-banner").classList.add("hidden");
+});
+
+$("update-install-btn").addEventListener("click", async () => {
+  if (!pendingUpdate) return;
+  $("update-install-btn").disabled = true;
+  $("update-dismiss-btn").disabled = true;
+  $("update-error").textContent = "";
+  $("update-progress-wrap").classList.remove("hidden");
+  let total = 0;
+  let downloaded = 0;
+  try {
+    // The one call in this whole flow that actually fetches/applies
+    // anything - only reachable from this explicit click.
+    await pendingUpdate.downloadAndInstall((event) => {
+      switch (event.event) {
+        case "Started":
+          total = event.data.contentLength || 0;
+          $("update-progress-label").textContent = "Downloading update…";
+          break;
+        case "Progress":
+          downloaded += event.data.chunkLength;
+          setProgress("update-progress-bar", total ? (downloaded / total) * 100 : 0);
+          $("update-progress-label").textContent = `Downloading… ${formatBytes(downloaded)}${total ? ` / ${formatBytes(total)}` : ""}`;
+          break;
+        case "Finished":
+          setProgress("update-progress-bar", 100);
+          $("update-progress-label").textContent = "Installing…";
+          break;
+      }
+    });
+    $("update-progress-label").textContent = "Update installed — restarting…";
+    await relaunch();
+  } catch (err) {
+    $("update-error").textContent = String(err);
+    $("update-install-btn").disabled = false;
+    $("update-dismiss-btn").disabled = false;
+  }
 });
 
 // ---------- pull requests (sender-side: a connected receiver asked "anything new?") ----------

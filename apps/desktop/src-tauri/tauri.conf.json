@@ -35,6 +35,15 @@
       "nsis": {
         "installerHooks": "./windows/hooks.nsh"
       }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYyQzc1RDQ3MUI0MjkyREEKUldUYWtrSWJSMTNIOGdjS1V3MCt5Y2ExSWtIOHNjR25NYTdBd2swRVRVMHFpV3AxNjdvMU9kUDkK",
+      "endpoints": [
+        "https://github.com/decypher0/LocalSync/releases/latest/download/latest.json"
+      ]
     }
   }
 }

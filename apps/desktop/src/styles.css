@@ -127,6 +127,25 @@ button:disabled { opacity: 0.5; cursor: default; }
   color: var(--muted);
 }
 
+/* ---- Round 16: update-available banner (top-level, any tab) ---- */
+.update-banner {
+  margin: 0 20px 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--card);
+  border-left: 3px solid var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.update-banner #update-progress-wrap,
+.update-banner #update-error {
+  flex-basis: 100%;
+  margin: 8px 0 0;
+}
+
 .peer-banner {
   margin-top: 12px;
   padding: 8px 12px;
