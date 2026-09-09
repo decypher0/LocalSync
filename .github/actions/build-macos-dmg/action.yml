@@ -33,6 +33,25 @@ runs:
         npm install
         npm run tauri build -- --bundles dmg
 
+    - name: Dump target/ contents (diagnostic)
+      # Temporary, added to actually see what (if anything) the build step
+      # above produced - it reports success (green check, full elapsed
+      # time) but the locate step below finds nothing anywhere under
+      # target/, which is a different and more basic problem than "found
+      # it, just not where we assumed": either the bundler genuinely isn't
+      # running, or it's writing somewhere this diagnostic will now
+      # actually show. Remove once the real cause is confirmed from this
+      # output - not meant to stay permanently.
+      if: always()
+      shell: bash
+      run: |
+        echo "== apps/desktop/src-tauri/ top-level =="
+        ls -la apps/desktop/src-tauri/ || true
+        echo "== full recursive file listing under target =="
+        find target -type f 2>&1 | sort || echo "(target/ does not exist, or find itself failed)"
+        echo "== directories only, for a quicker shape-of-the-tree view =="
+        find target -type d 2>&1 | sort || true
+
     - name: Locate the built .dmg
       id: find_dmg
       shell: bash
@@ -47,9 +66,9 @@ runs:
         # lookup wasn't accounting for. Matching on the `bundle/dmg/*.dmg`
         # suffix instead of the full path finds it under any triple
         # (or none) without needing to know which one the build step used.
-        matches=$(find apps/desktop/src-tauri/target -type f -path '*/bundle/dmg/*.dmg' 2>/dev/null)
+        matches=$(find target -type f -path '*/bundle/dmg/*.dmg' 2>/dev/null)
         if [ -z "$matches" ]; then
-          echo "No .dmg found anywhere under apps/desktop/src-tauri/target - build must have failed silently somewhere upstream." >&2
+          echo "No .dmg found anywhere under target - build must have failed silently somewhere upstream." >&2
           exit 1
         fi
         dmg_path=$(echo "$matches" | head -n1)
