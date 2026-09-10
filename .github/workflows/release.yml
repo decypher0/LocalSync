@@ -85,6 +85,31 @@ jobs:
           Write-Host "Imported certificate, thumbprint $($cert.Thumbprint) - build will be signed."
           echo "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
 
+      # Round 16 part A, corrected: whether the updater signing key secret
+      # is actually present. `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`
+      # expands to an *empty string* when the secret doesn't exist, not to
+      # "unset" - and `tauri build` with `createUpdaterArtifacts: true`
+      # (tauri.conf.json) then tries to sign with that empty key and fails
+      # hard ("failed to decode secret key ... Missing comment in secret
+      # key"), instead of skipping. So: detect presence here, and when
+      # it's absent, the build step below turns `createUpdaterArtifacts`
+      # off via --config - the installer still builds, just without a
+      # (signed) update-capable artifact or a .sig, which is exactly the
+      # "clean skip when no secret" this was always meant to do.
+      - name: Check for the updater signing key
+        id: updater_key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is set - update-capable artifacts will be signed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret - building an unsigned installer with createUpdaterArtifacts disabled for this run (no .sig, no latest.json). See docs/code-signing.md / README round 16 to enable real auto-update."
+          fi
+
       - name: Build the NSIS installer
         # Deliberately `--bundles nsis`, not the config's default `"all"` -
         # tauri.conf.json's `bundle.targets: "all"` would otherwise also
@@ -118,11 +143,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm install
-          $cfg = if ("${{ steps.import_cert.outputs.thumbprint }}" -ne "") {
-            '{"bundle":{"windows":{"certificateThumbprint":"${{ steps.import_cert.outputs.thumbprint }}","digestAlgorithm":"sha256","timestampUrl":"http://timestamp.digicert.com"}}}'
+          # One --config merge patch carrying both independent decisions:
+          # the code-signing thumbprint (or null to disable), and - only
+          # when there's no updater signing key - createUpdaterArtifacts:false
+          # so the build doesn't try (and fail) to sign an update artifact.
+          $bundle = @{}
+          if ("${{ steps.import_cert.outputs.thumbprint }}" -ne "") {
+            $bundle.windows = @{ certificateThumbprint = "${{ steps.import_cert.outputs.thumbprint }}"; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" }
           } else {
-            '{"bundle":{"windows":{"certificateThumbprint":null}}}'
+            $bundle.windows = @{ certificateThumbprint = $null }
           }
+          if ("${{ steps.updater_key.outputs.present }}" -ne "true") {
+            $bundle.createUpdaterArtifacts = $false
+          }
+          $cfg = @{ bundle = $bundle } | ConvertTo-Json -Depth 10 -Compress
+          Write-Host "tauri build --config $cfg"
           npm run tauri build -- --bundles nsis --config $cfg
 
       - name: Locate the built installer
@@ -186,6 +221,25 @@ jobs:
         with:
           node-version: 'lts/*'
 
+      # See the identical step's comment in build-windows: an unset
+      # TAURI_SIGNING_PRIVATE_KEY secret expands to "" (not "unset"), and
+      # `tauri build` then fails hard trying to sign the AppImage's updater
+      # artifact with an empty key. When it's absent, disable
+      # createUpdaterArtifacts for this run so the AppImage/.deb still
+      # build, just without a (signed) update artifact.
+      - name: Check for the updater signing key
+        id: updater_key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is set - the AppImage's update artifact will be signed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret - building unsigned with createUpdaterArtifacts disabled for this run (no .sig, no latest.json)."
+          fi
+
       - name: Build the .deb and AppImage
         # ubuntu-22.04, not ubuntu-latest (24.04 as of this writing):
         # building against a newer glibc raises the *minimum* glibc version
@@ -214,7 +268,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm install
-          npm run tauri build -- --bundles deb,appimage
+          if [ "${{ steps.updater_key.outputs.present }}" = "true" ]; then
+            npm run tauri build -- --bundles deb,appimage
+          else
+            npm run tauri build -- --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
 
       - name: Dump target/ contents (diagnostic)
         # Temporary, added to actually see what (if anything) the build
@@ -300,23 +358,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Round 16, part B: real signing+notarization needs a real Apple
-      # Developer Program enrollment - see docs/code-signing.md. Imports
-      # into a fresh, ephemeral keychain made just for this job (the
-      # standard pattern for unattended CI signing - a GitHub-hosted
-      # runner has no keychain unlocked/available by default) only if a
-      # certificate secret was actually provided; logs plainly and leaves
-      # APPLE_SIGNING_IDENTITY empty otherwise, which is exactly what
-      # tauri build's own signing step treats as "nothing to sign with".
+      # Round 16, part B (corrected): real signing+notarization needs a
+      # real Apple Developer Program enrollment - see docs/code-signing.md.
+      # Imports into a fresh, ephemeral keychain made just for this job (the
+      # standard pattern for unattended CI signing - a GitHub-hosted runner
+      # has no keychain unlocked/available by default) only if a certificate
+      # secret was actually provided.
+      #
+      # The correction: this used to emit an `identity` output that the
+      # build step passed as `APPLE_SIGNING_IDENTITY: ${{ ... }}` - which,
+      # when empty, still SETS that env var to "" (not "unset"), and
+      # `tauri build` then tries to codesign with an empty identity and
+      # fails ("Signing with identity ''  ...  : no identity found  ...
+      # failed to sign app"). So instead this writes APPLE_SIGNING_IDENTITY
+      # (and the notarization vars) into $GITHUB_ENV *only on the success
+      # path* - absent means the var is genuinely never set, which is what
+      # tauri build actually treats as "nothing to sign with".
       - name: Import macOS signing certificate (if configured)
         id: import_cert
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -z "$APPLE_CERTIFICATE" ]; then
             echo "No APPLE_CERTIFICATE secret configured - shipping unsigned, non-notarized build. See docs/code-signing.md to add one."
-            echo "identity=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           keychain="build-$(date +%s).keychain-db"
@@ -332,31 +400,56 @@ jobs:
           identity=$(security find-identity -v -p codesigning "$keychain" | grep -o '"[^"]*Developer ID Application[^"]*"' | head -n1 | tr -d '"')
           if [ -z "$identity" ]; then
             echo "APPLE_CERTIFICATE was provided but no 'Developer ID Application' identity was found in it after import - check the secret is a real exported .p12 of that certificate type. Shipping unsigned this run." >&2
-            echo "identity=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Imported certificate, signing identity: $identity - build will be signed and (if notarization credentials are also present) notarized."
-          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          echo "Imported certificate, signing identity: $identity - build will be signed."
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          # Notarization only if ALL of its own credentials are also present -
+          # otherwise leave them unset so tauri build signs but doesn't try
+          # (and fail) to notarize with half a credential set.
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            {
+              echo "APPLE_ID=$APPLE_ID"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+            } >> "$GITHUB_ENV"
+            echo "Notarization credentials present - the signed build will also be notarized."
+          else
+            echo "Signing only - APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID not all set, so no notarization this run."
+          fi
+
+      # Same fix as build-windows/build-linux: an unset
+      # TAURI_SIGNING_PRIVATE_KEY expands to "", and tauri build then fails
+      # hard trying to sign the macOS .app.tar.gz updater artifact with an
+      # empty key. Absent -> disable createUpdaterArtifacts for this run.
+      - name: Check for the updater signing key
+        id: updater_key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is set - the .app.tar.gz update artifact will be signed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret - building unsigned with createUpdaterArtifacts disabled for this run (no .app.tar.gz.sig, no latest.json)."
+          fi
 
       - id: build_dmg
         uses: ./.github/actions/build-macos-dmg
+        with:
+          # true when there's no updater signing key - the composite action
+          # then adds --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          # so the .dmg still builds without trying (and failing) to sign an
+          # update artifact.
+          disable-updater-artifacts: ${{ steps.updater_key.outputs.present != 'true' }}
         env:
-          # Round 16 part A - the updater's signing key. Same "absent =
-          # skip cleanly" behavior already verified for Linux/Windows above.
+          # The updater key itself is harmless as an empty env var once
+          # createUpdaterArtifacts is off; passed straight through when set.
+          # APPLE_* come from $GITHUB_ENV (import_cert step above) and are
+          # only present when there's a real certificate to sign with.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Round 16 part B - code-signing + notarization. APPLE_SIGNING_IDENTITY
-          # empty (no certificate secret configured above) is exactly what
-          # tells tauri build's own macOS signing step to skip signing -
-          # no separate flag needed, this is Tauri's own documented
-          # env-var-gated behavior. Notarization (APPLE_ID/APPLE_PASSWORD/
-          # APPLE_TEAM_ID) additionally requires a real signing identity -
-          # passed through regardless of whether one was found; Tauri only
-          # attempts notarization once signing itself succeeded.
-          APPLE_SIGNING_IDENTITY: ${{ steps.import_cert.outputs.identity }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - uses: actions/upload-artifact@v4
         with:
