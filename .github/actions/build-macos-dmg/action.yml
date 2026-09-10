@@ -9,6 +9,18 @@ description: >
   Assumes the caller has already checked out the repo (a composite action
   runs in whatever's already on disk, checkout stays the caller's job).
 
+inputs:
+  disable-updater-artifacts:
+    description: >
+      "true" to build with createUpdaterArtifacts disabled (via --config) -
+      used by release.yml when no TAURI_SIGNING_PRIVATE_KEY secret is
+      configured, so `tauri build` doesn't try (and fail) to sign a macOS
+      .app.tar.gz update artifact with an empty key. Default "false" keeps
+      the config's own createUpdaterArtifacts:true, which is what
+      macos.yml's verification build wants.
+    required: false
+    default: 'false'
+
 outputs:
   dmg_path:
     description: Path to the built .dmg
@@ -31,7 +43,11 @@ runs:
       working-directory: apps/desktop
       run: |
         npm install
-        npm run tauri build -- --bundles dmg
+        if [ "${{ inputs.disable-updater-artifacts }}" = "true" ]; then
+          npm run tauri build -- --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        else
+          npm run tauri build -- --bundles dmg
+        fi
 
     - name: Dump target/ contents (diagnostic)
       # Temporary, added to actually see what (if anything) the build step
