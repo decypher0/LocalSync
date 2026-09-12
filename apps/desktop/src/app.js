@@ -198,6 +198,51 @@ if (localStorage.getItem(MODE_KEY) === "remote") $("mode-remote").checked = true
 $("relay-url").value = localStorage.getItem(RELAY_URL_KEY) || "";
 updateModeUi();
 
+// Round 20 goal 3: the Send wizard's own transfer-mode step - a separate
+// radio group from Settings' (Receive still reads Settings' via
+// relayMode()/relayUrl() above; that flow isn't part of this round's
+// scope), but backed by the exact same localStorage keys, so choosing a
+// mode here updates the one real shared default rather than creating a
+// second, divergent setting - Settings and the wizard just become two
+// surfaces onto the same underlying choice.
+function wizRelayMode() {
+  return $("wiz-mode-remote").checked ? "remote" : "local";
+}
+function wizRelayUrl() {
+  return $("wiz-relay-url").value.trim();
+}
+function updateWizModeUi() {
+  $("wiz-relay-url-wrap").classList.toggle("hidden", wizRelayMode() !== "remote");
+}
+// Called every time step 1 is (re)entered, so it always reflects the most
+// recent choice - made here, or made in Settings since the wizard was last
+// opened.
+function syncWizModeFromStorage() {
+  $("wiz-mode-remote").checked = localStorage.getItem(MODE_KEY) === "remote";
+  $("wiz-mode-local").checked = !$("wiz-mode-remote").checked;
+  $("wiz-relay-url").value = localStorage.getItem(RELAY_URL_KEY) || "";
+  updateWizModeUi();
+}
+$("wiz-mode-local").addEventListener("change", () => {
+  updateWizModeUi();
+  localStorage.setItem(MODE_KEY, wizRelayMode());
+});
+$("wiz-mode-remote").addEventListener("change", () => {
+  updateWizModeUi();
+  localStorage.setItem(MODE_KEY, wizRelayMode());
+});
+$("wiz-relay-url").addEventListener("input", () => {
+  localStorage.setItem(RELAY_URL_KEY, wizRelayUrl());
+});
+$("wiz-mode-next-btn").addEventListener("click", () => {
+  if (wizRelayMode() === "remote" && !wizRelayUrl()) {
+    $("wiz-mode-error").textContent = "Remote relay URL is required for Remote relay mode.";
+    return;
+  }
+  $("wiz-mode-error").textContent = "";
+  showWizardStep("wiz-step-folders");
+});
+
 // ---------- tabs ----------
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -241,10 +286,54 @@ function wizFolderLabel(path) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
 }
 
+// Round 20 goal 4: coarse-grained phases for the modal's "Step X of N"
+// header - the per-folder database sub-flow (detect/manual/dump/schemas/
+// tables) has a genuinely variable number of screens depending on what's
+// detected and which branch the developer takes, so it's shown as one
+// numbered phase ("Database setup") rather than pretending to a false,
+// ever-changing step count within it.
+const WIZARD_PHASES = [
+  { step: "wiz-step-mode", label: "Transfer mode" },
+  { step: "wiz-step-folders", label: "Project folder(s)" },
+  { step: "wiz-step-needs-db", label: "Database setup" },
+  { step: "wiz-step-shared-db", label: "Database setup" },
+  { step: "wiz-step-db-folder", label: "Database setup" },
+  { step: "wiz-step-ready", label: "Ready to send" },
+];
+const WIZARD_PHASE_COUNT = new Set(WIZARD_PHASES.map((p) => p.label)).size;
+
+function updateWizardProgress(id) {
+  const entry = WIZARD_PHASES.find((p) => p.step === id);
+  if (!entry) return;
+  const phaseNumber = new Set(WIZARD_PHASES.slice(0, WIZARD_PHASES.indexOf(entry) + 1).map((p) => p.label)).size;
+  $("wizard-progress-label").textContent = `Step ${phaseNumber} of ${WIZARD_PHASE_COUNT}: ${entry.label}`;
+}
+
 function showWizardStep(id) {
   document.querySelectorAll("#send-wizard .wizard-step").forEach((el) => el.classList.add("hidden"));
   $(id).classList.remove("hidden");
+  updateWizardProgress(id);
 }
+
+// ---------- round 20 goal 4: the wizard as a real modal overlay ----------
+
+function openSendWizard() {
+  resetSendWizard();
+  $("send-wizard-overlay").classList.remove("hidden");
+  syncWizModeFromStorage();
+  showWizardStep("wiz-step-mode");
+}
+
+function closeSendWizard() {
+  $("send-wizard-overlay").classList.add("hidden");
+}
+
+$("start-send-wizard-btn").addEventListener("click", openSendWizard);
+
+$("wizard-cancel-btn").addEventListener("click", () => {
+  closeSendWizard();
+  resetSendWizard();
+});
 
 function hideAllDbSubPanels() {
   ["wiz-db-detecting", "wiz-db-ask-has-dump", "wiz-db-pick-dump", "wiz-db-manual", "wiz-db-connecting", "wiz-db-schemas", "wiz-db-tables"].forEach(
@@ -283,6 +372,8 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
   }
   renderWizardFolderList();
 });
+
+$("wiz-folders-back-btn").addEventListener("click", () => showWizardStep("wiz-step-mode"));
 
 $("wiz-folders-next-btn").addEventListener("click", () => {
   if (wizardFolders.length === 0) {
@@ -824,8 +915,10 @@ function stopCodeExpiryCountdown() {
   $("send-code-expiry").textContent = "";
 }
 
-// Resets the wizard back to step 1, for the next send after this one
-// finishes (or after a failure the developer wants to redo from scratch).
+// Resets all wizard state, for the next send after this one finishes (or
+// after a failure/cancel the developer wants to redo from scratch). Doesn't
+// itself decide which step to show - openSendWizard (the only place that
+// reveals the modal) always does that explicitly right after calling this.
 function resetSendWizard() {
   wizardFolders = [];
   wizardFolderIndex = 0;
@@ -834,11 +927,12 @@ function resetSendWizard() {
   wizardSharedResolved = null;
   renderWizardFolderList();
   $("wiz-folders-error").textContent = "";
-  showWizardStep("wiz-step-folders");
+  $("wiz-send-error").textContent = "";
 }
 
 $("send-btn").addEventListener("click", async () => {
   $("send-error").textContent = "";
+  $("wiz-send-error").textContent = "";
   $("send-result").textContent = "";
   $("send-code-wrap").classList.add("hidden");
   stopCodeExpiryCountdown();
@@ -848,10 +942,14 @@ $("send-btn").addEventListener("click", async () => {
     return;
   }
 
-  const mode = relayMode();
-  const url = relayUrl();
+  // Round 20 goal 3: the mode chosen explicitly in the wizard's own first
+  // step, not Settings' (that toggle now only matters for Receive) - see
+  // wizRelayMode()'s own doc comment for why these are deliberately
+  // separate accessors onto the same underlying persisted default.
+  const mode = wizRelayMode();
+  const url = wizRelayUrl();
   if (mode === "remote" && !url) {
-    $("send-error").textContent = "Remote relay URL is required in Settings for Remote relay mode.";
+    $("send-error").textContent = "Remote relay URL is required for Remote relay mode.";
     return;
   }
 
@@ -865,6 +963,10 @@ $("send-btn").addEventListener("click", async () => {
     const info = await invoke("start_send_session", { mode, relayUrl: mode === "remote" ? url : null });
     const roomId = info.room_id;
     const signalingUrl = info.signaling_url;
+    // Round 20 goal 4: the modal's job ends once there's a real room code
+    // to show - close it now so that code/the live progress below render
+    // on the main Send tab page, exactly where they always have.
+    closeSendWizard();
     $("send-room-code-display").textContent = info.room_code;
     $("send-code-wrap").classList.remove("hidden");
     startCodeExpiryCountdown(info.code_expires_in_seconds);
@@ -904,7 +1006,13 @@ $("send-btn").addEventListener("click", async () => {
     refreshReceivers(); // this send may have just added a new roster entry
     resetSendWizard();
   } catch (err) {
+    // Round 20 goal 4: the wizard modal only closes on success (right before
+    // the room code is shown), so a failure here can happen while it's still
+    // open - #send-error lives on the main Send tab page, behind the modal's
+    // backdrop, and would be invisible at exactly the moment it matters.
+    // Writing to both costs nothing (the hidden one is simply never seen).
     $("send-error").textContent = String(err);
+    $("wiz-send-error").textContent = String(err);
     stopCodeExpiryCountdown();
   } finally {
     $("send-btn").disabled = false;
@@ -912,8 +1020,17 @@ $("send-btn").addEventListener("click", async () => {
 });
 
 // ---------- connected receivers roster (sender-side) ----------
-async function refreshReceivers() {
+//
+// Round 20 goal 2: a real, confirmed-broken-by-direct-use bug - clicking
+// Refresh was wired to a real handler calling a real command (nothing was
+// actually missing), but gave zero visible feedback when the result was
+// unchanged from before (the common case: usually zero or the same
+// receivers), which reads exactly like "the button does nothing". `reportStatus`
+// mirrors the same silent-vs-explicit pattern round 16's own
+// runUpdateCheck already uses for the same reason.
+async function refreshReceivers(reportStatus) {
   $("receivers-error").textContent = "";
+  if (reportStatus) $("receivers-refresh-status").textContent = "Refreshing…";
   try {
     const list = await invoke("list_connected_receivers");
     $("receivers-wrap").classList.remove("hidden");
@@ -929,11 +1046,16 @@ async function refreshReceivers() {
       `;
       ul.appendChild(li);
     }
+    if (reportStatus) {
+      $("receivers-refresh-status").textContent =
+        list.length === 0 ? "No receivers connected." : `${list.length} connected.`;
+    }
   } catch (err) {
     $("receivers-error").textContent = String(err);
+    if (reportStatus) $("receivers-refresh-status").textContent = "";
   }
 }
-$("receivers-refresh-btn").addEventListener("click", refreshReceivers);
+$("receivers-refresh-btn").addEventListener("click", () => refreshReceivers(true));
 
 // Delegated so newly-rendered rows don't need their own listener wiring.
 $("receivers-list").addEventListener("click", async (e) => {
