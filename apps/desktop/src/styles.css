@@ -25,6 +25,25 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); }
 
+/* Round 20 goal 1: one centered, bounded shell for the whole app, instead
+   of every top-level element (header, tabs nav, tab content) individually
+   stretching or hugging the left edge with no relationship to the window's
+   actual width. 880px reads comfortably at typical desktop window sizes
+   without the wizard's own card/list content feeling cramped. */
+.app-shell {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+.app-shell .topbar,
+.app-shell .settings-panel {
+  margin: 0 -20px;
+  padding-left: 20px;
+  padding-right: 20px;
+}
+.app-shell .tabs { padding-left: 0; padding-right: 0; }
+.app-shell .tab-panel { padding-left: 0; padding-right: 0; max-width: none; }
+
 .topbar {
   display: flex;
   align-items: center;
@@ -378,3 +397,47 @@ button:disabled { opacity: 0.5; cursor: default; }
    no leading margin, so it's unambiguous which field it's about. */
 #wiz-manual-database-error,
 #wiz-dump-database-error { margin: 2px 0 10px; }
+
+/* Round 20 goal 4: the send wizard as a real modal overlay - a dimmed
+   backdrop covering the whole viewport (so nothing behind it, including
+   the topbar's own Settings button, is reachable while it's open - the
+   standard, expected modal behavior, and the reason this round didn't need
+   to worry about the wizard's own mode radios and Settings' identical ones
+   ever being visible, and therefore editable, at the same time), with the
+   actual wizard content in a bounded, scrollable card so a long per-folder
+   database step never grows taller than the screen.  */
+.wizard-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 17, 21, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 1000;
+}
+.wizard-modal {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  max-width: 640px;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+.wizard-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.wizard-progress { font-weight: 600; font-size: 0.85rem; color: var(--muted); }
+.wizard-modal-body { padding: 20px; overflow-y: auto; }
+.wizard-modal-body .wizard-step:first-child h3,
+.wizard-modal-body .wizard-step h3:first-child { margin-top: 0; }
