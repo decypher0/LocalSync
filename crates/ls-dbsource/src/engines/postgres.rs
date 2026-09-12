@@ -40,6 +40,19 @@ fn resolve_host(details: &ConnectionDetails) -> String {
 }
 
 fn open_connection(details: &ConnectionDetails) -> Result<Client> {
+    open_connection_impl(details, &details.database)
+}
+
+/// Round 22: `list_databases` needs to connect *without* assuming
+/// `details.database` is real (that's the whole point of browsing what's
+/// actually there) - but unlike MySQL, Postgres's wire protocol has no
+/// "connect with no database selected" mode at all; every connection must
+/// name one. "postgres" is the real, standard administrative database
+/// created on essentially every Postgres install specifically for this
+/// kind of purpose (tooling, monitoring, `psql` with no `-d` given all
+/// default to it) - connecting to it, not `details.database`, is what
+/// makes browsing-before-trusting actually possible here.
+fn open_connection_impl(details: &ConnectionDetails, dbname: &str) -> Result<Client> {
     if details.engine != "postgres" {
         bail!(
             "unsupported database engine '{}' - only \"postgres\" is implemented here",
@@ -53,20 +66,16 @@ fn open_connection(details: &ConnectionDetails) -> Result<Client> {
         .port(details.port)
         .user(&details.username)
         .password(&details.password)
-        .dbname(&details.database)
+        .dbname(dbname)
         .connect_timeout(CONNECT_TIMEOUT);
 
-    // Round 18: same error-swallowing fix as MySQL's - the real underlying
-    // reason (connection refused, wrong password, unknown database, ...)
-    // must survive into the UI, not just this outer "failed to connect"
-    // wrapper. commands.rs converts this anyhow::Error to a String with
-    // `{:#}` (the full chain), not `.to_string()` (only the outermost
-    // context) - verified against real failures, same as MySQL's.
-    config.connect(NoTls).with_context(|| {
-        format!(
-            "failed to connect to {}@{}:{}/{}",
-            details.username, details.host, details.port, details.database
-        )
+    // Round 22: friendly_error::connect_failure prepends a clean, human
+    // summary in front of the exact same full raw driver error round 18's
+    // `{:#}` fix already preserves - see that module's doc comment for why
+    // "not swallowed" alone wasn't enough (a raw driver error string is
+    // still not the same thing as clear).
+    config.connect(NoTls).map_err(|e| {
+        crate::friendly_error::connect_failure(&details.username, &details.host, details.port, &details.database, e)
     })
 }
 
@@ -118,6 +127,19 @@ pub fn list_tables(details: &ConnectionDetails) -> Result<Vec<TableInfo>> {
         .collect())
 }
 
+/// Round 22: the real list of databases on the server, connecting to the
+/// standard "postgres" administrative database (see `open_connection_impl`'s
+/// doc comment) rather than trusting `details.database` up front. Template
+/// databases (`datistemplate`) are filtered out - a developer's own project
+/// database is never one of those.
+pub fn list_databases(details: &ConnectionDetails) -> Result<Vec<String>> {
+    let mut client = open_connection_impl(details, "postgres")?;
+    let rows = client
+        .query("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY datname", &[])
+        .context("failed to list databases from pg_database")?;
+    Ok(rows.into_iter().map(|row| row.get::<_, String>(0)).collect())
+}
+
 /// A name passed to `pg_dump --table=` unquoted is matched as a *pattern*
 /// (supports `*`/`?` wildcards) rather than an exact identifier - quoting
 /// it (per `pg_dump`'s own documented convention) forces an exact match.
@@ -130,6 +152,30 @@ fn quoted_table_arg(name: &str) -> Result<String> {
         bail!("table name '{name}' contains a double quote and cannot be safely passed to pg_dump - refusing to export it");
     }
     Ok(format!("\"{name}\""))
+}
+
+/// Round 22 goal 1: a missing `pg_dump` binary must say so plainly and
+/// point at how to fix it, not just "No such file or directory" - real
+/// click-through against a machine without PostgreSQL client tools
+/// installed found the previous bare `Command::output()` error technical
+/// but not actionable. `std::io::ErrorKind::NotFound` is specifically
+/// "the binary itself isn't on PATH" (as opposed to a permissions error or
+/// something else `Command::output()` can also fail with), so only that
+/// kind gets the install hint - anything else still surfaces the real OS
+/// error via anyhow's `Context`, unmodified.
+fn missing_pg_dump_hint(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        let hint = if cfg!(target_os = "linux") {
+            "run scripts/setup-linux-deps.sh (it installs postgresql-client), or `sudo apt install postgresql-client`"
+        } else if cfg!(target_os = "macos") {
+            "install it with `brew install postgresql`"
+        } else {
+            "install the PostgreSQL client tools (they include pg_dump) and make sure they're on PATH"
+        };
+        anyhow::anyhow!("pg_dump is not installed (or not on PATH) - {hint}")
+    } else {
+        anyhow::Error::new(e).context("failed to run pg_dump")
+    }
 }
 
 /// Full (never sampled/limited) export of exactly `tables`, via the real
@@ -168,9 +214,7 @@ pub fn export_tables(details: &ConnectionDetails, tables: &[String]) -> Result<V
     }
     cmd.arg(&details.database);
 
-    let output = cmd
-        .output()
-        .context("failed to run pg_dump - is it installed and on PATH?")?;
+    let output = cmd.output().map_err(|e| missing_pg_dump_hint(e))?;
     if !output.status.success() {
         bail!(
             "pg_dump failed (status {}): {}",

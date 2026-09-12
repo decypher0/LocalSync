@@ -134,7 +134,30 @@
         <button id="wiz-needs-db-back-btn" class="ghost-btn" type="button">Back</button>
       </div>
 
-      <!-- Step 3-5: per-folder database decision -->
+      <!-- Round 22 goal 6: only shown when >1 folder is selected. Asked
+           once, before the per-folder loop, so the developer isn't forced
+           to repeat the whole wizard for folders that genuinely share one
+           database. -->
+      <div id="wiz-step-shared-db" class="wizard-step hidden">
+        <h3>Do these folders share one database?</h3>
+        <p class="hint">
+          If yes, you'll set up the connection once and it's reused for every folder — folders
+          where auto-detection finds genuinely different connection details are still handled
+          separately, automatically.
+        </p>
+        <span class="inline-row">
+          <button id="wiz-shared-db-yes-btn" class="primary-btn" type="button">Yes, one shared database</button>
+          <button id="wiz-shared-db-no-btn" class="ghost-btn" type="button">No, each folder is separate</button>
+        </span>
+        <p id="wiz-shared-db-note" class="hint-inline"></p>
+        <br />
+        <button id="wiz-shared-db-back-btn" class="ghost-btn" type="button">Back</button>
+      </div>
+
+      <!-- Steps 3-5, reordered per round 22 goal 4: the dump-file question
+           comes first, right after (cheap, local) auto-detection - a live
+           connection is only ever attempted on the "no, I need to fetch
+           live data" path, never just to ask the question. -->
       <div id="wiz-step-db-folder" class="wizard-step hidden">
         <h3 id="wiz-db-folder-title"></h3>
         <p id="wiz-db-folder-progress" class="hint-inline"></p>
@@ -143,19 +166,57 @@
           <p class="hint">Checking this folder's own config for a database connection…</p>
         </div>
 
-        <div id="wiz-db-detected-info" class="hidden">
-          <p class="hint">Detected in <code id="wiz-db-detected-source"></code>:</p>
-          <ul class="manifest-card">
-            <li>Engine: <span id="wiz-db-detected-engine"></span></li>
-            <li>Host: <span id="wiz-db-detected-host"></span></li>
-            <li>Port: <span id="wiz-db-detected-port"></span></li>
-            <li>Database: <span id="wiz-db-detected-database"></span></li>
-            <li>Username: <span id="wiz-db-detected-username"></span></li>
-          </ul>
+        <!-- The first real decision: has-dump? Shown for every folder,
+             detected or not, before any live connection is attempted. -->
+        <div id="wiz-db-ask-has-dump" class="hidden">
+          <div id="wiz-db-detected-info" class="hidden">
+            <p class="hint">Detected in <code id="wiz-db-detected-source"></code>:</p>
+            <ul class="manifest-card">
+              <li>Engine: <span id="wiz-db-detected-engine"></span></li>
+              <li>Host: <span id="wiz-db-detected-host"></span></li>
+              <li>Port: <span id="wiz-db-detected-port"></span></li>
+              <li>Database: <span id="wiz-db-detected-database"></span></li>
+              <li>Username: <span id="wiz-db-detected-username"></span></li>
+            </ul>
+          </div>
+          <div id="wiz-db-engine-picker-inline" class="hidden">
+            <p class="hint">No database config was auto-detected for this folder.</p>
+            <label>Database engine
+              <select id="wiz-intro-engine">
+                <option value="mysql">MySQL / MariaDB</option>
+                <option value="postgres">PostgreSQL</option>
+                <option value="mongodb">MongoDB</option>
+              </select>
+            </label>
+          </div>
+          <p><strong>Do you already have a dump file for this database?</strong></p>
+          <span class="inline-row">
+            <button id="wiz-has-dump-yes-btn" class="ghost-btn" type="button">Yes, I have a dump file</button>
+            <button id="wiz-has-dump-no-btn" class="ghost-btn" type="button">No, connect and export</button>
+          </span>
+          <br />
+          <button id="wiz-ask-edit-btn" class="ghost-btn hidden" type="button">These details are wrong — edit manually</button>
         </div>
 
+        <!-- "Yes, I have a dump file": schema + file only, no connection
+             ever attempted for this folder. -->
+        <div id="wiz-db-pick-dump" class="hidden">
+          <label>Schema/database name <input id="wiz-dump-schema" type="text" /></label>
+          <span class="inline-row">
+            <input id="wiz-dump-file-path" type="text" placeholder="/path/to/dump" disabled />
+            <button id="wiz-dump-browse-btn" class="ghost-btn" type="button">Browse…</button>
+          </span>
+          <p id="wiz-dump-database-error" class="error"></p>
+          <button id="wiz-dump-confirm-btn" class="primary-btn" type="button">Use this dump file</button>
+          <p id="wiz-dump-error" class="error"></p>
+        </div>
+
+        <!-- "No, connect and export": manual entry only reached here, when
+             there's nothing detected (or the developer asked to edit) -
+             and only on this path, since it's the only one that actually
+             needs a live connection. -->
         <div id="wiz-db-manual" class="hidden">
-          <p class="hint">No database config was auto-detected — enter this folder's connection details.</p>
+          <p class="hint">Enter this folder's connection details.</p>
           <label>Engine
             <select id="wiz-manual-engine">
               <option value="mysql">MySQL / MariaDB</option>
@@ -165,7 +226,11 @@
           </label>
           <label>Host <input id="wiz-manual-host" type="text" placeholder="localhost" /></label>
           <label>Port <input id="wiz-manual-port" type="number" value="3306" /></label>
-          <label>Database <input id="wiz-manual-database" type="text" /></label>
+          <label>
+            Database <span class="hint-inline">(optional here — you'll pick the exact one from a real list next)</span>
+            <input id="wiz-manual-database" type="text" />
+          </label>
+          <p id="wiz-manual-database-error" class="error"></p>
           <label>Username <input id="wiz-manual-username" type="text" /></label>
           <label>Password <input id="wiz-manual-password" type="password" /></label>
           <button id="wiz-manual-continue-btn" class="primary-btn" type="button">Test connection &amp; continue</button>
@@ -173,33 +238,30 @@
           <p id="wiz-manual-error" class="error"></p>
         </div>
 
-        <div id="wiz-db-ask-has-dump" class="hidden">
-          <p><strong>Do you already have a dump file for this database?</strong></p>
-          <span class="inline-row">
-            <button id="wiz-has-dump-yes-btn" class="ghost-btn" type="button">Yes, I have a dump file</button>
-            <button id="wiz-has-dump-no-btn" class="ghost-btn" type="button">No, connect and export</button>
-          </span>
-          <br />
-          <button id="wiz-ask-edit-btn" class="ghost-btn" type="button">These details are wrong — edit manually</button>
-        </div>
-
-        <div id="wiz-db-pick-dump" class="hidden">
-          <label>Schema/database name <input id="wiz-dump-schema" type="text" /></label>
-          <span class="inline-row">
-            <input id="wiz-dump-file-path" type="text" placeholder="/path/to/dump.sql" disabled />
-            <button id="wiz-dump-browse-btn" class="ghost-btn" type="button">Browse…</button>
-          </span>
-          <button id="wiz-dump-confirm-btn" class="primary-btn" type="button">Use this dump file</button>
-          <p id="wiz-dump-error" class="error"></p>
-        </div>
-
         <div id="wiz-db-connecting" class="hidden">
           <p class="hint">Connecting…</p>
         </div>
 
+        <!-- Round 22 goal 3: real schemas, shown after a real successful
+             connection - the developer picks the correct one instead of a
+             typed/detected name being trusted blindly. -->
+        <div id="wiz-db-schemas" class="hidden">
+          <p class="hint">Real databases/schemas on this server — pick the one this folder actually uses:</p>
+          <ul id="wiz-schemas-list" class="ports-list"></ul>
+          <button id="wiz-schemas-continue-btn" class="primary-btn" type="button">Continue</button>
+          <p id="wiz-schemas-error" class="error"></p>
+        </div>
+
+        <!-- Round 22 goal 5: clearer, checkbox-driven, per-row context. -->
         <div id="wiz-db-tables" class="hidden">
-          <p class="hint">Real <span id="wiz-tables-noun">tables</span> in <strong id="wiz-tables-database"></strong> — select what to include (default: all):</p>
-          <ul id="wiz-tables-list" class="ports-list"></ul>
+          <div class="db-table-toolbar">
+            <p class="hint">Real <span id="wiz-tables-noun">tables</span> in <strong id="wiz-tables-database"></strong> — select what to include:</p>
+            <span class="inline-row">
+              <button id="wiz-tables-select-all-btn" class="ghost-btn" type="button">Select all</button>
+              <button id="wiz-tables-select-none-btn" class="ghost-btn" type="button">Select none</button>
+            </span>
+          </div>
+          <ul id="wiz-tables-list" class="db-table-list"></ul>
           <button id="wiz-export-btn" class="primary-btn" type="button">Export selected <span id="wiz-tables-noun-2">tables</span></button>
           <p id="wiz-export-status" class="hint-inline"></p>
           <p id="wiz-tables-error" class="error"></p>

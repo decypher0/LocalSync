@@ -52,7 +52,39 @@ if ! command -v podman-compose >/dev/null 2>&1; then
     fi
 fi
 
+# Round 22: the Send wizard's database export step needs each engine's own
+# real client tool - not needed to build/run the app itself, but a missing
+# one now gets a clear, actionable error from the app itself (see
+# crates/ls-dbsource/src/engines/postgres.rs's/mongo.rs's
+# missing_pg_dump_hint/missing_mongodump_hint) that points back here. MySQL/
+# MariaDB needs none of this: its connect/list/export are pure-Rust (no
+# libmysqlclient/system dependency at all - see that engine's own Cargo.toml
+# comment), so there's nothing to install for it.
+echo
+echo "Installing PostgreSQL client tools (pg_dump/psql, needed for the Send wizard's PostgreSQL export)..."
+sudo apt install -y postgresql-client
+
+if ! command -v mongodump >/dev/null 2>&1; then
+    echo
+    echo "MongoDB Database Tools (mongodump/mongorestore) aren't in Debian/Ubuntu/Kali's"
+    echo "standard apt repos, so this needs a direct download from MongoDB - confirmed"
+    echo "reachable and working (real .deb, extracted with dpkg-deb, no root needed for"
+    echo "that part) while building this round:"
+    echo
+    echo "  curl -sL -o /tmp/mongodb-tools.deb \\"
+    echo "    https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-x86_64-100.10.0.deb"
+    echo "  sudo apt install -y /tmp/mongodb-tools.deb"
+    echo
+    echo "(swap debian12 for ubuntu2204/ubuntu2404/etc. if you're not on Debian/Kali -"
+    echo "see https://www.mongodb.com/try/download/database-tools for the exact package"
+    echo "for your distro.) Not run automatically here since it fetches a specific"
+    echo "package build for a specific distro - safer to confirm you're getting the"
+    echo "right one than to guess."
+fi
+
 echo
 echo "Done. Verify with:"
 echo "  podman --version && podman-compose --version"
 echo "  podman run --rm hello-world   # confirms rootless podman actually works"
+echo "  pg_dump --version             # PostgreSQL export support"
+echo "  mongodump --version           # MongoDB export support (if installed above)"
