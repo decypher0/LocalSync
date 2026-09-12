@@ -919,3 +919,130 @@ at every decision point, never a value they typed being silently trusted.
 Multiple folders sharing one database is set up once, not N times. And
 every error, wherever it appears, says something a person could actually
 act on.
+
+## Round 20 addendum: layout, functional audit, flow reorder
+
+Round 20 fixes three real problems found by actually using the app: the
+whole UI was left-aligned with no centering or max-width, the "Refresh"
+button next to "Previously connected" did nothing when clicked, and Send
+started with folder selection instead of letting the developer choose a
+transfer mode first. This round is structural/functional, not a visual
+redesign (that's round 21). **This is a frontend-only round — no Rust
+files changed** — verified via `git diff main --stat -- '*.rs'
+Cargo.toml Cargo.lock` returning empty, and rounds 1–19's existing
+`cargo build --workspace` / test suites were re-run to confirm the
+baseline still holds. JS changes were verified via `node --check` (no
+syntax errors), a DOM-id cross-reference script (every `$("...")`/
+`getElementById("...")` call in `app.js` resolves to a real id in
+`index.html`, no duplicate ids), and an HTML tag-balance count — this
+sandbox has no way to actually render the app or simulate clicks, so
+none of this substitutes for a real click-through.
+
+**A real discrepancy found while starting this round**: the build prompt
+referenced a third transfer mode, "Cloud drop," from "round 19." A full
+search of the codebase and entire git history (all branches/tags) found
+no trace of either — neither exists. Raised directly; the developer
+chose to proceed with only the two transfer modes that actually exist
+(Local network, Remote relay) for this round's mode-selection step,
+deferring Cloud drop to its own future round if and when it's actually
+built. The wizard's first step therefore offers exactly two choices, not
+three.
+
+### What changed
+
+- **Centered, bounded layout** (goal 1): all body content now sits
+  inside a `.app-shell` container (max-width ~880px, centered, with
+  consistent side padding); previously full-bleed elements (`.topbar`,
+  `.settings-panel`) got compensating negative margins so they still
+  read as full-bleed *within* the shell rather than being visibly
+  inset. Applies to Send, Receive, and Settings alike since they all
+  share the same shell.
+- **Refresh button fixed** (goal 2): code review found this was *not* a
+  missing- or broken-handler bug — the click handler and its backend
+  command were both wired correctly and did re-fetch the roster. The
+  real problem is a UX feedback gap: refreshing to the same (often
+  empty) result looks identical to doing nothing. Fixed the same way
+  round 16 fixed the identical class of problem for update checks
+  (`runUpdateCheck(reportStatus)`): `refreshReceivers` now takes a
+  `reportStatus` flag, showing "Refreshing…" then a real count (or "No
+  receivers connected.") only when a person clicks the button — the
+  three existing silent/automatic call sites (after accepting a pull
+  request, on tab switch, after a successful send) are unchanged and
+  stay quiet.
+- **Full button audit** (goal 2): every `addEventListener` call in
+  `app.js` was reviewed against every interactive control in
+  `index.html`. The Refresh button above was the only genuinely broken
+  one found; everything else was already correctly wired.
+- **Transfer mode chosen first** (goal 3): the Send wizard's first step
+  is now an explicit Local network / Remote relay choice (with the
+  relay URL field appearing only when Remote relay is picked), backed
+  by the same `localStorage` keys Settings' own toggle already used, so
+  the two stay in sync without either depending on the other's DOM
+  elements. Folder selection and the full round-17/22 database wizard
+  proceed unchanged after this step, regardless of which mode was
+  picked; only the transport step at the very end differs.
+- **Guided pop-up wizard** (goal 4): folder selection through the full
+  database wizard now renders inside a modal overlay (dimmed backdrop,
+  `role="dialog" aria-modal="true"`, `max-height: 88vh` with internal
+  scroll so the variable-length per-folder DB sub-flow never overflows
+  the viewport) instead of flat inline page content. The header shows
+  "Step X of N: <phase>" progress — the per-folder DB sub-flow's several
+  fine-grained screens are grouped under one "Database setup" phase
+  since its real screen count varies by folder/branch taken, so a fake
+  precise step count isn't shown. A Cancel button and a Back button on
+  every step (including a new Back on the folder-selection step, back to
+  mode choice) let the developer leave or step back at any point. The
+  modal closes automatically once a send actually succeeds, so the room
+  code renders on the main Send tab exactly where it always has.
+- **A real gap found and fixed while integrating goal 4**: closing the
+  modal only on success meant a failed send (from `start_send_session`
+  or `share_snapshot_wizard`) left the modal open while the existing
+  error message was written only to `#send-error`, an element on the
+  main Send tab page — invisible behind the modal's backdrop at exactly
+  the moment it mattered. Added a dedicated `#wiz-send-error` element
+  inside the wizard's final step and the `catch` block now writes the
+  error to both elements unconditionally (whichever one is actually
+  visible depends on whether the modal has closed by that point; writing
+  to both is simpler than branching and costs nothing since the hidden
+  one is never seen).
+
+### What to check on real hardware
+
+1. **Layout, visually**: confirm the app actually looks centered and
+   bounded (not just structurally correct in the DOM) at a range of
+   window widths, including narrow ones — this sandbox has no display to
+   render against.
+2. **Every button, by clicking it**: this round's audit was done entirely
+   through code review (no working synthetic input exists in this
+   sandbox); do a real click-through of every button/toggle across Send,
+   Receive, and Settings and confirm each does what it should, not only
+   that the Refresh fix above works.
+3. **Refresh, specifically**: click Refresh with zero receivers connected
+   and confirm "No receivers connected." now appears (previously: visibly
+   nothing happened); click it again with receivers connected and confirm
+   the count updates.
+4. **Mode-first flow**: start a new send and confirm the very first
+   screen is the Local/Remote relay choice, before any folder picker
+   appears; confirm choosing Remote relay reveals the URL field and
+   blocks Next until it's filled in; confirm the choice persists (via
+   Settings' toggle) across restarts.
+5. **The modal wizard itself**: confirm it actually renders as a
+   dimmed overlay on top of the app (not inline page content), that the
+   step counter updates sensibly as you move through mode → folders →
+   database setup → ready, that Back/Cancel/Next all work at every step,
+   and that a long per-folder DB sub-flow (e.g. picking from a big table
+   list) scrolls inside the modal rather than overflowing the window.
+6. **The failed-send error, specifically**: trigger a real send failure
+   while the wizard modal is still open (e.g. an invalid relay URL that
+   passes client-side validation but fails at connect time) and confirm
+   the error is now visible inside the modal, not silently swallowed
+   behind it.
+
+### What "success" looks like
+
+The app looks and feels like one coherent, intentional piece of software
+rather than an unstyled left-aligned document with a few dead buttons.
+Every click does something visible, including a repeat click that finds
+nothing new. Starting a send asks "how" before it asks "what," and the
+whole folder-through-database-setup journey reads as one guided sequence
+in its own space — including when it fails partway through.
