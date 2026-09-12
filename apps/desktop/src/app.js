@@ -344,10 +344,30 @@ function showAskHasDump() {
   $("wiz-db-ask-has-dump").classList.remove("hidden");
 }
 
+// Round 18: real per-engine defaults, not a hardcoded mysql/3306 - a
+// developer picking Postgres or MongoDB from the dropdown shouldn't have
+// to remember (or worse, leave wrong) another engine's standard port.
+const DEFAULT_PORT_BY_ENGINE = { mysql: 3306, postgres: 5432, mongodb: 27017 };
+
+function dbNounFor(engine) {
+  return engine === "mongodb" ? "collections" : "tables";
+}
+
+$("wiz-manual-engine").addEventListener("change", () => {
+  const engine = $("wiz-manual-engine").value;
+  const portField = $("wiz-manual-port");
+  // Only overwrite if it's still at some *other* engine's default - never
+  // clobber a port the developer already typed on purpose.
+  if (Object.values(DEFAULT_PORT_BY_ENGINE).includes(parseInt(portField.value, 10))) {
+    portField.value = DEFAULT_PORT_BY_ENGINE[engine];
+  }
+});
+
 function showManualEntry(folder) {
   wizardDbSubState = "manual";
+  $("wiz-manual-engine").value = folder.details?.engine || "mysql";
   $("wiz-manual-host").value = folder.details?.host || "";
-  $("wiz-manual-port").value = folder.details?.port || 3306;
+  $("wiz-manual-port").value = folder.details?.port || DEFAULT_PORT_BY_ENGINE[$("wiz-manual-engine").value];
   $("wiz-manual-database").value = folder.details?.database || "";
   $("wiz-manual-username").value = folder.details?.username || "";
   $("wiz-manual-password").value = folder.details?.password || "";
@@ -364,9 +384,9 @@ $("wiz-ask-edit-btn").addEventListener("click", () => {
 $("wiz-manual-continue-btn").addEventListener("click", async () => {
   const folder = wizardFolders[wizardFolderIndex];
   const details = {
-    engine: "mysql",
+    engine: $("wiz-manual-engine").value,
     host: $("wiz-manual-host").value.trim(),
-    port: parseInt($("wiz-manual-port").value, 10) || 3306,
+    port: parseInt($("wiz-manual-port").value, 10) || DEFAULT_PORT_BY_ENGINE[$("wiz-manual-engine").value],
     database: $("wiz-manual-database").value.trim(),
     username: $("wiz-manual-username").value.trim(),
     password: $("wiz-manual-password").value,
@@ -415,7 +435,7 @@ $("wiz-dump-confirm-btn").addEventListener("click", () => {
     $("wiz-dump-error").textContent = "A schema name and a dump file are both required.";
     return;
   }
-  wizardFolders[wizardFolderIndex].dump = { schema, filePath };
+  wizardFolders[wizardFolderIndex].dump = { schema, filePath, engine: wizardFolders[wizardFolderIndex].details.engine };
   wizardFolderIndex += 1;
   advanceDbWizard();
 });
@@ -430,7 +450,10 @@ $("wiz-has-dump-no-btn").addEventListener("click", async () => {
     const tables = await invoke("list_db_tables", { details: folder.details });
     hideAllDbSubPanels();
     wizardDbSubState = "tables";
+    const noun = dbNounFor(folder.details.engine);
     $("wiz-tables-database").textContent = folder.details.database;
+    $("wiz-tables-noun").textContent = noun;
+    $("wiz-tables-noun-2").textContent = noun;
     const ul = $("wiz-tables-list");
     ul.innerHTML = "";
     for (const t of tables) {
@@ -463,15 +486,15 @@ $("wiz-export-btn").addEventListener("click", async () => {
     (cb) => cb.dataset.table
   );
   if (checked.length === 0) {
-    $("wiz-tables-error").textContent = "Select at least one table.";
+    $("wiz-tables-error").textContent = `Select at least one ${dbNounFor(folder.details.engine).replace(/s$/, "")}.`;
     return;
   }
   $("wiz-tables-error").textContent = "";
-  $("wiz-export-status").textContent = "Exporting full table content…";
+  $("wiz-export-status").textContent = `Exporting full ${dbNounFor(folder.details.engine)} content…`;
   $("wiz-export-btn").disabled = true;
   try {
     const result = await invoke("export_db_tables", { details: folder.details, tables: checked });
-    folder.dump = { schema: folder.details.database, filePath: result.file_path };
+    folder.dump = { schema: folder.details.database, filePath: result.file_path, engine: folder.details.engine };
     $("wiz-export-status").textContent = `Exported ${formatBytes(result.size_bytes)}.`;
     wizardFolderIndex += 1;
     advanceDbWizard();
