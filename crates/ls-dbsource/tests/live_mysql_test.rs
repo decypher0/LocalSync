@@ -329,6 +329,20 @@ fn live_mysql_export_round_trip() -> Result<()> {
     // --- list_tables: real information_schema query. ---
     let tables = connect::list_tables(&src_details).context("list_tables against src_db")?;
     eprintln!("STEP: list_tables ok, {} tables", tables.len());
+
+    // --- Round 22 goal 3: real database listing, connecting without
+    // pinning to src_details.database (proving the connection genuinely
+    // doesn't require it to already be correct). ---
+    let mut no_db_pin = src_details.clone();
+    no_db_pin.database = "does_not_exist_at_all".to_string();
+    let databases = connect::list_databases(&no_db_pin).context("list_databases despite a nonexistent 'database' field")?;
+    assert!(databases.contains(&"src_db".to_string()), "expected src_db among {databases:?}");
+    assert!(databases.contains(&"dst_db".to_string()), "expected dst_db among {databases:?}");
+    assert!(
+        !databases.iter().any(|d| d == "information_schema" || d == "mysql" || d == "performance_schema" || d == "sys"),
+        "internal MySQL schemas must be filtered out: {databases:?}"
+    );
+    eprintln!("STEP: list_databases ok, {} databases (round 22)", databases.len());
     let widgets = tables
         .iter()
         .find(|t| t.name == "widgets")

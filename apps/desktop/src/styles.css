@@ -328,5 +328,53 @@ button:disabled { opacity: 0.5; cursor: default; }
   gap: 10px;
 }
 #wiz-folder-list .remove-folder-btn { flex-shrink: 0; }
-#wiz-tables-list label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; color: var(--fg); }
 #wiz-db-folder-progress { margin: -4px 0 10px; }
+
+/* Round 22 goal 5: the live table/collection selection list - a real
+   checkbox-driven card list instead of a plain <ul>, with a toolbar for
+   select-all/none and each row's approximate count aligned to the right,
+   so a developer scanning a real, possibly-long table list can actually
+   take it in rather than squinting at flat text. */
+.db-table-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.db-table-toolbar .hint { flex: 1 1 auto; margin: 4px 0; }
+.db-table-toolbar .inline-row { flex-shrink: 0; }
+.db-table-list { list-style: none; padding: 0; margin: 4px 0 8px; max-height: 320px; overflow-y: auto; }
+.db-table-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 5px;
+  background: var(--card);
+}
+.db-table-row label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; color: var(--fg); min-width: 0; }
+.db-table-name { overflow-wrap: anywhere; }
+
+/* Round 22 goal 3: the real schema/database list, radio-select (only one
+   schema applies at a time) - same card-row treatment as the table list
+   above, so both real-data-browsing steps read consistently. */
+#wiz-schemas-list { list-style: none; padding: 0; margin: 4px 0 8px; max-height: 260px; overflow-y: auto; }
+#wiz-schemas-list li {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 5px;
+  background: var(--card);
+}
+#wiz-schemas-list label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; color: var(--fg); }
+
+/* Round 22 goal 2: an error placed directly under one specific field
+   (the Database input, in both the manual-entry and supplied-dump forms)
+   reads differently from the form-level error below it - tighter spacing,
+   no leading margin, so it's unambiguous which field it's about. */
+#wiz-manual-database-error,
+#wiz-dump-database-error { margin: 2px 0 10px; }

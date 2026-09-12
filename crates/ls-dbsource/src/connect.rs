@@ -39,3 +39,20 @@ pub fn list_tables(details: &ConnectionDetails) -> Result<Vec<TableInfo>> {
         other => bail!(unsupported_engine(other)),
     }
 }
+
+/// Round 22 goal 3: the real list of databases/schemas on the server -
+/// queried right after a real, successful connection, deliberately without
+/// requiring `details.database` to already be a real, existing database
+/// (each engine's own `list_databases` connects in whatever way that
+/// engine allows without pinning to it - see each one's doc comment). The
+/// wizard uses this to let the developer pick the real, correct
+/// database/schema instead of trusting a typed-in or auto-detected name
+/// blindly.
+pub fn list_databases(details: &ConnectionDetails) -> Result<Vec<String>> {
+    match details.engine.as_str() {
+        "mysql" => mysql::list_databases(details),
+        "postgres" => postgres::list_databases(details),
+        "mongodb" => mongo::list_databases(details),
+        other => bail!(unsupported_engine(other)),
+    }
+}

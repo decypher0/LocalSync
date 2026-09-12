@@ -23,6 +23,7 @@ pub mod connect;
 pub mod detect;
 mod engines;
 pub mod export;
+pub mod friendly_error;
 mod types;
 
 pub use types::{ConnectionDetails, DetectedConnection, TableInfo, SUPPORTED_ENGINES};
