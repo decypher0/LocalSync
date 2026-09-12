@@ -44,6 +44,8 @@ Nothing runs automatically just because you received something — you always se
 
 Everything below this point is for people building LocalSync from source, working on its code, or wanting to understand how it's built — not needed just to use the app (see **Download & Install**, above).
 
+This is an MVP validating one path end-to-end: **Linux ⇄ Linux**, one flow (share → review → run) — plus Windows/macOS Podman provisioning (round 5) so the receiver side isn't Linux-only, and a second reference stack (round 6, below) proving the pipeline isn't secretly specific to the first one. A sender can now target multiple simultaneous receivers, push updates, and receive pull requests (round 11, below) — still always one-way and always consent-gated per receiver, never a shared live session. Code-signing/notarization, an auto-updater, and access revocation were out of scope through round 15; round 16 (below) added a real, working auto-updater plus conditional code-signing infrastructure that stays inactive until real paid certificate credentials are added.
+
 ## How it fits together
 
 ```

@@ -245,6 +245,8 @@ mod tests {
             services,
             sender_pubkey: [0u8; 32],
             created_at: time::OffsetDateTime::now_utc(),
+            folders: vec![],
+            database_dumps: vec![],
         }
     }
 
