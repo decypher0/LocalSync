@@ -211,17 +211,31 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
-// ---------- send: round 17 database-source wizard ----------
+// ---------- send: round 17/22 database-source wizard ----------
 //
 // wizardFolders is the one source of truth for the whole wizard: each entry
-// is { path, needsDb, details, sourceLabel, dump } where `dump`, once set,
-// is either { schema, filePath } from a developer-supplied file or from a
-// real export — share_snapshot_wizard treats both identically, so nothing
-// downstream needs to know which one it was.
+// is { path, needsDb, details, sourceLabel, dump, detected } where `dump`,
+// once set, is either { schema, filePath, engine } from a developer-
+// supplied file or from a real export — share_snapshot_wizard treats both
+// identically, so nothing downstream needs to know which one it was.
+// `detected` caches the one auto-detection attempt per folder (`null` if
+// none found) so it's never re-run once known.
+//
+// Round 22 fixed the step order to match round 17's own original design:
+// the "do you already have a dump file?" question is asked immediately
+// after (cheap, local, no-network) auto-detection, for every folder,
+// detected or not - a live connection is only ever attempted afterward, on
+// the "no, I need to fetch live data" path. It also added: real schema
+// browsing after a successful connection (never trusting a typed/detected
+// database name blindly), and an optional shared-database mode for multi-
+// folder sends (wizardSharedMode/wizardSharedGroupIndices/
+// wizardSharedResolved below).
 let wizardFolders = [];
 let wizardFolderIndex = 0;
 let wizardDbSubState = null; // tracks the per-folder sub-panel for Back
-let wizardSelectedTables = [];
+let wizardSharedMode = false;
+let wizardSharedGroupIndices = [];
+let wizardSharedResolved = null; // { details, sourceLabel, dump } once resolved
 
 function wizFolderLabel(path) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
@@ -233,7 +247,7 @@ function showWizardStep(id) {
 }
 
 function hideAllDbSubPanels() {
-  ["wiz-db-detecting", "wiz-db-detected-info", "wiz-db-manual", "wiz-db-ask-has-dump", "wiz-db-pick-dump", "wiz-db-connecting", "wiz-db-tables"].forEach(
+  ["wiz-db-detecting", "wiz-db-ask-has-dump", "wiz-db-pick-dump", "wiz-db-manual", "wiz-db-connecting", "wiz-db-schemas", "wiz-db-tables"].forEach(
     (id) => $(id).classList.add("hidden")
   );
   $("wiz-db-connect-error").textContent = "";
@@ -264,7 +278,7 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
   const picked = Array.isArray(dirs) ? dirs : [dirs];
   for (const p of picked) {
     if (!wizardFolders.some((f) => f.path === p)) {
-      wizardFolders.push({ path: p, needsDb: null, details: null, sourceLabel: null, dump: null });
+      wizardFolders.push({ path: p, needsDb: null, details: null, sourceLabel: null, dump: null, detected: undefined });
     }
   }
   renderWizardFolderList();
@@ -288,11 +302,61 @@ $("wiz-needs-db-no-btn").addEventListener("click", () => {
 
 $("wiz-needs-db-yes-btn").addEventListener("click", () => {
   for (const f of wizardFolders) f.needsDb = true;
+  wizardSharedMode = false;
+  wizardSharedResolved = null;
+  if (wizardFolders.length > 1) {
+    $("wiz-shared-db-note").textContent = "";
+    showWizardStep("wiz-step-shared-db");
+  } else {
+    wizardFolderIndex = 0;
+    advanceDbWizard();
+  }
+});
+
+// ---------- round 22 goal 6: shared-database question (multi-folder only) ----------
+
+$("wiz-shared-db-back-btn").addEventListener("click", () => showWizardStep("wiz-step-needs-db"));
+
+$("wiz-shared-db-no-btn").addEventListener("click", () => {
+  wizardSharedMode = false;
   wizardFolderIndex = 0;
   advanceDbWizard();
 });
 
-// ---------- per-folder database detection / connection / export ----------
+$("wiz-shared-db-yes-btn").addEventListener("click", async () => {
+  $("wiz-shared-db-note").textContent = "Checking each folder's own config…";
+  // Real, cheap, local detection for every folder up front - this is what
+  // lets a genuine mismatch (two folders whose own config clearly points
+  // at different databases) be caught automatically rather than assumed
+  // away, per this goal's own "only fall back to per-folder entry for
+  // folders where auto-detection reveals genuinely different connection
+  // details" requirement.
+  const detections = [];
+  for (const f of wizardFolders) {
+    try {
+      detections.push(await invoke("detect_db_connection", { folderPath: f.path }));
+    } catch {
+      detections.push(null);
+    }
+  }
+  const signature = (d) => (d ? JSON.stringify(d.details) : null);
+  const distinctSignatures = new Set(detections.filter(Boolean).map(signature));
+
+  wizardFolders.forEach((f, i) => (f.detected = detections[i]));
+
+  if (distinctSignatures.size > 1) {
+    $("wiz-shared-db-note").textContent =
+      "Auto-detection found different connection details across folders, so each is being set up separately instead.";
+    wizardSharedMode = false;
+  } else {
+    wizardSharedMode = true;
+    wizardSharedGroupIndices = wizardFolders.map((_, i) => i);
+  }
+  wizardFolderIndex = 0;
+  advanceDbWizard();
+});
+
+// ---------- per-folder database detection / dump-or-fetch / schema browsing ----------
 
 async function advanceDbWizard() {
   if (wizardFolderIndex >= wizardFolders.length) {
@@ -300,58 +364,164 @@ async function advanceDbWizard() {
     return;
   }
   const folder = wizardFolders[wizardFolderIndex];
+
+  // Round 22 goal 6: once the shared group's one connection/dump decision
+  // is resolved, apply it to every remaining folder in the group silently
+  // instead of asking again.
+  if (wizardSharedMode && wizardSharedResolved && wizardSharedGroupIndices.includes(wizardFolderIndex)) {
+    folder.details = wizardSharedResolved.details;
+    folder.sourceLabel = wizardSharedResolved.sourceLabel;
+    folder.dump = wizardSharedResolved.dump;
+    wizardFolderIndex += 1;
+    advanceDbWizard();
+    return;
+  }
+
   showWizardStep("wiz-step-db-folder");
   hideAllDbSubPanels();
-  $("wiz-db-folder-title").textContent = wizFolderLabel(folder.path);
-  $("wiz-db-folder-progress").textContent = `Folder ${wizardFolderIndex + 1} of ${wizardFolders.length}`;
+  $("wiz-db-folder-title").textContent = wizardSharedMode ? "Shared database" : wizFolderLabel(folder.path);
+  $("wiz-db-folder-progress").textContent = wizardSharedMode
+    ? "Applies to every selected folder"
+    : `Folder ${wizardFolderIndex + 1} of ${wizardFolders.length}`;
   wizardDbSubState = "detecting";
   $("wiz-db-detecting").classList.remove("hidden");
 
-  let detected = null;
-  try {
-    detected = await invoke("detect_db_connection", { folderPath: folder.path });
-  } catch (err) {
-    // Detection is pure local file parsing - a thrown error here means
-    // something unexpected (e.g. an unreadable path), not "no config
-    // found". Either way, manual entry is always the safe fallback.
-    detected = null;
+  if (folder.detected === undefined) {
+    try {
+      folder.detected = await invoke("detect_db_connection", { folderPath: folder.path });
+    } catch {
+      // Detection is pure local file parsing - a thrown error here means
+      // something unexpected (e.g. an unreadable path), not "no config
+      // found". Either way, manual entry is always the safe fallback.
+      folder.detected = null;
+    }
   }
 
   hideAllDbSubPanels();
-  if (detected) {
-    folder.details = detected.details;
-    folder.sourceLabel = detected.source_file;
-    showDetectedInfo(detected);
-    showAskHasDump();
-  } else {
-    showManualEntry(folder);
-  }
+  showAskHasDump(folder);
 }
 
-function showDetectedInfo(detected) {
-  wizardDbSubState = "detected";
-  $("wiz-db-detected-source").textContent = detected.source_file;
-  $("wiz-db-detected-engine").textContent = detected.details.engine;
-  $("wiz-db-detected-host").textContent = detected.details.host;
-  $("wiz-db-detected-port").textContent = String(detected.details.port);
-  $("wiz-db-detected-database").textContent = detected.details.database;
-  $("wiz-db-detected-username").textContent = detected.details.username;
-  $("wiz-db-detected-info").classList.remove("hidden");
-}
-
-function showAskHasDump() {
-  wizardDbSubState = "ask";
-  $("wiz-db-ask-has-dump").classList.remove("hidden");
-}
-
-// Round 18: real per-engine defaults, not a hardcoded mysql/3306 - a
-// developer picking Postgres or MongoDB from the dropdown shouldn't have
-// to remember (or worse, leave wrong) another engine's standard port.
+// Round 22 goal 4: the *first* real decision for every folder, detected or
+// not - shown before any live connection is ever attempted. Round 18's
+// per-engine defaults (used below) mean a developer picking Postgres or
+// MongoDB from a dropdown never has to remember (or leave wrong) another
+// engine's standard port.
 const DEFAULT_PORT_BY_ENGINE = { mysql: 3306, postgres: 5432, mongodb: 27017 };
 
 function dbNounFor(engine) {
   return engine === "mongodb" ? "collections" : "tables";
 }
+
+function showAskHasDump(folder) {
+  wizardDbSubState = "ask";
+  const detected = folder.detected;
+  if (detected) {
+    folder.details = detected.details;
+    folder.sourceLabel = detected.source_file;
+    $("wiz-db-detected-source").textContent = detected.source_file;
+    $("wiz-db-detected-engine").textContent = detected.details.engine;
+    $("wiz-db-detected-host").textContent = detected.details.host;
+    $("wiz-db-detected-port").textContent = String(detected.details.port);
+    $("wiz-db-detected-database").textContent = detected.details.database;
+    $("wiz-db-detected-username").textContent = detected.details.username;
+    $("wiz-db-detected-info").classList.remove("hidden");
+    $("wiz-db-engine-picker-inline").classList.add("hidden");
+    $("wiz-ask-edit-btn").classList.remove("hidden");
+  } else {
+    $("wiz-db-detected-info").classList.add("hidden");
+    $("wiz-db-engine-picker-inline").classList.remove("hidden");
+    $("wiz-intro-engine").value = folder.details?.engine || "mysql";
+    // Nothing was detected, so there's nothing yet to "edit" - "No, connect
+    // and export" is what leads to manual entry on this path.
+    $("wiz-ask-edit-btn").classList.add("hidden");
+  }
+  $("wiz-db-ask-has-dump").classList.remove("hidden");
+}
+
+$("wiz-ask-edit-btn").addEventListener("click", () => {
+  hideAllDbSubPanels();
+  showManualEntry(wizardFolders[wizardFolderIndex]);
+});
+
+// ---------- "Yes, I have a dump file": schema + file only, no connection ----------
+
+$("wiz-has-dump-yes-btn").addEventListener("click", () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  if (!folder.details) {
+    // Nothing detected and no manual entry done yet - the inline engine
+    // picker (goal 7) is the only thing we actually need to know before
+    // filtering the file dialog below.
+    const engine = $("wiz-intro-engine").value;
+    folder.details = { engine, host: "", port: DEFAULT_PORT_BY_ENGINE[engine], database: "", username: "", password: "" };
+  }
+  hideAllDbSubPanels();
+  wizardDbSubState = "pick-dump";
+  $("wiz-dump-schema").value = folder.details.database || "";
+  $("wiz-dump-file-path").value = "";
+  $("wiz-dump-database-error").textContent = "";
+  $("wiz-dump-error").textContent = "";
+  $("wiz-db-pick-dump").classList.remove("hidden");
+});
+
+// Round 22 goal 7: filtered by the engine already known at this point (the
+// dropdown above, or a real detection/manual entry) - mysql/postgres dumps
+// this app (and mysqldump/pg_dump generally) produce are plain .sql text;
+// MongoDB's own mongodump has no single-file default output at all
+// (a directory of .bson files) *unless* run with --archive, and this
+// project's own round-18 mongo export (crates/ls-dbsource/src/engines/
+// mongo.rs) tars+gzips that directory into one .tar.gz - so a developer's
+// own supplied dump is expected in one of those two real shapes, not
+// guessed at.
+const DUMP_FILE_FILTERS = {
+  mysql: [{ name: "SQL dump", extensions: ["sql"] }],
+  postgres: [{ name: "SQL dump", extensions: ["sql"] }],
+  mongodb: [{ name: "MongoDB dump archive", extensions: ["gz", "tar", "archive"] }],
+};
+
+$("wiz-dump-browse-btn").addEventListener("click", async () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  const engine = folder.details?.engine || "mysql";
+  const file = await open({ directory: false, multiple: false, filters: DUMP_FILE_FILTERS[engine] });
+  if (file) $("wiz-dump-file-path").value = file;
+});
+
+$("wiz-dump-confirm-btn").addEventListener("click", () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  const schema = $("wiz-dump-schema").value.trim();
+  const filePath = $("wiz-dump-file-path").value.trim();
+  $("wiz-dump-database-error").textContent = "";
+  $("wiz-dump-error").textContent = "";
+  // Round 22 goal 2: contextual placement - the schema-name problem shows
+  // right under that specific field, not folded into one generic message.
+  if (!schema) {
+    $("wiz-dump-database-error").textContent = "A schema/database name is required.";
+    return;
+  }
+  if (!filePath) {
+    $("wiz-dump-error").textContent = "Select a dump file.";
+    return;
+  }
+  folder.details = { ...folder.details, database: schema };
+  const dump = { schema, filePath, engine: folder.details.engine };
+  folder.dump = dump;
+  finishFolderOrGroup(folder, dump);
+});
+
+// ---------- "No, connect and export": manual entry only when nothing detected ----------
+
+$("wiz-has-dump-no-btn").addEventListener("click", async () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  hideAllDbSubPanels();
+  if (folder.detected) {
+    await connectAndBrowseSchemas(folder);
+  } else {
+    if (!folder.details) {
+      const engine = $("wiz-intro-engine").value;
+      folder.details = { engine, host: "", port: DEFAULT_PORT_BY_ENGINE[engine], database: "", username: "", password: "" };
+    }
+    showManualEntry(folder);
+  }
+});
 
 $("wiz-manual-engine").addEventListener("change", () => {
   const engine = $("wiz-manual-engine").value;
@@ -373,13 +543,9 @@ function showManualEntry(folder) {
   $("wiz-manual-password").value = folder.details?.password || "";
   $("wiz-manual-status").textContent = "";
   $("wiz-manual-error").textContent = "";
+  $("wiz-manual-database-error").textContent = "";
   $("wiz-db-manual").classList.remove("hidden");
 }
-
-$("wiz-ask-edit-btn").addEventListener("click", () => {
-  hideAllDbSubPanels();
-  showManualEntry(wizardFolders[wizardFolderIndex]);
-});
 
 $("wiz-manual-continue-btn").addEventListener("click", async () => {
   const folder = wizardFolders[wizardFolderIndex];
@@ -391,93 +557,155 @@ $("wiz-manual-continue-btn").addEventListener("click", async () => {
     username: $("wiz-manual-username").value.trim(),
     password: $("wiz-manual-password").value,
   };
-  if (!details.host || !details.database || !details.username) {
-    $("wiz-manual-error").textContent = "Host, database, and username are required.";
+  $("wiz-manual-database-error").textContent = "";
+  $("wiz-manual-error").textContent = "";
+  if (!details.host || !details.username) {
+    $("wiz-manual-error").textContent = "Host and username are required.";
     return;
   }
-  $("wiz-manual-error").textContent = "";
-  $("wiz-manual-status").textContent = "Testing connection…";
+  $("wiz-manual-status").textContent = "Connecting…";
   $("wiz-manual-continue-btn").disabled = true;
   try {
-    await invoke("test_db_connection", { details });
+    // Round 22 goal 3: list_db_schemas both proves the connection genuinely
+    // works (real host/port/credentials round trip) *and* returns the real
+    // schema list in one step - deliberately not test_db_connection (which
+    // pins to details.database and would block progress on exactly the
+    // typo'd-database-name case this goal exists to fix).
+    const schemas = await invoke("list_db_schemas", { details });
     folder.details = details;
     folder.sourceLabel = "Manually entered";
     $("wiz-manual-status").textContent = "";
     hideAllDbSubPanels();
-    showAskHasDump();
+    showSchemaList(folder, schemas);
   } catch (err) {
     $("wiz-manual-status").textContent = "";
-    $("wiz-manual-error").textContent = String(err);
+    // Round 22 goal 2: a database/schema-not-found failure is shown right
+    // under that field specifically, not just a generic form-level error -
+    // everything else (bad host, wrong password, connection refused) stays
+    // a form-level error since no single field is specifically "wrong".
+    const message = String(err);
+    if (/database|schema/i.test(message) && /not found|does not exist|unknown/i.test(message)) {
+      $("wiz-manual-database-error").textContent = message;
+    } else {
+      $("wiz-manual-error").textContent = message;
+    }
   } finally {
     $("wiz-manual-continue-btn").disabled = false;
   }
 });
 
-$("wiz-has-dump-yes-btn").addEventListener("click", () => {
-  const folder = wizardFolders[wizardFolderIndex];
-  hideAllDbSubPanels();
-  wizardDbSubState = "pick-dump";
-  $("wiz-dump-schema").value = folder.details?.database || "";
-  $("wiz-dump-file-path").value = "";
-  $("wiz-dump-error").textContent = "";
-  $("wiz-db-pick-dump").classList.remove("hidden");
-});
-
-$("wiz-dump-browse-btn").addEventListener("click", async () => {
-  const file = await open({ directory: false, multiple: false });
-  if (file) $("wiz-dump-file-path").value = file;
-});
-
-$("wiz-dump-confirm-btn").addEventListener("click", () => {
-  const schema = $("wiz-dump-schema").value.trim();
-  const filePath = $("wiz-dump-file-path").value.trim();
-  if (!schema || !filePath) {
-    $("wiz-dump-error").textContent = "A schema name and a dump file are both required.";
-    return;
-  }
-  wizardFolders[wizardFolderIndex].dump = { schema, filePath, engine: wizardFolders[wizardFolderIndex].details.engine };
-  wizardFolderIndex += 1;
-  advanceDbWizard();
-});
-
-$("wiz-has-dump-no-btn").addEventListener("click", async () => {
-  const folder = wizardFolders[wizardFolderIndex];
-  hideAllDbSubPanels();
+async function connectAndBrowseSchemas(folder) {
   wizardDbSubState = "connecting";
   $("wiz-db-connecting").classList.remove("hidden");
   try {
-    await invoke("test_db_connection", { details: folder.details });
-    const tables = await invoke("list_db_tables", { details: folder.details });
+    const schemas = await invoke("list_db_schemas", { details: folder.details });
     hideAllDbSubPanels();
-    wizardDbSubState = "tables";
-    const noun = dbNounFor(folder.details.engine);
-    $("wiz-tables-database").textContent = folder.details.database;
-    $("wiz-tables-noun").textContent = noun;
-    $("wiz-tables-noun-2").textContent = noun;
-    const ul = $("wiz-tables-list");
-    ul.innerHTML = "";
-    for (const t of tables) {
-      const li = document.createElement("li");
-      const label = document.createElement("label");
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = true;
-      cb.dataset.table = t.name;
-      const rowCount = t.approx_row_count == null ? "" : ` (~${t.approx_row_count} rows)`;
-      label.appendChild(cb);
-      label.appendChild(document.createTextNode(`${t.name}${rowCount}`));
-      li.appendChild(label);
-      ul.appendChild(li);
-    }
-    $("wiz-export-status").textContent = "";
-    $("wiz-tables-error").textContent = "";
-    $("wiz-db-tables").classList.remove("hidden");
+    showSchemaList(folder, schemas);
   } catch (err) {
     hideAllDbSubPanels();
     wizardDbSubState = "ask";
     $("wiz-db-connect-error").textContent = String(err);
-    showAskHasDump();
+    showAskHasDump(folder);
   }
+}
+
+// ---------- round 22 goal 3: real schema/database browsing ----------
+
+function showSchemaList(folder, schemas) {
+  wizardDbSubState = "schemas";
+  const ul = $("wiz-schemas-list");
+  ul.innerHTML = "";
+  const typedName = folder.details.database;
+  for (const name of schemas) {
+    const li = document.createElement("li");
+    const label = document.createElement("label");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "wiz-schema-choice";
+    radio.value = name;
+    if (name === typedName) radio.checked = true;
+    label.appendChild(radio);
+    label.appendChild(document.createTextNode(` ${name}`));
+    li.appendChild(label);
+    ul.appendChild(li);
+  }
+  // The typed/detected name might not be a real one (that's the whole
+  // point of showing this list instead of trusting it) - default to the
+  // first real result so Continue always has a valid choice, but nothing
+  // is silently assumed to be right.
+  if (!schemas.includes(typedName) && schemas.length > 0) {
+    ul.querySelector("input[type=radio]").checked = true;
+  }
+  $("wiz-schemas-error").textContent = schemas.length === 0 ? "No databases were found on this server." : "";
+  $("wiz-db-schemas").classList.remove("hidden");
+}
+
+$("wiz-schemas-continue-btn").addEventListener("click", async () => {
+  const folder = wizardFolders[wizardFolderIndex];
+  const chosen = $("wiz-schemas-list").querySelector("input[type=radio]:checked");
+  if (!chosen) {
+    $("wiz-schemas-error").textContent = "Select a database/schema to continue.";
+    return;
+  }
+  folder.details = { ...folder.details, database: chosen.value };
+  hideAllDbSubPanels();
+  await loadTablesForExport(folder);
+});
+
+// ---------- round 22 goal 5: clearer table/collection selection ----------
+
+async function loadTablesForExport(folder) {
+  wizardDbSubState = "tables";
+  try {
+    const tables = await invoke("list_db_tables", { details: folder.details });
+    const noun = dbNounFor(folder.details.engine);
+    $("wiz-tables-database").textContent = folder.details.database;
+    $("wiz-tables-noun").textContent = noun;
+    $("wiz-tables-noun-2").textContent = noun;
+    renderTablesList(tables);
+    $("wiz-export-status").textContent = "";
+    $("wiz-tables-error").textContent = "";
+    $("wiz-db-tables").classList.remove("hidden");
+  } catch (err) {
+    $("wiz-schemas-error").textContent = String(err);
+    $("wiz-db-schemas").classList.remove("hidden");
+  }
+}
+
+function renderTablesList(tables) {
+  const ul = $("wiz-tables-list");
+  ul.innerHTML = "";
+  for (const t of tables) {
+    const li = document.createElement("li");
+    li.className = "db-table-row";
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.dataset.table = t.name;
+    label.appendChild(cb);
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "db-table-name mono";
+    nameSpan.textContent = t.name;
+    label.appendChild(nameSpan);
+    li.appendChild(label);
+    const countSpan = document.createElement("span");
+    countSpan.className = "hint-inline";
+    countSpan.textContent = t.approx_row_count == null ? "" : `~${t.approx_row_count} rows`;
+    li.appendChild(countSpan);
+    ul.appendChild(li);
+  }
+}
+
+$("wiz-tables-select-all-btn").addEventListener("click", () => {
+  $("wiz-tables-list")
+    .querySelectorAll("input[type=checkbox]")
+    .forEach((cb) => (cb.checked = true));
+});
+$("wiz-tables-select-none-btn").addEventListener("click", () => {
+  $("wiz-tables-list")
+    .querySelectorAll("input[type=checkbox]")
+    .forEach((cb) => (cb.checked = false));
 });
 
 $("wiz-export-btn").addEventListener("click", async () => {
@@ -494,10 +722,10 @@ $("wiz-export-btn").addEventListener("click", async () => {
   $("wiz-export-btn").disabled = true;
   try {
     const result = await invoke("export_db_tables", { details: folder.details, tables: checked });
-    folder.dump = { schema: folder.details.database, filePath: result.file_path, engine: folder.details.engine };
+    const dump = { schema: folder.details.database, filePath: result.file_path, engine: folder.details.engine };
+    folder.dump = dump;
     $("wiz-export-status").textContent = `Exported ${formatBytes(result.size_bytes)}.`;
-    wizardFolderIndex += 1;
-    advanceDbWizard();
+    finishFolderOrGroup(folder, dump);
   } catch (err) {
     $("wiz-export-status").textContent = "";
     $("wiz-tables-error").textContent = String(err);
@@ -506,9 +734,21 @@ $("wiz-export-btn").addEventListener("click", async () => {
   }
 });
 
+// Round 22 goal 6: the one place both "resolution paths" (a supplied dump
+// file, or a fresh export) converge - if this is the shared group's first
+// folder being resolved, remember the result so every other folder in the
+// group is filled in automatically (see advanceDbWizard's own shortcut).
+function finishFolderOrGroup(folder, dump) {
+  if (wizardSharedMode && !wizardSharedResolved) {
+    wizardSharedResolved = { details: folder.details, sourceLabel: folder.sourceLabel, dump };
+  }
+  wizardFolderIndex += 1;
+  advanceDbWizard();
+}
+
 $("wiz-db-back-btn").addEventListener("click", () => {
   if (wizardFolderIndex === 0) {
-    showWizardStep("wiz-step-needs-db");
+    showWizardStep(wizardFolders.length > 1 ? "wiz-step-shared-db" : "wiz-step-needs-db");
     return;
   }
   wizardFolderIndex -= 1;
@@ -534,12 +774,20 @@ function renderWizardReadyStep() {
 
 $("wiz-ready-back-btn").addEventListener("click", () => {
   const anyDb = wizardFolders.some((f) => f.needsDb);
-  if (anyDb) {
-    wizardFolderIndex = wizardFolders.length - 1;
-    advanceDbWizard();
-  } else {
+  if (!anyDb) {
     showWizardStep("wiz-step-needs-db");
+    return;
   }
+  if (wizardSharedMode) {
+    // Re-open the shared group's own flow for editing, rather than
+    // silently bouncing straight back here via advanceDbWizard's own
+    // already-resolved shortcut.
+    wizardSharedResolved = null;
+    wizardFolderIndex = wizardSharedGroupIndices[0] ?? 0;
+  } else {
+    wizardFolderIndex = wizardFolders.length - 1;
+  }
+  advanceDbWizard();
 });
 
 let unlistenSendProgress = null;
@@ -581,6 +829,9 @@ function stopCodeExpiryCountdown() {
 function resetSendWizard() {
   wizardFolders = [];
   wizardFolderIndex = 0;
+  wizardSharedMode = false;
+  wizardSharedGroupIndices = [];
+  wizardSharedResolved = null;
   renderWizardFolderList();
   $("wiz-folders-error").textContent = "";
   showWizardStep("wiz-step-folders");
@@ -633,9 +884,15 @@ $("send-btn").addEventListener("click", async () => {
       $("send-progress-label").textContent = `Sending… ${formatBytes(bytes)} / ${formatBytes(total)}`;
     });
 
+    // Round 22 fix: this was dropping `engine` (a required field on the
+    // Rust side's DumpPlanDto since round 18) when rebuilding the payload
+    // here - any database-attached send would have failed IPC
+    // deserialization outright. Missed by round 18's own test coverage
+    // because that test calls commands::share_snapshot_wizard directly,
+    // bypassing this exact JS reconstruction step entirely.
     const folders = wizardFolders.map((f) => ({
       path: f.path,
-      dump: f.needsDb && f.dump ? { schema: f.dump.schema, filePath: f.dump.filePath } : null,
+      dump: f.needsDb && f.dump ? { schema: f.dump.schema, filePath: f.dump.filePath, engine: f.dump.engine } : null,
     }));
     const snapshotId = await invoke("share_snapshot_wizard", {
       folders,

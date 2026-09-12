@@ -815,3 +815,107 @@ would (including plain `localhost`), and it just works — no cryptic
 generic failure, no silent fallback to MySQL's logic for an engine that
 was never really implemented. And nobody sees a flashing console window
 appear and disappear while LocalSync installs.
+
+---
+
+## Round 22 addendum: wizard flow order, error placement, schema browsing, multi-folder
+
+Round 22 fixes real problems found using round 17/18's wizard against
+genuine local setups: the step order didn't match round 17's own design
+intent, errors were generic and mis-placed, and a typed database name was
+trusted without ever showing what's actually on the server. The logic/
+ordering fixes (goals 1, 2, 4, 6) are proven with real tests against real
+local MySQL/PostgreSQL/MongoDB instances in this sandbox; the two
+presentation goals (3, 5) are implemented and same-box-verified (the
+right real data reaches the display layer), but **only a real click-
+through on real hardware confirms they actually look right**.
+
+### What changed
+
+- **Dump-file question now comes first** (goal 4): for every folder,
+  detected or not, "do you already have a dump file?" is asked
+  immediately after (cheap, local) auto-detection — a live connection is
+  now only ever attempted on the "no, I need to fetch live data" path.
+  Previously, manual entry tested the connection *before* this question
+  could even be asked, forcing a working connection just to say "I have a
+  dump."
+- **Real schema browsing after a successful connection** (goal 3): a new
+  `list_db_schemas` command (and each engine's own `list_databases`,
+  proven against real MariaDB/PostgreSQL/MongoDB instances) lists what's
+  really on the server — connecting without requiring the typed/detected
+  database name to already be correct — and the developer picks from that
+  real list (pre-selecting the typed name if it's actually there) before
+  anything else happens. Manual entry's own "Test connection & continue"
+  now uses this same command instead of a database-pinned connection
+  test, so a typo'd database name no longer blocks getting to the real
+  list that would let you fix it.
+- **Contextual error placement** (goal 2): a database/schema-not-found
+  failure during manual entry now shows directly under the Database
+  field, not just as a generic trailing message.
+- **Clearer missing-client-tool errors** (goal 1): a missing `pg_dump`/
+  `mongodump` binary now names itself and points at
+  `scripts/setup-linux-deps.sh` (Linux) or the right install command
+  (macOS) — that script now also documents installing both. MySQL/
+  MariaDB needs no external client tool at all (pure-Rust driver), so
+  there's nothing to install for it.
+- **Improved table/collection selection display** (goal 5): a real
+  checkbox card list with Select all/none and each row's approximate
+  count, instead of a plain unstyled list.
+- **Shared-database question for multi-folder sends** (goal 6): selecting
+  more than one folder now asks once whether they share one database —
+  if yes, auto-detection runs across all of them first, and if it finds
+  genuinely different setups, falls back to per-folder entry
+  automatically (with a clear note explaining why) rather than silently
+  guessing.
+- **Dump-file picker now filters by engine** (goal 7): `.sql` for MySQL/
+  PostgreSQL, `.gz`/`.tar`/`.archive` for MongoDB (matching this
+  project's own round-18 mongodump export, which tars+gzips a directory
+  dump into one file) — the engine is now always known (via detection,
+  manual entry, or an inline picker when neither has happened yet) before
+  the file dialog ever opens.
+- **A real, separate bug found and fixed while integrating this round**:
+  the final Send step was reconstructing each folder's dump payload for
+  the `share_snapshot_wizard` IPC call without its `engine` field (a
+  required field on the Rust side since round 18) — every database-
+  attached send would have failed at the IPC boundary. Missed by round
+  18's own tests because they call the Tauri command directly, bypassing
+  this exact JS reconstruction step.
+
+### What to check on real hardware
+
+1. **The reordered flow itself**: for a folder with no auto-detected
+   config, confirm you're asked "do you already have a dump file?"
+   *before* any connection fields are shown — answering "yes" should
+   never require you to fill in host/port/credentials at all.
+2. **Schema browsing, visually**: after a successful connection, confirm
+   the real list of databases/schemas actually renders as a picker (not
+   just that the right data reached the wizard — this sandbox can't see
+   the rendered UI). Try it with a typo'd database name in manual entry —
+   confirm you reach the real list instead of being blocked.
+3. **Table/collection selection display**: confirm the new checkbox card
+   list, Select all/Select none, and row counts actually render and work
+   by clicking, for a table list long enough to scroll.
+4. **Multi-folder shared-database question**: select 2+ folders with a
+   real shared database, confirm the wizard asks once and reuses the
+   connection; then try 2+ folders whose own configs genuinely point at
+   different databases, and confirm the automatic per-folder fallback
+   (with its explanatory note) actually happens and looks right, not just
+   that it behaves right.
+5. **File picker filtering**: confirm the OS-native file dialog actually
+   restricts to `.sql` (MySQL/PostgreSQL) or `.gz`/`.tar`/`.archive`
+   (MongoDB) when browsing for an existing dump — this is OS/dialog
+   behavior this sandbox cannot render or click.
+6. **Missing-tool error, for real**: on a machine without `pg_dump` or
+   `mongodump` installed, confirm export shows the new actionable message
+   pointing at `scripts/setup-linux-deps.sh` (or run the script itself and
+   confirm the install commands it prints actually work).
+
+### What "success" looks like
+
+A developer with an existing dump for one folder never has to fight
+through a connection form to say so. A developer fetching live data sees
+the real state of the server — real schemas, real tables, real counts —
+at every decision point, never a value they typed being silently trusted.
+Multiple folders sharing one database is set up once, not N times. And
+every error, wherever it appears, says something a person could actually
+act on.
