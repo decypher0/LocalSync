@@ -14,6 +14,30 @@
 
   <p id="firewall-banner" class="warn hidden"></p>
 
+  <!-- ---- Round 16: update available - shown on any tab, never auto-installs.
+       Install/download only happens if the user clicks "Install update" here
+       or in Settings; checking for one (on launch, or via the Settings
+       button) never downloads or applies anything by itself. ---- -->
+  <!-- id is "app-update-banner", not "update-banner" - a receive-tab
+       element further down (round 11's "a new update just arrived from the
+       sender" push notification) already used the plain id; giving this one
+       the same id would make document.getElementById("update-banner")
+       silently resolve to whichever comes first in the document instead of
+       the intended element for either feature. Found and fixed as a real
+       bug during round 17's own work in this area, not by design. -->
+  <div id="app-update-banner" class="update-banner hidden">
+    <span id="update-banner-text"></span>
+    <span class="inline-row">
+      <button id="update-install-btn" class="primary-btn" type="button">Install update</button>
+      <button id="update-dismiss-btn" class="ghost-btn" type="button">Later</button>
+    </span>
+    <div id="update-progress-wrap" class="progress-wrap hidden">
+      <div class="progress-track"><div id="update-progress-bar" class="progress-bar"></div></div>
+      <p id="update-progress-label" class="hint"></p>
+    </div>
+    <p id="update-error" class="error"></p>
+  </div>
+
   <!-- ---- Pull requests from connected receivers (sender-side, can arrive on any tab) ---- -->
   <div id="pull-requests" class="pull-requests"></div>
 
@@ -38,6 +62,13 @@
       LOCALSYNC_DATA_DIR (informational — set as an env var before launch; see README)
       <input id="data-dir-display" type="text" disabled />
     </label>
+    <div>
+      <span class="mode-title">Updates</span>
+      <span class="inline-row">
+        <button id="check-updates-btn" class="ghost-btn" type="button">Check for updates</button>
+        <span id="check-updates-status" class="hint-inline"></span>
+      </span>
+    </div>
   </section>
 
   <nav class="tabs">
@@ -66,14 +97,120 @@
       <p class="hint">Or start fresh, for someone new:</p>
     </div>
 
-    <label>
-      Project folder (absolute path)
-      <span class="inline-row">
-        <input id="project-path" type="text" placeholder="/home/you/code/my-project" />
-        <button id="browse-project-path" class="ghost-btn" type="button">Browse…</button>
-      </span>
-    </label>
-    <button id="send-btn" class="primary-btn" type="button">Send</button>
+    <!-- ---- Round 17: guided database-source wizard. Replaces the old
+         single-folder input+button with a real, multi-step flow: select
+         folder(s) -> "does this need a database?" -> per-folder detection/
+         manual-entry/dump-or-export -> a final summary before Send. Every
+         step below is a `.wizard-step`; app.js shows exactly one at a time
+         and never sends anything until the developer reaches and clicks
+         the real Send button in the last step. ---- -->
+    <div id="send-wizard" class="wizard">
+
+      <!-- Step 1: folder(s) -->
+      <div id="wiz-step-folders" class="wizard-step">
+        <h3>1. Select project folder(s)</h3>
+        <p class="hint">
+          Pick one or more independent project folders to send together as one snapshot
+          (e.g. several standalone Spring Boot services).
+        </p>
+        <button id="wiz-add-folders-btn" class="ghost-btn" type="button">Add folder(s)…</button>
+        <ul id="wiz-folder-list" class="ports-list"></ul>
+        <p id="wiz-folders-error" class="error"></p>
+        <button id="wiz-folders-next-btn" class="primary-btn" type="button">Next</button>
+      </div>
+
+      <!-- Step 2: needs database? (asked once) -->
+      <div id="wiz-step-needs-db" class="wizard-step hidden">
+        <h3>2. Does this project need database access?</h3>
+        <p class="hint">
+          If yes, each selected folder is checked independently next — not every folder in a
+          multi-folder project necessarily has its own database.
+        </p>
+        <span class="inline-row">
+          <button id="wiz-needs-db-yes-btn" class="primary-btn" type="button">Yes</button>
+          <button id="wiz-needs-db-no-btn" class="ghost-btn" type="button">No</button>
+        </span>
+        <br />
+        <button id="wiz-needs-db-back-btn" class="ghost-btn" type="button">Back</button>
+      </div>
+
+      <!-- Step 3-5: per-folder database decision -->
+      <div id="wiz-step-db-folder" class="wizard-step hidden">
+        <h3 id="wiz-db-folder-title"></h3>
+        <p id="wiz-db-folder-progress" class="hint-inline"></p>
+
+        <div id="wiz-db-detecting" class="hidden">
+          <p class="hint">Checking this folder's own config for a database connection…</p>
+        </div>
+
+        <div id="wiz-db-detected-info" class="hidden">
+          <p class="hint">Detected in <code id="wiz-db-detected-source"></code>:</p>
+          <ul class="manifest-card">
+            <li>Engine: <span id="wiz-db-detected-engine"></span></li>
+            <li>Host: <span id="wiz-db-detected-host"></span></li>
+            <li>Port: <span id="wiz-db-detected-port"></span></li>
+            <li>Database: <span id="wiz-db-detected-database"></span></li>
+            <li>Username: <span id="wiz-db-detected-username"></span></li>
+          </ul>
+        </div>
+
+        <div id="wiz-db-manual" class="hidden">
+          <p class="hint">No database config was auto-detected — enter this folder's connection details.</p>
+          <label>Engine <input id="wiz-manual-engine" type="text" value="mysql" disabled /></label>
+          <label>Host <input id="wiz-manual-host" type="text" placeholder="localhost" /></label>
+          <label>Port <input id="wiz-manual-port" type="number" value="3306" /></label>
+          <label>Database <input id="wiz-manual-database" type="text" /></label>
+          <label>Username <input id="wiz-manual-username" type="text" /></label>
+          <label>Password <input id="wiz-manual-password" type="password" /></label>
+          <button id="wiz-manual-continue-btn" class="primary-btn" type="button">Test connection &amp; continue</button>
+          <p id="wiz-manual-status" class="hint-inline"></p>
+          <p id="wiz-manual-error" class="error"></p>
+        </div>
+
+        <div id="wiz-db-ask-has-dump" class="hidden">
+          <p><strong>Do you already have a dump file for this database?</strong></p>
+          <span class="inline-row">
+            <button id="wiz-has-dump-yes-btn" class="ghost-btn" type="button">Yes, I have a dump file</button>
+            <button id="wiz-has-dump-no-btn" class="ghost-btn" type="button">No, connect and export</button>
+          </span>
+          <br />
+          <button id="wiz-ask-edit-btn" class="ghost-btn" type="button">These details are wrong — edit manually</button>
+        </div>
+
+        <div id="wiz-db-pick-dump" class="hidden">
+          <label>Schema/database name <input id="wiz-dump-schema" type="text" /></label>
+          <span class="inline-row">
+            <input id="wiz-dump-file-path" type="text" placeholder="/path/to/dump.sql" disabled />
+            <button id="wiz-dump-browse-btn" class="ghost-btn" type="button">Browse…</button>
+          </span>
+          <button id="wiz-dump-confirm-btn" class="primary-btn" type="button">Use this dump file</button>
+          <p id="wiz-dump-error" class="error"></p>
+        </div>
+
+        <div id="wiz-db-connecting" class="hidden">
+          <p class="hint">Connecting…</p>
+        </div>
+
+        <div id="wiz-db-tables" class="hidden">
+          <p class="hint">Real tables in <strong id="wiz-tables-database"></strong> — select what to include (default: all):</p>
+          <ul id="wiz-tables-list" class="ports-list"></ul>
+          <button id="wiz-export-btn" class="primary-btn" type="button">Export selected tables</button>
+          <p id="wiz-export-status" class="hint-inline"></p>
+          <p id="wiz-tables-error" class="error"></p>
+        </div>
+
+        <p id="wiz-db-connect-error" class="error"></p>
+        <button id="wiz-db-back-btn" class="ghost-btn" type="button">Back</button>
+      </div>
+
+      <!-- Final step: summary + the actual Send -->
+      <div id="wiz-step-ready" class="wizard-step hidden">
+        <h3>Ready to send</h3>
+        <ul id="wiz-ready-summary" class="manifest-card"></ul>
+        <button id="wiz-ready-back-btn" class="ghost-btn" type="button">Back</button>
+        <button id="send-btn" class="primary-btn" type="button">Send</button>
+      </div>
+    </div>
 
     <div id="send-code-wrap" class="room-code-wrap hidden">
       <span class="hint">Share this code with the receiver:</span>

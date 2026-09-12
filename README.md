@@ -2,7 +2,49 @@
 
 Send your local project, as it exists right now, straight to a teammate's machine — no cloud, no tunnel to your dev server. They see a diff, review it, and click Run before anything executes, sandboxed in read-only Podman containers with a small seeded dataset. Nothing about the receiving machine syncs back to you.
 
-This is an MVP validating one path end-to-end: **Linux ⇄ Linux**, one flow (share → review → run) — plus Windows/macOS Podman provisioning (round 5) so the receiver side isn't Linux-only, and a second reference stack (round 6, below) proving the pipeline isn't secretly specific to the first one. A sender can now target multiple simultaneous receivers, push updates, and receive pull requests (round 11, below) — still always one-way and always consent-gated per receiver, never a shared live session. Code-signing/notarization, an auto-updater, and access revocation are explicitly out of scope for now.
+## Download & Install
+
+**[Get the latest build from the Releases page →](https://github.com/decypher0/LocalSync/releases/latest)**
+
+Pick the file for your operating system, download it, and follow the steps below. You don't need to install any programming tools, and you don't need to clone this repository — just the one file.
+
+These are early, unsigned builds — LocalSync is under active development, not a finished product yet, and the pipeline that produces these builds is still new (round 15). That's why each OS's steps below include what to click past (Windows SmartScreen, macOS Gatekeeper) — expected, not a sign anything's wrong. If something doesn't work, that's useful to know — see the bottom of this README for how this project tracks what's actually been verified versus not.
+
+### Windows
+
+1. Download the `.exe` file (it's an installer, e.g. `LocalSync_..._x64-setup.exe`).
+2. Double-click it to run the installer.
+3. Windows will likely show a blue "Windows protected your PC" screen (SmartScreen) — this is expected for an app that isn't code-signed yet, not a sign anything is wrong. Click **More info**, then **Run anyway**.
+4. Follow the installer's prompts. LocalSync also asks Windows Firewall for permission automatically during install (needed for the peer-to-peer connection between you and whoever you're sharing with) — this is expected, not a separate thing to configure.
+
+### macOS
+
+1. Download the `.dmg` file (e.g. `LocalSync_..._aarch64.dmg` for Apple Silicon Macs, `..._x64.dmg` for Intel Macs — if you're not sure which you have, click the Apple menu → About This Mac and check "Chip"/"Processor").
+2. Double-click the `.dmg` to open it, then drag the LocalSync icon into the **Applications** folder shortcut it shows you.
+3. **Do not** double-click LocalSync in Applications the first time — macOS's Gatekeeper will refuse to open an unsigned app that way, with a message saying it's "damaged" or "can't be opened" (misleading wording — it's not actually damaged, just unsigned). Instead: open **Applications**, **right-click** (or Control-click) LocalSync, choose **Open**, then click **Open** again in the dialog that appears. This one-time step tells macOS you trust this specific app; after that, opening it normally works.
+
+### Linux
+
+Two options — pick whichever fits how you normally install software:
+
+- **`.deb` file** (Debian, Ubuntu, and derivatives): double-click it to open it in your software installer, or from a terminal: `sudo apt install ./LocalSync_*.deb`.
+- **AppImage** (works on most distros, no installation step): download it, make it executable (`chmod +x LocalSync_*.AppImage`), then double-click it or run it from a terminal. If it doesn't launch and complains about `libfuse.so.2`/FUSE, your distro is one of the newer ones that doesn't ship that by default — install it once (`sudo apt install libfuse2` on Ubuntu 22.04+, or the equivalent for your distro) and try again.
+
+Linux doesn't have an equivalent unsigned-app warning to click through — both formats above just run.
+
+### What to expect the first time
+
+LocalSync is two-sided: one person **Sends** a project, another **Receives** it, reviews a diff, and clicks **Run** to actually start it in sandboxed containers. The first time *anyone* clicks **Run** on a machine, LocalSync checks whether [Podman](https://podman.io) (the sandboxing engine it uses) is installed and working — on Windows and macOS, it will try to install and start it automatically if not (this can take **several minutes** the first time, since it's setting up a small virtual machine; it's not stuck, just genuinely slow the first time). After that first setup, later runs are fast.
+
+Nothing runs automatically just because you received something — you always see a diff first and have to click Run yourself.
+
+---
+
+## For developers and contributors
+
+Everything below this point is for people building LocalSync from source, working on its code, or wanting to understand how it's built — not needed just to use the app (see **Download & Install**, above).
+
+This is an MVP validating one path end-to-end: **Linux ⇄ Linux**, one flow (share → review → run) — plus Windows/macOS Podman provisioning (round 5) so the receiver side isn't Linux-only, and a second reference stack (round 6, below) proving the pipeline isn't secretly specific to the first one. A sender can now target multiple simultaneous receivers, push updates, and receive pull requests (round 11, below) — still always one-way and always consent-gated per receiver, never a shared live session. Code-signing/notarization, an auto-updater, and access revocation were out of scope through round 15; round 16 (below) added a real, working auto-updater plus conditional code-signing infrastructure that stays inactive until real paid certificate credentials are added.
 
 ## How it fits together
 
@@ -213,6 +255,161 @@ Proven: `crates/ls-containers/src/podman.rs`'s own unit tests spawn a real subpr
 
 Full regression sweep, all passing unmodified: every round 1–12 test.
 
+## macOS CI verification (round 14)
+
+Round 5 wrote macOS Podman provisioning "by careful analogy" — cross-referencing Homebrew's and Podman's real docs, never once compiled or run, since `#[cfg(target_os = "macos")]` excludes `crates/ls-containers/src/provisioning/macos_impl.rs` from every environment this project had access to. No environment here has ever had macOS access, and that hasn't changed. What has changed: `.github/workflows/macos.yml` uses GitHub Actions' real macOS runners (free, including for private repos, against a monthly minutes quota) to get genuine evidence on real Apple hardware instead.
+
+**Manual trigger only** (`workflow_dispatch`), deliberately not on every push — GitHub bills macOS runner minutes at 10x the Linux rate against that quota, so this only runs when someone deliberately wants a fresh macOS verification pass. Run it from the repo's Actions tab, or `gh workflow run macos.yml`.
+
+**Two independent jobs, on purpose:**
+
+1. **`build-and-test`** — the part expected to just work, since nothing here depends on anything macOS-specific being pre-provisioned (Xcode CLT, Homebrew, and a recent Rust all ship on GitHub's macOS runner image already): `cargo test --workspace` (every crate, real macOS, pass/fail captured and uploaded as a log artifact regardless of outcome — a test failure here must never be allowed to silently cancel the build below it, they're two separate questions), then the exact `.dmg` build command `docs/macos-build.md` already documents for a human doing this by hand (`npm run tauri build -- --bundles dmg`), with the resulting `.dmg` uploaded as a downloadable workflow artifact either way.
+2. **`podman-provisioning-investigation`** — the genuinely open question this round exists to answer, kept as its own job rather than more steps bolted onto the one above: whether Podman machine provisioning can work at all inside a GitHub-hosted macOS runner. GitHub's macOS runners are themselves virtualized, and Podman's machine feature needs to boot a *nested* VM (Apple's Virtualization.framework, or QEMU as fallback) — nested virtualization on shared/virtualized CI infrastructure is a real, widely-documented restriction for tools like this, not a hypothetical this project is inventing. The workflow gathers `sysctl kern.hv_support` first (the single most relevant diagnostic for *why* whatever happens, happens), then genuinely attempts `brew install podman` → `podman machine init` → `podman machine start` → `podman info` → an actual `podman run --rm hello-world`, with every step's real output captured regardless of where it stops. This job's own pass/fail in the Actions UI reflects the real outcome on purpose (it fails loudly if provisioning didn't fully work) — a CI limitation here would be a real, reportable finding, not a code bug to paper over, and the workflow is written not to blur that distinction either way.
+
+**Validated as much as is honestly possible without the run itself**: the workflow YAML was checked with `actionlint` (including its `shellcheck` integration against every embedded script) — zero findings. A local cross-compile-check to `aarch64-apple-darwin` got as far as real Objective-C compilation (`objc2-exception-helper`, a real transitive dependency of the GUI stack) before hitting the expected wall — no real macOS SDK/Clang toolchain exists to cross-compile against from Linux, exactly what `docs/macos-build.md` already says about why this has always needed a real Mac (or, now, real macOS CI). That's genuine, additional confidence about dependency resolution and most of the pure-Rust compile graph — not proof the final link/bundle step succeeds, which only the real runner can provide.
+
+**What this round does not solve, stated plainly**: a green `build-and-test` job means the workspace compiles and its headless tests pass on real macOS, and produces a real, downloadable `.dmg` — a genuine, meaningful upgrade from "should work by analogy" to "actually happened once." It does not mean a person has looked at the app's UI on a Mac, does not exercise Gatekeeper's unsigned-app warning flow end to end, and — if the second job reports blocked — does not mean Podman provisioning works for a real user either, only that it's unverified in a different way than before (blocked-in-this-specific-CI-environment, rather than never-attempted-at-all). None of this is "macOS done" in the sense rounds 1–13 mean it for Linux/Windows; real, human, real-hardware verification is still the standard for that, tracked the same way as every other platform-specific item in `docs/round5-manual-test-checklist.md`.
+
+This round adds one new file and touches no application code — rounds 1–13's full test suite was re-run in this environment and passes unmodified.
+
+## On-demand release pipeline (round 15)
+
+`.github/workflows/release.yml`: one trigger (a manual "Run workflow" click, or pushing a `v*` tag — both supported, neither forced), three real installers, one GitHub Release with all of them attached a few minutes later. See the **Download & Install** section at the very top of this README for what a non-technical end user actually does with what this produces.
+
+**Windows and Linux got their first-ever CI build in this round** (round 14 only ever covered macOS) — `build-windows` and `build-linux` are new jobs, `build-macos` reuses round 14's own build steps rather than duplicating them: they were extracted into `.github/actions/build-macos-dmg`, a composite action both `macos.yml` and `release.yml` call, so "how the .dmg gets built" lives in exactly one place.
+
+Two real build-quirks accounted for before they could bite a release, not after:
+
+- **The Windows build is pinned to `--bundles nsis`, deliberately never `"all"`** (`tauri.conf.json`'s own default). `"all"` would also attempt a WiX-based `.msi`, which needs Tauri's bundler to download the ~40MB WiX toolset on first use — a well-documented source of CI flakiness/timeouts for pipelines like this one. Restricting the target avoids the question entirely rather than adding retry logic around an output format nobody's asked for: NSIS (with round 8's firewall-rule install hook) is what's actually been built and proven reliable here since round 5.
+- **The Linux build runs on `ubuntu-22.04`, not `ubuntu-latest`** (24.04 as of this writing). Building against a newer glibc raises the *minimum* glibc version the resulting binary needs at runtime; an AppImage bundles its other dependencies but not glibc itself, so a binary built on 24.04 would refuse to run on a 22.04-or-older target with a real `GLIBC_2.3x not found` error. 22.04 is also Tauri v2's own documented minimum baseline (the oldest Ubuntu LTS whose repos carry `libwebkit2gtk-4.1`) — building on the oldest supported base is what keeps the installer runnable on the widest range of real machines, the actual point of shipping something downloadable to people who won't `cargo build` it themselves.
+
+Release creation itself uses `softprops/action-gh-release` — the actively-maintained standard for this (`actions/create-release`, GitHub's original own action, is archived) — pinned to its `v2` major tag rather than the `v3` released only days before this was written, for a pipeline meant to be trustworthy on day one rather than an early adopter of a version bump. A manual run without a tag gets a real, non-colliding release name (`local-<date>-<short-sha>`) instead of a fixed name that would silently overwrite a previous manual release's assets on the next run, and is marked a pre-release on the Releases page so it's never confused with a real tagged version.
+
+**Verified as much as is honestly possible without triggering it**: both workflow files pass `actionlint` with `shellcheck` integration against every embedded script, zero findings. The composite-action extraction was re-validated the same way, plus a manual schema check (`actionlint` itself doesn't parse `action.yml` composite-action files, only workflow files) confirming its structure matches GitHub's documented composite-action schema. As of this writing the workflow has been written and committed but not yet triggered — someone has to click "Run workflow" (or push a tag) before a real Release, with real attached installers, exists to point at. This round touches no application code; rounds 1–14's tests were re-run in this environment and pass unmodified (one pre-existing, unrelated environment issue from round 14's own regression check — a segfaulting `pasta` binary in this specific sandbox — is unchanged and still not a code regression).
+
+## Real auto-update, and code-signing infrastructure (round 16)
+
+Two genuinely different halves — one fully working now, one that can't produce anything real without credentials only the developer can obtain.
+
+### Part A: auto-update — fully wired, verified as far as this environment allows
+
+`tauri-plugin-updater` (+ `tauri-plugin-process` for its `relaunch()`) is now registered alongside `tauri-plugin-dialog`; `tauri.conf.json` has a real, freshly-generated updater keypair (`bundle.createUpdaterArtifacts: true`, `plugins.updater.pubkey`/`endpoints` pointing at `latest.json` on this repo's GitHub Releases). The private key never touched this repository — generated locally, handed to the developer directly, added only as GitHub Actions secrets (`TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD`).
+
+The Send/Receive tabs' own "review before you run" gate has a real precedent this follows: checking for an update never downloads or installs anything by itself — a banner appears (on launch, quietly, or via a new **Check for updates** button in Settings) and only `downloadAndInstall()`, called from an explicit **Install update** click, actually fetches or applies anything.
+
+**A real, non-obvious bug found and fixed along the way, not assumed away**: a completely clean local build (no cached binary reused across configs) produced a working AppImage and a real, valid updater signature, but also a genuine `Warn Failed to add bundler type to the binary: __TAURI_BUNDLE_TYPE variable not found... Updater plugin may not be able to update this package` — a real cross-package version-skew bug (the Rust `tauri` crate had resolved to 2.11.5 while `@tauri-apps/cli` on npm was still at its own latest, 2.11.4). Pinning both to the exact same `2.11.4` made a from-scratch rebuild produce the warning-free, correctly-tagged binary — verified by actually reproducing the failure, not by reading about it.
+
+**Also verified directly, because the assumption looked wrong at first**: `window.__TAURI__.dialog`/`.updater`/`.process` don't appear in `Object.keys(window.__TAURI__)` (only the core API does) — they're real, non-enumerable properties, confirmed present and correctly typed by actually running the app and reading `window.__TAURI__` back from a live window, not by trusting the enumerable-keys list. A misread of that same list, before checking properly, would have wrongly suggested the whole frontend script crashes on load — it doesn't, on this or the existing round-7/8 dialog integration either.
+
+**The manifest-generation script itself** (`release.yml`'s `release` job, run after all three platform builds) was proven against real data: the actual `.AppImage.sig` this round's local Linux build produced, assembled by the exact script `release.yml` runs, into a correctly-structured `latest.json` — plus the deliberate skip path (any platform's signature missing → skip `latest.json` for that run, release the installers anyway, log why) proven with the same script and a deliberately incomplete input set.
+
+**What only real hardware can confirm**: the actual update-and-restart click-through — banner appears, click Install, real download progress, real relaunch onto the new version. Deferred to `docs/round5-manual-test-checklist.md` like every other UI-dependent claim in this project. Only one macOS architecture is covered (`darwin-aarch64` — `build-macos` runs on Apple Silicon runners with no explicit `--target`, so there's no Intel binary to publish a URL for); an Intel Mac won't see updates offered until a second macOS build leg is added.
+
+### Part B: code-signing — infrastructure only, nothing is actually signed yet
+
+**No code-signing credential exists anywhere this project has touched.** `release.yml` has real, conditional signing steps for both Windows (`WINDOWS_CERTIFICATE`/`_PASSWORD` secrets → cert import → real thumbprint passed to `tauri build` via a `--config` override, RFC 7396 JSON merge patch, so the checked-in config never needs a real-or-placeholder thumbprint) and macOS (`APPLE_CERTIFICATE`/`_PASSWORD`/`APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` → ephemeral-keychain import → environment variables `tauri build`'s own signing/notarization logic reads directly) — both fully conditional, both logging plainly ("No ... secret configured - shipping unsigned build") and building exactly as before when the secrets are absent. `docs/code-signing.md` documents exactly what to obtain (a real CA-issued Windows certificate — noting traditional exportable `.pfx` files are increasingly not what CAs issue since June 2023, Azure Trusted Signing being the modern alternative not yet wired up here; Apple Developer Program enrollment, a Developer ID Application certificate, an app-specific password) and exactly which GitHub secret names to add, plus how to verify a real signature afterward (`codesign`/`spctl`, not just trusting the workflow log).
+
+**No self-signed certificate was implemented as a stand-in, deliberately** — it wouldn't remove OS warnings for anyone but the machine that made it, and would misrepresent what's actually been achieved.
+
+Every installer this pipeline has ever produced, including this round's, remains unsigned. That doesn't change until real secrets are added and a real run happens.
+
+This round touches no other application code beyond what's described above; rounds 1–15's tests were re-run in this environment. `run_retry_test`'s full multi-container compose lifecycle hit the same pre-existing, sandbox-specific segfaulting-`pasta` issue round 15 already documented (confirmed non-regression: the simpler single-container `ls-containers` podman test, and every non-container-orchestration test, pass cleanly) — not something this round's changes touch or caused.
+
+## A guided database-source wizard for Send (round 17)
+
+The developer's real case doesn't look like "one project with a
+`docker-compose.yml`" — it looks like several independent, raw framework
+projects (e.g. three separate Spring Boot folders), each pointing at its
+own real local MySQL, with no containerization set up at all. Round 17
+builds the Send-side experience for exactly that: a real, multi-step
+wizard, not a single dialog, that discovers what's there and shows it to
+the developer before asking them to decide anything.
+
+**The flow**: select one or more project folders → answer "does this
+need database access?" once → for each folder independently, try to
+auto-detect its connection details (Spring Boot's
+`application.properties`/`.yml`, parsing the JDBC URL for host/port/
+database) → if detected, ask whether the developer already has a dump
+file (if so, just use it) or wants to connect and export (if so, show
+the real live table list with row-count estimates and let them pick
+before exporting the full, non-sampled content) → if detection fails,
+collect connection details manually and feed into the exact same
+subsequent flow → a final summary before the real Send.
+
+**What's real here**: `crates/ls-dbsource` is a new crate doing real
+work — Spring config parsing (8 passing unit tests, no live DB needed),
+and a real MySQL/MariaDB client (the `mysql` crate) for connecting,
+listing tables via `information_schema`, and exporting full table
+content as `CREATE`/`INSERT` SQL, with binary columns going through
+`X'...'` hex literals for exact, encoding-safe round-tripping. Proven
+with a real, disposable local MariaDB instance: connect, list, export,
+then **replay the generated dump into a second empty database and
+assert the reimported content matches byte-for-byte** — including a
+string with an embedded quote and backslash, a real NULL, and a
+VARBINARY column's exact bytes. `crates/ls-snapshot` gained
+`create_snapshot_multi`, bundling any number of folders (each fully
+tested, existing `bundle_project` logic, just re-homed under a
+`<folder>/` prefix in the combined tar so independent projects never
+collide on path) plus any database dumps into one signed `Snapshot`,
+with `Manifest.folders`/`Manifest.database_dumps` as new, purely
+additive fields (`#[serde(default)]` — an old manifest deserializes
+fine without them, old code reading a new manifest ignores them). The
+whole thing is proven end to end through the real Tauri command layer
+in `apps/desktop/src-tauri/tests/wizard_send_flow_test.rs`: one test
+bundles two folders with no database at all, another runs the *complete*
+wizard sequence — real auto-detection against a real
+`application.properties`, real `test_db_connection`/`list_db_tables`/
+`export_db_tables` commands, real packaging, a real send and receive —
+and confirms the manifest and the received payload both carry the exact
+dump bytes, correctly hashed and correctly placed.
+
+**A real bug found and fixed along the way**: `ls_security::diff_summary`
+originally hard-errored for any snapshot without a single top-level
+`diff_stat.json` — which is exactly what a multi-folder snapshot
+produces (each folder ships its own, nested). Left unfixed, receiving
+*any* multi-folder snapshot would have failed outright before a human
+ever saw a review screen, making this round's own feature unusable
+end to end. Fixed additively (single-folder snapshots behave exactly as
+before; a multi-folder snapshot's diff is the real merge of every
+folder's own `diff_stat.json`, each entry prefixed by its folder), and
+proven by the same end-to-end test above actually succeeding rather than
+erroring at that exact point.
+
+**A second real bug, unrelated to the wizard itself but found while
+working in this same area**: round 16's own auto-update banner used the
+DOM id `update-banner`, which silently collided with an older, unrelated
+Receive-tab element of the same id (round 11's "a new update just
+arrived from the sender" push notification) — `document.getElementById`
+was quietly resolving to whichever one came first in the document for
+both features. Fixed by renaming round 16's banner to `app-update-banner`.
+
+**A genuine sandbox-specific finding, not a code bug**, in the same
+spirit as the pasta-segfault and podman-storage-path issues documented
+elsewhere in this README: this development sandbox's `mariadbd` binary
+runs under an AppArmor profile that denies *any* process — including
+its own direct parent — from delivering it a signal at all (confirmed
+via `dmesg`'s kernel audit log). A disposable test server's ordinary
+`Child::kill()` cleanup call fails silently there, and the matching
+`wait()` then hangs forever waiting for a process nothing can signal.
+Both live-database test files stop their disposable server with a real
+SQL `SHUTDOWN` instead — not a signal, so not subject to that mediation
+— which is both the correct fix and one that works identically on real
+hardware without this specific confinement.
+
+**Explicitly out of scope, on purpose**: making the *receiver* able to
+actually build and run several raw, non-containerized folders together
+— that needs auto-generated containerization and rewriting each app's
+datasource config to point at a containerized hostname instead of
+`localhost`, which is real, substantial, and deliberately deferred to a
+future round. This round's job ends at producing a correctly packaged,
+correctly reviewable snapshot; compression, resumable transfer, and
+incremental dump sync are similarly deferred, on top of what this round
+produces. The wizard's own visual click-through (does the multi-step UI
+actually render and step through correctly) is deferred to
+`docs/round5-manual-test-checklist.md` like every other UI claim in this
+project — everything above it is proven through real, automated,
+non-UI tests.
+
 ## What's not verified here
 
-Multi-service stacks beyond app+DB and anything past a single share→run flow are unbuilt by design — see the MVP scope note above. Windows/macOS provisioning code exists now (above) but real-machine proof beyond this round's single verified Windows pass is deliberately deferred to `docs/round5-manual-test-checklist.md`, run by a human on real hardware — not simulated here, by design, per that round's explicit budget rule. A minor, separately-tracked finding from round 2: `crates/ls-net`'s `CONNECT_TIMEOUT` was seen to trip once in 7 back-to-back `nat_fallback` test runs under heavy host contention (multiple container lifecycles in quick succession) — not the transport bug that round fixed (it failed before any transfer began), not reproduced outside of rapid repeated automated testing. Round 12 raised this same constant from 30s to 5 minutes for an unrelated reason (a real UX bug — the human room-code handoff window, see below) which happens to give this old finding far more headroom too; not re-tested under contention specifically, but the arithmetic alone makes a recurrence far less likely. Round 8's Linux file-picker fix (above) is verified by source inspection and a clean build, not by a live click — no real desktop environment was available this round to confirm a picker dialog actually appears; that's the one round-8 item still deferred to `docs/round5-manual-test-checklist.md`. The Windows NSIS firewall hook is verified by config/macro-name correctness against Tauri's documented schema, not by installing the built package and inspecting Windows Defender Firewall's rule list — also deferred to that checklist. Round 11's multi-receiver/push/pull-request flow is proven same-box (real network stack, real Podman-free receivers, but one process) per that round's explicit budget rule — a real test across genuinely separate machines, with real connection drops/reconnects over time, is deferred to `docs/round5-manual-test-checklist.md` like every other multi-machine claim in this project. Round 12's countdown timer, the "Previously connected" list, and the recognized-peer banner's new placement are all real, additive UI code with no JS test harness in this repo (consistent with every prior round's UI work) — build-verified and manually traced, not visually observed in a running app; that's deferred to the checklist too. Round 13 is the starkest example of this project's real-hardware division of labor yet: neither "does a console window actually flash on Windows" nor "does the details panel actually render live text" can be observed in this environment at all — both fixes are proven at the process/data level (a real subprocess spawned with the right creation flag; a real log file receiving real `podman-compose` output live) but the actual visual behavior is deferred entirely to `docs/round5-manual-test-checklist.md`.
+Multi-service stacks beyond app+DB and anything past a single share→run flow are unbuilt by design — see the MVP scope note above. Windows/macOS provisioning code exists now (above) but real-machine proof beyond this round's single verified Windows pass is deliberately deferred to `docs/round5-manual-test-checklist.md`, run by a human on real hardware — not simulated here, by design, per that round's explicit budget rule. A minor, separately-tracked finding from round 2: `crates/ls-net`'s `CONNECT_TIMEOUT` was seen to trip once in 7 back-to-back `nat_fallback` test runs under heavy host contention (multiple container lifecycles in quick succession) — not the transport bug that round fixed (it failed before any transfer began), not reproduced outside of rapid repeated automated testing. Round 12 raised this same constant from 30s to 5 minutes for an unrelated reason (a real UX bug — the human room-code handoff window, see below) which happens to give this old finding far more headroom too; not re-tested under contention specifically, but the arithmetic alone makes a recurrence far less likely. Round 8's Linux file-picker fix (above) is verified by source inspection and a clean build, not by a live click — no real desktop environment was available this round to confirm a picker dialog actually appears; that's the one round-8 item still deferred to `docs/round5-manual-test-checklist.md`. The Windows NSIS firewall hook is verified by config/macro-name correctness against Tauri's documented schema, not by installing the built package and inspecting Windows Defender Firewall's rule list — also deferred to that checklist. Round 11's multi-receiver/push/pull-request flow is proven same-box (real network stack, real Podman-free receivers, but one process) per that round's explicit budget rule — a real test across genuinely separate machines, with real connection drops/reconnects over time, is deferred to `docs/round5-manual-test-checklist.md` like every other multi-machine claim in this project. Round 12's countdown timer, the "Previously connected" list, and the recognized-peer banner's new placement are all real, additive UI code with no JS test harness in this repo (consistent with every prior round's UI work) — build-verified and manually traced, not visually observed in a running app; that's deferred to the checklist too. Round 13 is the starkest example of this project's real-hardware division of labor yet: neither "does a console window actually flash on Windows" nor "does the details panel actually render live text" can be observed in this environment at all — both fixes are proven at the process/data level (a real subprocess spawned with the right creation flag; a real log file receiving real `podman-compose` output live) but the actual visual behavior is deferred entirely to `docs/round5-manual-test-checklist.md`. Round 14's `.github/workflows/macos.yml` was written and statically validated (`actionlint` + `shellcheck`, zero findings) but has not actually been run as of this writing — it's `workflow_dispatch`-only by design (macOS CI minutes cost real quota), so someone has to deliberately trigger it from the Actions tab before any of its results (real `cargo test --workspace` pass/fail on macOS, whether the `.dmg` build succeeds, whether Podman provisioning works inside GitHub's macOS runners) exist to report. Until then, macOS remains exactly where round 5 left it: real, documented, unverified code. Round 15's release pipeline has the identical status one level up: written, statically validated, not yet triggered — no real Release, no real installers, and no confirmation the Windows/Linux builds (their first-ever CI runs) actually succeed exist until someone runs it. The end-user install steps in the new **Download & Install** section were written from the real, documented behavior of SmartScreen/Gatekeeper/AppImage's FUSE dependency, not observed against a real downloaded LocalSync build — that's the same real-hardware gap as everything else on this list, just for a brand-new audience (a non-technical downloader) rather than a developer. Round 16 splits into two very different confidence levels: the auto-update wiring itself (plugin registration, the signing keypair, `latest.json` generation) is verified as far as this environment allows — real local builds, a real `.sig` produced and inspected, the manifest script run against real and synthetic data — but the actual click-through (does the in-app banner appear, does clicking "Install update" really replace a running installed copy and relaunch it) has never been observed against two real, different-versioned builds on real hardware, and is deferred to `docs/round5-manual-test-checklist.md` like every other real-machine claim here. Code-signing is a different, starker case: it is infrastructure only, by design, per that round's explicit instructions — no certificate, Apple Developer account, or credential of any kind has touched this project, so every installer this pipeline has ever produced, including this round's, remains unsigned; see `docs/code-signing.md` for exactly what adding real credentials would take. Round 17's database-source wizard is, unusually, verified more thoroughly by automated tests than most prior rounds' UI work — real multi-folder bundling, a real disposable database, a real round-trip export/reimport, and the full command-layer flow all pass as real, non-fabricated tests — precisely because none of that needed a live GUI to prove; only the wizard's own visual step-through (does the UI actually render and advance correctly when clicked) is deferred to `docs/round5-manual-test-checklist.md`, the same real-hardware gap as every other round's UI claims. Separately, and entirely out of scope by this round's own design: nothing here makes the receiver able to build or run several raw, non-containerized folders together — that's real, substantial, unbuilt work for a future round.

@@ -25,8 +25,16 @@ a developer on their own Mac. Steps:
 
 ## Where the `.dmg` lands
 
-`apps/desktop/src-tauri/target/release/bundle/dmg/LocalSync_0.1.0_<arch>.dmg`,
-where `<arch>` is `aarch64` on Apple Silicon or `x64` on Intel (matching the
+`target/release/bundle/dmg/LocalSync_0.1.0_<arch>.dmg`, at the **workspace
+root** — not nested under `apps/desktop/src-tauri/`, even though that's where
+you ran the build from. `apps/desktop/src-tauri` is a member of this repo's
+Cargo workspace (see the root `Cargo.toml`), and Cargo always places every
+member's build output under the workspace root's single shared `target/`
+directory, never under the member's own path (confirmed the hard way: this
+directory doesn't have its own `target/` at all — round 15's release
+pipeline first got this wrong too, searching
+`apps/desktop/src-tauri/target/...` and finding nothing). `<arch>` is
+`aarch64` on Apple Silicon or `x64` on Intel (matching the
 `productName`/`version` in `apps/desktop/src-tauri/tauri.conf.json`, which is
 `LocalSync` / `0.1.0` as of this writing). Building on Apple Silicon produces
 an Apple Silicon-only `.dmg` unless you pass

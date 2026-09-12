@@ -50,6 +50,74 @@ pub struct Manifest {
     pub sender_pubkey: [u8; 32],
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
+    /// Round 17: the full per-folder breakdown for a multi-folder send (the
+    /// developer's real case — several independent project folders sent
+    /// together). Empty for every snapshot built before round 17, and for
+    /// any snapshot still built via the original single-folder
+    /// `create_snapshot` (which never populates this) — `#[serde(default)]`
+    /// so an old manifest missing this field entirely still deserializes
+    /// cleanly, and old code reading a new manifest just ignores the extra
+    /// field, both by construction of how serde already handles this struct
+    /// (no `deny_unknown_fields` anywhere on it). `git_commit`/
+    /// `git_parent_commit` above stay populated with the *first* folder's
+    /// values for a multi-folder send, so anything reading only those two
+    /// top-level fields keeps working exactly as before; this is the
+    /// complete, unambiguous breakdown for anything that needs more.
+    #[serde(default)]
+    pub folders: Vec<FolderInfo>,
+    /// Round 17: `{folder, schema, dump_file, hash}` for every database dump
+    /// this snapshot carries — either a developer-supplied dump file used
+    /// as-is, or a freshly exported (full-table, never sampled) live dump.
+    /// `dump_file` is the path inside the payload tar
+    /// (`db-dumps/<folder>/<schema>.sql`); `hash` is the sha256 hex of that
+    /// exact file's bytes, so a receiver can verify it without trusting the
+    /// tar entry's metadata. Empty for anything without a database, and for
+    /// every pre-round-17 manifest — same `#[serde(default)]` backward/
+    /// forward compatibility reasoning as `folders` above.
+    #[serde(default)]
+    pub database_dumps: Vec<DatabaseDumpEntry>,
+}
+
+/// One folder's identity within a multi-folder snapshot — see
+/// [`Manifest::folders`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FolderInfo {
+    /// The folder's label inside the payload tar (its basename, de-duplicated
+    /// if two selected folders share one — see `create_snapshot_multi`).
+    pub name: String,
+    pub git_commit: String,
+    pub git_parent_commit: Option<String>,
+}
+
+/// One database dump packaged into a multi-folder snapshot — see
+/// [`Manifest::database_dumps`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DatabaseDumpEntry {
+    /// Matches a [`FolderInfo::name`] in the same manifest's `folders`.
+    pub folder: String,
+    /// The database/schema name this dump is of.
+    pub schema: String,
+    /// Path inside the payload tar, e.g. "db-dumps/orders-service/orders.sql".
+    pub dump_file: String,
+    /// sha256 hex of the dump file's exact bytes.
+    pub hash: String,
+}
+
+/// A database dump ready to be packaged by [`crate::create_snapshot_multi`] —
+/// produced either by `ls-dbsource`'s live export or by reading a developer-
+/// supplied dump file as-is. Not part of the wire format itself (see
+/// [`DatabaseDumpEntry`] for that); this is just the input side, kept in
+/// `ls-snapshot` (rather than `ls-dbsource`, which has no reason to know
+/// about snapshots/manifests at all) so the command layer has one obvious
+/// place to build it from either source.
+#[derive(Debug, Clone)]
+pub struct PendingDump {
+    /// Index into the `folders` slice passed to `create_snapshot_multi` —
+    /// not a name, so the caller never has to duplicate this crate's own
+    /// folder-label de-duplication logic to know what to pass here.
+    pub folder_index: usize,
+    pub schema: String,
+    pub dump_bytes: Vec<u8>,
 }
 
 /// A snapshot as it travels over the wire / sits on disk.
