@@ -722,3 +722,96 @@ broken out per folder, exactly as informatively as a single-folder send
 always could. Building and running whatever was received — especially
 several raw, non-containerized folders with no `docker-compose.yml`
 between them — is explicitly not yet solved; that's the next round's job.
+
+---
+
+## Round 18 addendum: multi-engine DB support, a real connection bug fix, installer terminal flashing
+
+Round 18 fixes three real problems a developer hit on the first live
+click-through of round 17's wizard. Two of the three (multi-engine
+support, the connection-test bug) are proven here with real automated
+tests against real local database servers — a real MariaDB, a real
+PostgreSQL 18, and a real MongoDB 7 all connected to, listed, exported
+from, and round-tripped through a restore in this environment. The
+third (installer terminal flashing) is a Windows-visual behavior this
+sandbox cannot observe directly; it's fixed with confidence from a
+code-level NSIS review, but **needs a real click-through on real Windows
+hardware to actually watch the install and confirm no console window
+flashes**, same as every other Windows-visual claim in this project.
+
+### What changed
+
+- **Real multi-engine support.** The Engine field is a real dropdown
+  (MySQL/MariaDB, PostgreSQL, MongoDB), each with genuinely working
+  connect/list/export logic — PostgreSQL via the real `postgres` crate
+  and the real `pg_dump` binary, MongoDB via the real `mongodb` driver
+  and the real `mongodump`/`mongorestore` binaries. Picking an engine
+  also updates the suggested default port (3306/5432/27017).
+- **The manifest now records engine per dump** (`DatabaseDumpEntry.engine`,
+  additive/backward-compatible — an old round-17 manifest without it
+  defaults to "mysql", which is correct since round 17 never produced
+  anything else). The dump file's extension follows the engine too:
+  `.sql` for MySQL/PostgreSQL, `.tar.gz` for MongoDB (a tarred directory
+  of `mongodump`'s own BSON output — restoring it means untarring, then
+  a directory-mode `mongorestore`, never a SQL-style restore).
+- **A real, reproduced connection bug, found and fixed.** A literal
+  `host: "localhost"` could fail to connect at all, on both Windows and
+  Linux, even with correct credentials — root-caused (not assumed) by
+  reproducing it against a real local MariaDB in this sandbox: this
+  sandbox's `localhost` resolves to the IPv6 loopback (`::1`) only,
+  while the server listened on the IPv4 loopback only, so the very
+  first TCP connect attempt was refused before any auth ever happened.
+  Windows ships the same `::1 localhost` default, which is why the bug
+  showed up identically on both platforms despite being an OS/DNS
+  resolution issue, not a credentials one. Fixed by substituting the
+  unambiguous `127.0.0.1` for a literal "localhost" before connecting,
+  for all three engines.
+- **Real underlying errors now reach the UI.** The command layer was
+  converting every `ls-dbsource` error with `.to_string()`, which for an
+  `anyhow::Error` only shows the outermost "failed to connect to ..."
+  wrapper and silently drops the real reason (connection refused, wrong
+  password, unknown database, ...). Now uses the full error chain
+  (`{:#}`), verified directly against real failures of each kind.
+- **NSIS install-time terminal flashing fixed.** Round 8's Windows
+  Firewall install hook (`apps/desktop/src-tauri/windows/hooks.nsh`) ran
+  `netsh.exe` via plain NSIS `ExecWait`, which visibly flashes a console
+  window — switched to `nsExec::ExecToLog` (NSIS's own bundled plugin,
+  no extra download), which runs it hidden and pipes its output into the
+  installer's own detail log instead.
+
+### What to check (real hardware needed for the installer fix specifically)
+
+1. **Installer terminal flashing (Windows, real hardware required)**: run
+   a fresh install of the built `.exe`. Watch closely during the install
+   (and again during an uninstall) — confirm **no console/terminal window
+   ever flashes on screen**, even briefly, while the firewall rules are
+   being added/removed. Then confirm the firewall rules were still
+   actually created: Windows Defender Firewall → Advanced Settings →
+   Inbound Rules → look for "LocalSync" (TCP and UDP).
+2. **Multi-engine wizard, on real hardware**: for each of MySQL,
+   PostgreSQL, and MongoDB, point the wizard's manual-entry form at a
+   real local instance (or a Spring Boot project's real
+   `application.properties` for the MySQL case, same as round 17), using
+   the literal host value `localhost` specifically (not `127.0.0.1`) —
+   confirm the connection succeeds and the real table/collection list
+   appears with plausible row/document counts.
+3. **Error surfacing**: deliberately get a connection test wrong (bad
+   password, a database/collection that doesn't exist, wrong port) for
+   each engine — confirm the wizard shows the *real* reason (e.g.
+   "Access denied for user", "Unknown database", "password
+   authentication failed"), not a bare "failed to connect".
+4. **A real MongoDB round trip on real hardware**: export a couple of
+   collections, then (once a future round adds restore) confirm the
+   `mongorestore <dir>/dump` directory-mode restore documented in
+   `crates/ls-dbsource/src/engines/mongo.rs` actually works against the
+   real exported archive, not just the same-box proof this round already
+   has via `cargo test`.
+
+### What "success" looks like
+
+A developer picks whichever of the three real engines their project
+actually uses, types in connection details exactly the way they always
+would (including plain `localhost`), and it just works — no cryptic
+generic failure, no silent fallback to MySQL's logic for an engine that
+was never really implemented. And nobody sees a flashing console window
+appear and disappear while LocalSync installs.

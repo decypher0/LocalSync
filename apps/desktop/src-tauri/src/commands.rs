@@ -329,7 +329,16 @@ pub async fn test_db_connection(details: ConnectionDetailsDto) -> Result<(), Str
     tauri::async_runtime::spawn_blocking(move || ls_dbsource::connect::test_connection(&details.into()))
         .await
         .map_err(|e| format!("db connection task panicked: {e}"))?
-        .map_err(|e| e.to_string())
+        // Round 18: `{e:#}` (anyhow's alternate Display), not `.to_string()`
+        // (plain Display) - plain Display only ever shows the outermost
+        // `with_context` message ("failed to connect to ..."), silently
+        // dropping the real underlying reason (connection refused, wrong
+        // password, unknown database, ...). Verified directly against real
+        // failures in this sandbox: `.to_string()` produced the exact
+        // generic, undiagnosable text a real screenshot showed; `{:#}`
+        // produces the real reason. Same fix applied to every db-wizard
+        // command below.
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Wizard step "show the developer the real list of tables" before they
@@ -340,7 +349,7 @@ pub async fn list_db_tables(details: ConnectionDetailsDto) -> Result<Vec<TableIn
     let tables = tauri::async_runtime::spawn_blocking(move || ls_dbsource::connect::list_tables(&details.into()))
         .await
         .map_err(|e| format!("db list-tables task panicked: {e}"))?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     Ok(tables
         .into_iter()
         .map(|t| TableInfoDto { name: t.name, approx_row_count: t.approx_row_count })
@@ -364,10 +373,11 @@ pub struct ExportedDumpDto {
 /// packaged a moment later.
 #[tauri::command]
 pub async fn export_db_tables(details: ConnectionDetailsDto, tables: Vec<String>) -> Result<ExportedDumpDto, String> {
+    let engine = details.engine.clone();
     let dump_bytes = tauri::async_runtime::spawn_blocking(move || ls_dbsource::export::export_tables(&details.into(), &tables))
         .await
         .map_err(|e| format!("db export task panicked: {e}"))?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
 
     let hash = {
         use sha2::{Digest, Sha256};
@@ -382,7 +392,12 @@ pub async fn export_db_tables(details: ConnectionDetailsDto, tables: Vec<String>
     };
     let dir = base.join("localsync").join("db-exports");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file_path = dir.join(format!("{hash}.sql"));
+    // Round 18: extension follows the engine, not a blanket ".sql" - a
+    // MongoDB export is a tar.gz of mongodump's own BSON output, not SQL
+    // text, and naming it .sql would be actively misleading even though
+    // the bytes themselves are read back raw regardless of extension.
+    let ext = if engine == "mongodb" { "tar.gz" } else { "sql" };
+    let file_path = dir.join(format!("{hash}.{ext}"));
     std::fs::write(&file_path, &dump_bytes).map_err(|e| e.to_string())?;
 
     Ok(ExportedDumpDto {
@@ -401,6 +416,13 @@ pub async fn export_db_tables(details: ConnectionDetailsDto, tables: Vec<String>
 pub struct DumpPlanDto {
     pub schema: String,
     pub file_path: String,
+    /// Round 18: one of `ls_dbsource::SUPPORTED_ENGINES` - carried through
+    /// into `ls_snapshot::PendingDump`/`DatabaseDumpEntry` so a future
+    /// restore step knows which tool a given dump needs. Set by app.js
+    /// from whichever `ConnectionDetails.engine` this folder's dump came
+    /// from - detection/manual-entry always has one by the time a dump
+    /// exists, so there's no engine-less case to handle here.
+    pub engine: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -448,6 +470,7 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
                 folder_index: i,
                 schema: dump.schema.clone(),
                 dump_bytes,
+                engine: dump.engine.clone(),
             });
         }
     }

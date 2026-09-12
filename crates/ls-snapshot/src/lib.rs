@@ -99,6 +99,24 @@ fn unique_folder_labels(folders: &[FolderSpec]) -> Vec<String> {
     labels
 }
 
+/// Round 18: the file extension a dump's manifest path and its tar entry
+/// both use, keyed by engine - a plain `.sql` text dump for MySQL/
+/// PostgreSQL (both produce restorable plain SQL, just via different
+/// tools - see `ls_dbsource::export`'s own doc comment), `.tar.gz` for
+/// MongoDB (a tarred directory of `mongodump`'s own BSON output - not SQL
+/// at all, restored with `mongorestore`, never a SQL-style restore).
+/// Falls back to `.sql` for anything else (round-17 manifests never
+/// recorded an engine at all - see `default_dump_engine` in types.rs - and
+/// treating an unrecognized value as SQL-shaped is the safer default over
+/// silently misnaming a file receivers otherwise wouldn't be able to open
+/// as anything, hence "sql" and not e.g. "dump").
+fn dump_file_extension(engine: &str) -> &'static str {
+    match engine {
+        "mongodb" => "tar.gz",
+        _ => "sql",
+    }
+}
+
 /// Round 17: bundles one or more independent project folders — the
 /// developer's real case: several standalone Spring Boot folders with no
 /// shared docker-compose.yml — plus any database dumps the Send wizard
@@ -171,18 +189,27 @@ pub fn create_snapshot_multi(folders: &[FolderSpec], dumps: &[types::PendingDump
 
     let dump_tuples: Vec<(String, String, Vec<u8>)> = dumps
         .iter()
-        .map(|d| (labels[d.folder_index].clone(), d.schema.clone(), d.dump_bytes.clone()))
+        .map(|d| {
+            let file_name = format!("{}.{}", d.schema, dump_file_extension(&d.engine));
+            (labels[d.folder_index].clone(), file_name, d.dump_bytes.clone())
+        })
         .collect();
     let database_dumps: Vec<types::DatabaseDumpEntry> = dumps
         .iter()
         .map(|d| types::DatabaseDumpEntry {
             folder: labels[d.folder_index].clone(),
             schema: d.schema.clone(),
-            dump_file: format!("db-dumps/{}/{}.sql", labels[d.folder_index], d.schema),
+            dump_file: format!(
+                "db-dumps/{}/{}.{}",
+                labels[d.folder_index],
+                d.schema,
+                dump_file_extension(&d.engine)
+            ),
             hash: {
                 use sha2::{Digest, Sha256};
                 Sha256::digest(&d.dump_bytes).iter().map(|b| format!("{b:02x}")).collect()
             },
+            engine: d.engine.clone(),
         })
         .collect();
 
@@ -656,6 +683,7 @@ mod tests {
                 folder_index: 0,
                 schema: "orders_db".to_string(),
                 dump_bytes: dump_bytes.clone(),
+                engine: "mysql".to_string(),
             }],
         )
         .unwrap();
@@ -665,6 +693,7 @@ mod tests {
         assert_eq!(entry.folder, "orders-service");
         assert_eq!(entry.schema, "orders_db");
         assert_eq!(entry.dump_file, "db-dumps/orders-service/orders_db.sql");
+        assert_eq!(entry.engine, "mysql");
         let expected_hash = {
             use sha2::{Digest, Sha256};
             Sha256::digest(&dump_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -681,6 +710,34 @@ mod tests {
     }
 
     #[test]
+    fn create_snapshot_multi_gives_a_mongodb_dump_a_tar_gz_extension_not_sql() {
+        let dir = tempdir().unwrap();
+        let a = make_git_folder(dir.path(), "catalog-service");
+        let dump_bytes = b"pretend tarred mongodump bytes".to_vec();
+
+        let snap = create_snapshot_multi(
+            &[FolderSpec { path: a, parent_commit: None }],
+            &[PendingDump {
+                folder_index: 0,
+                schema: "catalog_db".to_string(),
+                dump_bytes: dump_bytes.clone(),
+                engine: "mongodb".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let entry = &snap.manifest.database_dumps[0];
+        assert_eq!(entry.engine, "mongodb");
+        assert_eq!(entry.dump_file, "db-dumps/catalog-service/catalog_db.tar.gz");
+
+        let files = unpack(&snap.payload);
+        assert_eq!(
+            files.get("db-dumps/catalog-service/catalog_db.tar.gz").unwrap().as_slice(),
+            dump_bytes.as_slice()
+        );
+    }
+
+    #[test]
     fn create_snapshot_multi_rejects_an_empty_folder_list() {
         assert!(create_snapshot_multi(&[], &[]).is_err());
     }
@@ -691,7 +748,7 @@ mod tests {
         let a = make_git_folder(dir.path(), "solo");
         let err = create_snapshot_multi(
             &[FolderSpec { path: a, parent_commit: None }],
-            &[PendingDump { folder_index: 1, schema: "x".into(), dump_bytes: vec![] }],
+            &[PendingDump { folder_index: 1, schema: "x".into(), dump_bytes: vec![], engine: "mysql".into() }],
         )
         .unwrap_err();
         assert!(err.to_string().contains("out of range"));

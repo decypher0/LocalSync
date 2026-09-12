@@ -1,16 +1,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Round 18: every engine `connect`/`export` genuinely implement (real
+/// connection-test, real table/collection listing, real export via each
+/// engine's own real tooling) - never a silent fallback from an
+/// unimplemented engine to another's logic. The wizard's Engine dropdown
+/// offers exactly these three.
+pub const SUPPORTED_ENGINES: &[&str] = &["mysql", "postgres", "mongodb"];
+
 /// Everything needed to open a real connection to a developer's database.
 /// Comes either from [`crate::detect`] parsing a project's own config, or
 /// from the developer typing it in by hand when detection fails.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionDetails {
-    /// Only "mysql" is actually exercised end-to-end this round (the
-    /// developer's real case). Kept as a String rather than an enum so a
-    /// future engine can be added without a breaking wire-format change -
-    /// `connect`/`export` reject anything but "mysql" today with a clear
-    /// error rather than silently misinterpreting it.
+    /// One of [`SUPPORTED_ENGINES`] - kept as a String rather than an enum
+    /// so a future engine can be added without a breaking wire-format
+    /// change. `connect`/`export` reject anything else with a clear error
+    /// naming what *is* supported, rather than silently misinterpreting it
+    /// or falling back to another engine's logic.
     pub engine: String,
     pub host: String,
     pub port: u16,
