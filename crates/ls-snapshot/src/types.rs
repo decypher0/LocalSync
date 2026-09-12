@@ -89,6 +89,13 @@ pub struct FolderInfo {
     pub git_parent_commit: Option<String>,
 }
 
+/// Round 17 only ever produced MySQL dumps, so an older manifest missing
+/// `DatabaseDumpEntry.engine` entirely is unambiguously that - a real,
+/// correct backward-compatible default, not a guess.
+fn default_dump_engine() -> String {
+    "mysql".to_string()
+}
+
 /// One database dump packaged into a multi-folder snapshot — see
 /// [`Manifest::database_dumps`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -101,6 +108,17 @@ pub struct DatabaseDumpEntry {
     pub dump_file: String,
     /// sha256 hex of the dump file's exact bytes.
     pub hash: String,
+    /// Round 18: one of `ls_dbsource::SUPPORTED_ENGINES` ("mysql",
+    /// "postgres", "mongodb") - a future restore step needs to know which
+    /// tool a given dump file needs (`psql`/`mysql` for a plain-SQL dump vs
+    /// `mongorestore` for MongoDB's own tar'd BSON directory dump), and
+    /// `dump_file`'s extension alone doesn't reliably say (both MySQL's
+    /// and PostgreSQL's dumps are plain `.sql` text). `#[serde(default =
+    /// "default_dump_engine")]` so a round-17 manifest (MySQL-only,
+    /// pre-dates this field) still deserializes correctly rather than
+    /// erroring or defaulting to an empty string.
+    #[serde(default = "default_dump_engine")]
+    pub engine: String,
 }
 
 /// A database dump ready to be packaged by [`crate::create_snapshot_multi`] —
@@ -117,6 +135,10 @@ pub struct PendingDump {
     /// folder-label de-duplication logic to know what to pass here.
     pub folder_index: usize,
     pub schema: String,
+    /// One of `ls_dbsource::SUPPORTED_ENGINES` - see
+    /// `DatabaseDumpEntry::engine`'s doc comment for why this needs to
+    /// travel with the dump rather than being inferred later.
+    pub engine: String,
     pub dump_bytes: Vec<u8>,
 }
 

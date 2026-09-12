@@ -156,7 +156,13 @@
 
         <div id="wiz-db-manual" class="hidden">
           <p class="hint">No database config was auto-detected — enter this folder's connection details.</p>
-          <label>Engine <input id="wiz-manual-engine" type="text" value="mysql" disabled /></label>
+          <label>Engine
+            <select id="wiz-manual-engine">
+              <option value="mysql">MySQL / MariaDB</option>
+              <option value="postgres">PostgreSQL</option>
+              <option value="mongodb">MongoDB</option>
+            </select>
+          </label>
           <label>Host <input id="wiz-manual-host" type="text" placeholder="localhost" /></label>
           <label>Port <input id="wiz-manual-port" type="number" value="3306" /></label>
           <label>Database <input id="wiz-manual-database" type="text" /></label>
@@ -192,9 +198,9 @@
         </div>
 
         <div id="wiz-db-tables" class="hidden">
-          <p class="hint">Real tables in <strong id="wiz-tables-database"></strong> — select what to include (default: all):</p>
+          <p class="hint">Real <span id="wiz-tables-noun">tables</span> in <strong id="wiz-tables-database"></strong> — select what to include (default: all):</p>
           <ul id="wiz-tables-list" class="ports-list"></ul>
-          <button id="wiz-export-btn" class="primary-btn" type="button">Export selected tables</button>
+          <button id="wiz-export-btn" class="primary-btn" type="button">Export selected <span id="wiz-tables-noun-2">tables</span></button>
           <p id="wiz-export-status" class="hint-inline"></p>
           <p id="wiz-tables-error" class="error"></p>
         </div>

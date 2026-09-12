@@ -286,13 +286,45 @@ fn live_mysql_export_round_trip() -> Result<()> {
     assert!(connect::test_connection(&bad_details).is_err());
     eprintln!("STEP: bad_details rejected");
 
-    // Unsupported engine must be rejected clearly.
+    // Unsupported engine must be rejected clearly, with no network attempt
+    // at all. Round 18: "postgres" (this test's original choice here) is
+    // now a *real*, dispatched engine in its own right - testing it here
+    // would exercise "what happens when you speak Postgres wire protocol
+    // to a real MySQL server" (a protocol-mismatch error, still technically
+    // `is_err()`, but not the "unsupported engine, rejected before any
+    // connection is attempted" behavior this test means to prove) rather
+    // than what it's meant to. "sqlite" is genuinely unimplemented by any
+    // dispatcher arm, so it actually exercises that rejection path.
     let mut wrong_engine = src_details.clone();
-    wrong_engine.engine = "postgres".to_string();
-    assert!(connect::test_connection(&wrong_engine).is_err());
+    wrong_engine.engine = "sqlite".to_string();
+    let err = connect::test_connection(&wrong_engine).unwrap_err();
+    assert!(format!("{err:#}").contains("unsupported database engine"));
     assert!(connect::list_tables(&wrong_engine).is_err());
     assert!(export::export_tables(&wrong_engine, &["widgets".to_string()]).is_err());
     eprintln!("STEP: wrong_engine rejected");
+
+    // Round 18's actual reproduced bug and its fix: a literal "localhost"
+    // must connect exactly as well as the unambiguous loopback address -
+    // this sandbox's own `getent hosts localhost` resolves to the IPv6
+    // loopback only, which is exactly the real, confirmed root cause (see
+    // engines::mysql::open_connection's doc comment). Before the fix, this
+    // assertion failed with "Connection refused (os error 111)".
+    let mut localhost_details = src_details.clone();
+    localhost_details.host = "localhost".to_string();
+    connect::test_connection(&localhost_details)
+        .context("connecting via literal 'localhost' must work exactly like 127.0.0.1")?;
+    eprintln!("STEP: localhost connects (round 18 fix)");
+
+    // Round 18's other fix: the real underlying reason must survive in the
+    // error chain, not just an outer "failed to connect" wrapper - this is
+    // what commands.rs's `{:#}` (not `.to_string()`) actually depends on
+    // being true here.
+    let chain = format!("{:#}", connect::test_connection(&bad_details).unwrap_err());
+    assert!(
+        chain.contains("Unknown database") || chain.contains("does_not_exist_db"),
+        "expected the real MySQL error to survive in the chain, got: {chain}"
+    );
+    eprintln!("STEP: real error reason survives in the chain (round 18 fix)");
 
     // --- list_tables: real information_schema query. ---
     let tables = connect::list_tables(&src_details).context("list_tables against src_db")?;
