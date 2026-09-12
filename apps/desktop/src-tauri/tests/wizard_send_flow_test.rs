@@ -332,6 +332,7 @@ async fn full_wizard_flow_against_a_real_local_mysql_instance() {
         dump: Some(commands::DumpPlanDto {
             schema: detected.details.database.clone(),
             file_path: exported.file_path.clone(),
+            engine: detected.details.engine.clone(),
         }),
     }];
 
@@ -358,6 +359,7 @@ async fn full_wizard_flow_against_a_real_local_mysql_instance() {
     assert_eq!(entry.folder, "inventory-service");
     assert_eq!(entry.schema, "inventory_db");
     assert_eq!(entry.dump_file, "db-dumps/inventory-service/inventory_db.sql");
+    assert_eq!(entry.engine, "mysql", "round 18: the manifest must record which engine this dump came from");
     let expected_hash = {
         use sha2::{Digest, Sha256};
         Sha256::digest(&dump_bytes_on_disk).iter().map(|b| format!("{b:02x}")).collect::<String>()

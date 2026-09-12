@@ -1,13 +1,18 @@
-//! Round 17: the Send-side database-source wizard's backend. Three jobs,
-//! kept as separate modules so each is independently testable:
+//! Rounds 17-18: the Send-side database-source wizard's backend. Kept as
+//! separate modules so each is independently testable:
 //!
 //! - [`detect`]: find connection details in a project's own config
 //!   (Spring Boot's `application.properties`/`.yml` today), so the
 //!   developer is never asked to type in something already written down.
-//! - [`connect`]: open a real connection and list the real tables/row
-//!   counts, so a table-selection choice is informed, not blind.
-//! - [`export`]: turn a developer-selected set of tables into a real,
-//!   non-sampled SQL dump.
+//! - [`engines`]: one real, working implementation per supported database
+//!   engine (MySQL/MariaDB, PostgreSQL, MongoDB) - genuinely different
+//!   tooling per engine (a native driver crate for MySQL/PostgreSQL's own
+//!   connect/list; `pg_dump`/`mongodump` for PostgreSQL/MongoDB's export;
+//!   MongoDB's own driver for its connect/list), never a fallback to
+//!   another engine's logic for one that isn't implemented.
+//! - [`connect`]/[`export`]: thin dispatchers over `engines`, keyed by
+//!   `ConnectionDetails.engine` - the only two entry points anything
+//!   outside this crate needs to call.
 //!
 //! Deliberately has zero dependency on `ls-snapshot` - this crate only
 //! knows about "a database", not about snapshots/manifests/tar payloads.
@@ -16,7 +21,8 @@
 
 pub mod connect;
 pub mod detect;
+mod engines;
 pub mod export;
 mod types;
 
-pub use types::{ConnectionDetails, DetectedConnection, TableInfo};
+pub use types::{ConnectionDetails, DetectedConnection, TableInfo, SUPPORTED_ENGINES};
