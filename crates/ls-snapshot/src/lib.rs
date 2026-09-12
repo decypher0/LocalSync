@@ -3,7 +3,7 @@ mod hash;
 mod sign;
 mod types;
 
-pub use types::{Manifest, ServiceDef, Snapshot};
+pub use types::{DatabaseDumpEntry, FolderInfo, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};
 use std::fs::File;
@@ -45,6 +45,11 @@ pub fn create_snapshot(project_root: &Path, parent_commit: Option<&str>) -> Resu
         services: bundle.services,
         sender_pubkey: identity.verifying_key().to_bytes(),
         created_at: time::OffsetDateTime::now_utc(),
+        // Round 17's multi-folder/database-dump breakdown - this function is
+        // the original single-folder path, unchanged in every other respect,
+        // and never populates either: see Manifest::folders' doc comment.
+        folders: Vec::new(),
+        database_dumps: Vec::new(),
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &bundle.payload)?;
@@ -54,6 +59,160 @@ pub fn create_snapshot(project_root: &Path, parent_commit: Option<&str>) -> Resu
         manifest,
         signature,
         payload: bundle.payload,
+    })
+}
+
+/// One folder the round-17 Send wizard is packaging into a multi-folder
+/// snapshot, paired with the same optional "diff against a prior commit"
+/// input `create_snapshot` already takes for a single folder — `None` means
+/// "everything at HEAD is new", matching a first-time send.
+pub struct FolderSpec {
+    pub path: std::path::PathBuf,
+    pub parent_commit: Option<String>,
+}
+
+/// Computes each folder's tar/manifest label: its basename, with a numeric
+/// suffix (`-2`, `-3`, ...) appended to any later folder that collides with
+/// an earlier one's basename or a still-earlier de-duplicated label — two
+/// selected folders can easily share a basename (e.g. sibling checkouts
+/// both named `app`), and both the manifest's `FolderInfo.name` and the
+/// payload tar's path prefix need to be unique or later folders would
+/// silently overwrite earlier ones' entries.
+fn unique_folder_labels(folders: &[FolderSpec]) -> Vec<String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut labels = Vec::with_capacity(folders.len());
+    for f in folders {
+        let base = f
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project".to_string());
+        let mut candidate = base.clone();
+        let mut n = 2;
+        while used.contains(&candidate) {
+            candidate = format!("{base}-{n}");
+            n += 1;
+        }
+        used.insert(candidate.clone());
+        labels.push(candidate);
+    }
+    labels
+}
+
+/// Round 17: bundles one or more independent project folders — the
+/// developer's real case: several standalone Spring Boot folders with no
+/// shared docker-compose.yml — plus any database dumps the Send wizard
+/// collected for them, into one signed, multi-folder `Snapshot`.
+///
+/// Each folder is bundled with the same, unmodified, already-tested
+/// `bundle::bundle_project` used by the original single-folder
+/// `create_snapshot`, then combined via `bundle::merge_folder_payloads` (see
+/// its doc comment for why this project chose re-tar-ing over reworking
+/// `bundle_project` itself). `dependency_lock_hash`/`db_seed_hash` become
+/// the combined hash (`hash::combine_hex_hashes`) across every folder's own
+/// value, in folder order — still a single, deterministic value keying the
+/// receiver-side build/DB-volume cache, now covering every folder's lockfile
+/// and seed data rather than just one.
+///
+/// `project_name`/top-level `git_commit`/`git_parent_commit` stay populated
+/// (the first folder's values, and folder names joined with "+") purely so
+/// anything reading only those three top-level fields keeps working — the
+/// authoritative, complete per-folder breakdown is `Manifest::folders`.
+///
+/// This function does not, and is not meant to, make the receiver able to
+/// actually *run* several raw, non-containerized folders together — that's
+/// deliberately out of scope for round 17 (see the round's own report);
+/// `services` here is simply the concatenation of whatever docker-compose
+/// services (if any) each individual folder's own `bundle_project` found,
+/// same as it would find for any single folder today.
+pub fn create_snapshot_multi(folders: &[FolderSpec], dumps: &[types::PendingDump]) -> Result<Snapshot> {
+    anyhow::ensure!(!folders.is_empty(), "create_snapshot_multi requires at least one folder");
+    for d in dumps {
+        anyhow::ensure!(
+            d.folder_index < folders.len(),
+            "PendingDump.folder_index {} is out of range for {} folder(s)",
+            d.folder_index,
+            folders.len()
+        );
+    }
+
+    let labels = unique_folder_labels(folders);
+
+    let mut bundles = Vec::with_capacity(folders.len());
+    let mut folder_infos = Vec::with_capacity(folders.len());
+    let mut lock_hashes = Vec::with_capacity(folders.len());
+    let mut seed_hashes = Vec::with_capacity(folders.len());
+    let mut services = Vec::new();
+
+    for (f, label) in folders.iter().zip(&labels) {
+        let bundle = bundle::bundle_project(&f.path, f.parent_commit.as_deref())
+            .with_context(|| format!("bundling {}", f.path.display()))?;
+
+        let build_dirs: Vec<std::path::PathBuf> = bundle
+            .services
+            .iter()
+            .filter_map(|s| s.image_or_build.strip_prefix("build:"))
+            .map(|rel| f.path.join(rel))
+            .collect();
+        lock_hashes.push(hash::dependency_lock_hash(&f.path, &build_dirs)?);
+        seed_hashes.push(hash::db_seed_hash(&f.path)?);
+
+        folder_infos.push(types::FolderInfo {
+            name: label.clone(),
+            git_commit: bundle.git_commit.clone(),
+            git_parent_commit: f.parent_commit.clone(),
+        });
+        services.extend(bundle.services.clone());
+        bundles.push((label.clone(), bundle));
+    }
+
+    let dependency_lock_hash = hash::combine_hex_hashes(&lock_hashes);
+    let db_seed_hash = hash::combine_hex_hashes(&seed_hashes);
+
+    let dump_tuples: Vec<(String, String, Vec<u8>)> = dumps
+        .iter()
+        .map(|d| (labels[d.folder_index].clone(), d.schema.clone(), d.dump_bytes.clone()))
+        .collect();
+    let database_dumps: Vec<types::DatabaseDumpEntry> = dumps
+        .iter()
+        .map(|d| types::DatabaseDumpEntry {
+            folder: labels[d.folder_index].clone(),
+            schema: d.schema.clone(),
+            dump_file: format!("db-dumps/{}/{}.sql", labels[d.folder_index], d.schema),
+            hash: {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(&d.dump_bytes).iter().map(|b| format!("{b:02x}")).collect()
+            },
+        })
+        .collect();
+
+    let payload = bundle::merge_folder_payloads(&bundles, &dump_tuples)?;
+
+    let project_name = labels.join("+");
+
+    log::info!("signing started (multi-folder, {} folder(s))", folders.len());
+    let identity = sign::load_or_create_identity().context("loading sender identity")?;
+
+    let manifest = Manifest {
+        project_name,
+        git_commit: folder_infos[0].git_commit.clone(),
+        git_parent_commit: folder_infos[0].git_parent_commit.clone(),
+        dependency_lock_hash,
+        db_seed_hash,
+        services,
+        sender_pubkey: identity.verifying_key().to_bytes(),
+        created_at: time::OffsetDateTime::now_utc(),
+        folders: folder_infos,
+        database_dumps,
+    };
+
+    let signature = sign::sign_manifest(&identity, &manifest, &payload)?;
+    log::info!("signing done (multi-folder)");
+
+    Ok(Snapshot {
+        manifest,
+        signature,
+        payload,
     })
 }
 
@@ -394,5 +553,147 @@ mod tests {
             noisy.is_empty(),
             "tracked app/target/ must still be filtered out of the payload: {noisy:?}"
         );
+    }
+
+    /// Sets up a minimal real git repo at `dir/name`, with one committed
+    /// `README.md` line identifying it, for `create_snapshot_multi` tests
+    /// that need several independent folders rather than one.
+    fn make_git_folder(dir: &Path, name: &str) -> std::path::PathBuf {
+        let root = dir.join(name);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init"]);
+        fs::write(root.join("README.md"), format!("{name}\n")).unwrap();
+        commit_all(&root, "init");
+        root
+    }
+
+    #[test]
+    fn create_snapshot_multi_bundles_every_folder_under_its_own_prefix() {
+        let dir = tempdir().unwrap();
+        let a = make_git_folder(dir.path(), "orders-service");
+        let b = make_git_folder(dir.path(), "billing-service");
+        let a_commit = git_output(&a, &["rev-parse", "HEAD"]);
+        let b_commit = git_output(&b, &["rev-parse", "HEAD"]);
+
+        let snap = create_snapshot_multi(
+            &[
+                FolderSpec { path: a, parent_commit: None },
+                FolderSpec { path: b, parent_commit: None },
+            ],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(snap.manifest.project_name, "orders-service+billing-service");
+        // Top-level scalar fields stay populated with the *first* folder's
+        // values, for anything that only reads those two.
+        assert_eq!(snap.manifest.git_commit, a_commit);
+        assert!(snap.manifest.git_parent_commit.is_none());
+
+        assert_eq!(snap.manifest.folders.len(), 2);
+        assert_eq!(snap.manifest.folders[0].name, "orders-service");
+        assert_eq!(snap.manifest.folders[0].git_commit, a_commit);
+        assert_eq!(snap.manifest.folders[1].name, "billing-service");
+        assert_eq!(snap.manifest.folders[1].git_commit, b_commit);
+        assert!(snap.manifest.database_dumps.is_empty());
+
+        assert!(sign::verify_signature(&snap.manifest, &snap.payload, &snap.signature).unwrap());
+
+        let files = unpack(&snap.payload);
+        assert_eq!(
+            files.get("orders-service/source/README.md").unwrap().as_slice(),
+            b"orders-service\n"
+        );
+        assert_eq!(
+            files.get("billing-service/source/README.md").unwrap().as_slice(),
+            b"billing-service\n"
+        );
+        // Each folder's own diff_stat.json/diff.patch ship too, correctly
+        // prefixed rather than one clobbering the other.
+        assert!(files.contains_key("orders-service/diff_stat.json"));
+        assert!(files.contains_key("billing-service/diff_stat.json"));
+    }
+
+    #[test]
+    fn create_snapshot_multi_dedupes_colliding_folder_basenames() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("team-a")).unwrap();
+        fs::create_dir_all(dir.path().join("team-b")).unwrap();
+        let a = make_git_folder(&dir.path().join("team-a"), "app");
+        let b = make_git_folder(&dir.path().join("team-b"), "app");
+
+        let snap = create_snapshot_multi(
+            &[
+                FolderSpec { path: a, parent_commit: None },
+                FolderSpec { path: b, parent_commit: None },
+            ],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(snap.manifest.folders[0].name, "app");
+        assert_eq!(snap.manifest.folders[1].name, "app-2");
+        assert_eq!(snap.manifest.project_name, "app+app-2");
+
+        let files = unpack(&snap.payload);
+        assert!(files.contains_key("app/source/README.md"));
+        assert!(files.contains_key("app-2/source/README.md"));
+    }
+
+    #[test]
+    fn create_snapshot_multi_packages_a_database_dump_for_the_right_folder() {
+        let dir = tempdir().unwrap();
+        let a = make_git_folder(dir.path(), "orders-service");
+        let b = make_git_folder(dir.path(), "billing-service");
+        let dump_bytes = b"-- Table: orders\nINSERT INTO `orders` (`id`) VALUES (1);\n".to_vec();
+
+        let snap = create_snapshot_multi(
+            &[
+                FolderSpec { path: a, parent_commit: None },
+                FolderSpec { path: b, parent_commit: None },
+            ],
+            &[PendingDump {
+                folder_index: 0,
+                schema: "orders_db".to_string(),
+                dump_bytes: dump_bytes.clone(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(snap.manifest.database_dumps.len(), 1);
+        let entry = &snap.manifest.database_dumps[0];
+        assert_eq!(entry.folder, "orders-service");
+        assert_eq!(entry.schema, "orders_db");
+        assert_eq!(entry.dump_file, "db-dumps/orders-service/orders_db.sql");
+        let expected_hash = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(&dump_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        assert_eq!(entry.hash, expected_hash);
+
+        let files = unpack(&snap.payload);
+        assert_eq!(
+            files.get("db-dumps/orders-service/orders_db.sql").unwrap().as_slice(),
+            dump_bytes.as_slice()
+        );
+        // billing-service got no dump at all - not even an empty entry.
+        assert!(!files.keys().any(|k| k.starts_with("db-dumps/billing-service")));
+    }
+
+    #[test]
+    fn create_snapshot_multi_rejects_an_empty_folder_list() {
+        assert!(create_snapshot_multi(&[], &[]).is_err());
+    }
+
+    #[test]
+    fn create_snapshot_multi_rejects_an_out_of_range_dump_folder_index() {
+        let dir = tempdir().unwrap();
+        let a = make_git_folder(dir.path(), "solo");
+        let err = create_snapshot_multi(
+            &[FolderSpec { path: a, parent_commit: None }],
+            &[PendingDump { folder_index: 1, schema: "x".into(), dump_bytes: vec![] }],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("out of range"));
     }
 }

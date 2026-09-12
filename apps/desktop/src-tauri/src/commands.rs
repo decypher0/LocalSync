@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::AppState;
@@ -239,6 +239,273 @@ pub async fn share_snapshot<R: tauri::Runtime>(
             connected_at: time::OffsetDateTime::now_utc(),
             conn: conn.clone(),
             project_path,
+        },
+    );
+    tauri::async_runtime::spawn(listen_for_pull_requests(app, room_code));
+
+    Ok(snapshot_id)
+}
+
+// ---------- round 17: guided database-source wizard for Send ----------
+//
+// These commands are thin wrappers around `ls_dbsource` (detect/connect/
+// export) plus one new packaging+send command, `share_snapshot_wizard`,
+// that generalizes `share_snapshot` above to N folders and optional
+// per-folder database dumps. `share_snapshot` itself is untouched — it's
+// still what `push_update`/`respond_to_pull_request` use for an existing
+// session's re-bundle, and every one of its own tests keeps exercising it
+// directly, unmodified.
+
+/// JS-facing mirror of `ls_dbsource::ConnectionDetails` — kept separate
+/// (rather than making the ls-dbsource type itself derive Tauri/IPC-facing
+/// traits) so ls-dbsource has no reason to know this app's IPC conventions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionDetailsDto {
+    pub engine: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl From<ls_dbsource::ConnectionDetails> for ConnectionDetailsDto {
+    fn from(d: ls_dbsource::ConnectionDetails) -> Self {
+        Self {
+            engine: d.engine,
+            host: d.host,
+            port: d.port,
+            database: d.database,
+            username: d.username,
+            password: d.password,
+        }
+    }
+}
+
+impl From<ConnectionDetailsDto> for ls_dbsource::ConnectionDetails {
+    fn from(d: ConnectionDetailsDto) -> Self {
+        Self {
+            engine: d.engine,
+            host: d.host,
+            port: d.port,
+            database: d.database,
+            username: d.username,
+            password: d.password,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectedConnectionDto {
+    pub details: ConnectionDetailsDto,
+    pub source_file: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableInfoDto {
+    pub name: String,
+    pub approx_row_count: Option<u64>,
+}
+
+/// Wizard step "attempt automatic connection detection per folder" — pure,
+/// fast, local file parsing (Spring Boot's application.properties/.yml
+/// today). No network call, safe to run for every selected folder up
+/// front, before the developer has said yes/no to anything.
+#[tauri::command]
+pub fn detect_db_connection(folder_path: String) -> Result<Option<DetectedConnectionDto>, String> {
+    let folder = PathBuf::from(&folder_path);
+    Ok(ls_dbsource::detect::detect_all(&folder).map(|d| DetectedConnectionDto {
+        details: d.details.into(),
+        source_file: d.source_file.display().to_string(),
+    }))
+}
+
+/// Wizard step "establish a real connection" — used both right after
+/// detection succeeds and after the developer manually enters details
+/// (deliberately the same command either way; the wizard has no separate
+/// code path for manual entry beyond how it got these `details`).
+#[tauri::command]
+pub async fn test_db_connection(details: ConnectionDetailsDto) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || ls_dbsource::connect::test_connection(&details.into()))
+        .await
+        .map_err(|e| format!("db connection task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Wizard step "show the developer the real list of tables" before they
+/// select anything — the whole point being an informed choice, not a blind
+/// one.
+#[tauri::command]
+pub async fn list_db_tables(details: ConnectionDetailsDto) -> Result<Vec<TableInfoDto>, String> {
+    let tables = tauri::async_runtime::spawn_blocking(move || ls_dbsource::connect::list_tables(&details.into()))
+        .await
+        .map_err(|e| format!("db list-tables task panicked: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok(tables
+        .into_iter()
+        .map(|t| TableInfoDto { name: t.name, approx_row_count: t.approx_row_count })
+        .collect())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportedDumpDto {
+    /// Absolute path on disk — handed straight back to `share_snapshot_wizard`
+    /// as a `DumpPlanDto.file_path`, same as a developer-supplied dump file
+    /// would be.
+    pub file_path: String,
+    pub hash: String,
+    pub size_bytes: u64,
+}
+
+/// Wizard step "export the full content of the selected tables" — always
+/// every row of every selected table, never sampled or trimmed. Writes the
+/// dump to a real file (rather than returning the bytes over IPC) so a
+/// large dump doesn't have to round-trip through the webview just to get
+/// packaged a moment later.
+#[tauri::command]
+pub async fn export_db_tables(details: ConnectionDetailsDto, tables: Vec<String>) -> Result<ExportedDumpDto, String> {
+    let dump_bytes = tauri::async_runtime::spawn_blocking(move || ls_dbsource::export::export_tables(&details.into(), &tables))
+        .await
+        .map_err(|e| format!("db export task panicked: {e}"))?
+        .map_err(|e| e.to_string())?;
+
+    let hash = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(&dump_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+
+    // Same OS-data-dir convention send_log.rs already uses, under its own
+    // subfolder — a dump can be a real amount of data and has no reason to
+    // live next to the log file itself.
+    let Some(base) = dirs::data_dir() else {
+        return Err("could not determine the OS data directory to stage the export in".to_string());
+    };
+    let dir = base.join("localsync").join("db-exports");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file_path = dir.join(format!("{hash}.sql"));
+    std::fs::write(&file_path, &dump_bytes).map_err(|e| e.to_string())?;
+
+    Ok(ExportedDumpDto {
+        file_path: file_path.display().to_string(),
+        hash,
+        size_bytes: dump_bytes.len() as u64,
+    })
+}
+
+/// One folder's outcome from the wizard, as decided on the frontend: either
+/// no database, a developer-supplied dump file, or a freshly-exported one
+/// (`export_db_tables`'s own output file, used exactly the same way as a
+/// supplied one from here — the wizard's "package the result" step doesn't
+/// need to know or care which).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DumpPlanDto {
+    pub schema: String,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FolderPlanDto {
+    pub path: String,
+    pub dump: Option<DumpPlanDto>,
+}
+
+/// Wizard step "package the result" + send — generalizes `share_snapshot`
+/// (still unmodified, still used by `push_update`/`respond_to_pull_request`)
+/// to N folders and per-folder database dumps via
+/// `ls_snapshot::create_snapshot_multi`. Reads each `DumpPlanDto.file_path`
+/// off disk (works identically whether that file came from
+/// `export_db_tables` or a developer's own Browse… selection — the wizard
+/// never has to distinguish the two once it has a path), then follows the
+/// exact same create → serialize → connect → send sequence `share_snapshot`
+/// does.
+#[tauri::command]
+pub async fn share_snapshot_wizard<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    folders: Vec<FolderPlanDto>,
+    room_code: String,
+    signaling_url: String,
+) -> Result<String, String> {
+    log::info!(
+        "share_snapshot_wizard: starting for {} folder(s), room={room_code}",
+        folders.len()
+    );
+    if folders.is_empty() {
+        return Err("at least one folder is required".to_string());
+    }
+
+    let mut folder_specs = Vec::with_capacity(folders.len());
+    let mut pending_dumps = Vec::new();
+    for (i, f) in folders.iter().enumerate() {
+        folder_specs.push(ls_snapshot::FolderSpec {
+            path: PathBuf::from(&f.path),
+            parent_commit: None,
+        });
+        if let Some(dump) = &f.dump {
+            let dump_bytes = std::fs::read(&dump.file_path)
+                .map_err(|e| format!("reading dump file {}: {e}", dump.file_path))?;
+            pending_dumps.push(ls_snapshot::PendingDump {
+                folder_index: i,
+                schema: dump.schema.clone(),
+                dump_bytes,
+            });
+        }
+    }
+
+    let snapshot =
+        tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi(&folder_specs, &pending_dumps))
+            .await
+            .map_err(|e| format!("snapshot task panicked: {e}"))?
+            .map_err(|e| {
+                log::warn!("share_snapshot_wizard: create_snapshot_multi failed: {e}");
+                e.to_string()
+            })?;
+
+    let snapshot_id = format!("{}@{}", snapshot.manifest.project_name, snapshot.manifest.git_commit);
+    log::info!("share_snapshot_wizard: snapshot created, id={snapshot_id}");
+
+    let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+
+    log::info!("share_snapshot_wizard: connecting to signaling");
+    let conn = ls_net::connect_as_sender(&signaling_url, &room_code).await.map_err(|e| {
+        log::warn!("share_snapshot_wizard: connect_as_sender failed: {e}");
+        e.to_string()
+    })?;
+    log::info!(
+        "share_snapshot_wizard: data channel open, sending payload ({} bytes)",
+        bytes.len()
+    );
+
+    ls_net::send_payload(&conn, &bytes, |sent, total| {
+        let _ = app.emit("share-progress", Progress { bytes: sent, total });
+    })
+    .await
+    .map_err(|e| {
+        log::warn!("share_snapshot_wizard: send_payload failed: {e}");
+        e.to_string()
+    })?;
+
+    log::info!("share_snapshot_wizard: done, id={snapshot_id}");
+
+    let conn = std::sync::Arc::new(conn);
+    // Note (round 17): only the *first* folder's path is kept here, for the
+    // "previously connected" roster and as the base a later `push_update`/
+    // `respond_to_pull_request` re-bundles from. Both of those still call
+    // the original, single-folder `create_snapshot` (unmodified this
+    // round) — so a push/pull-request against a wizard-originated
+    // multi-folder send re-bundles only that first folder, silently
+    // dropping any other folders and any database dumps. Extending
+    // push/pull-request to multi-folder sends is out of round 17's scope
+    // (see that round's report); flagged here so it reads as a deliberate,
+    // documented boundary rather than an oversight.
+    let first_folder_path = folders[0].path.clone();
+    state.connected_receivers.lock().map_err(|e| e.to_string())?.insert(
+        room_code.clone(),
+        crate::state::ConnectedReceiver {
+            peer_id: room_code.clone(),
+            connected_at: time::OffsetDateTime::now_utc(),
+            conn: conn.clone(),
+            project_path: first_folder_path,
         },
     );
     tauri::async_runtime::spawn(listen_for_pull_requests(app, room_code));
