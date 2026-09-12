@@ -164,6 +164,7 @@ fn main() {
             commands::send_pull_request,
             commands::detect_db_connection,
             commands::test_db_connection,
+            commands::list_db_schemas,
             commands::list_db_tables,
             commands::export_db_tables,
             commands::share_snapshot_wizard,

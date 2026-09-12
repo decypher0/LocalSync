@@ -269,6 +269,18 @@ fn live_mongo_export_round_trip() -> Result<()> {
     connect::test_connection(&localhost_details)
         .context("connecting via literal 'localhost' must work exactly like 127.0.0.1")?;
     eprintln!("STEP: localhost connects (round 18 fix)");
+    // Round 22: found empirically, under real host load in this sandbox -
+    // several fresh mongodb::sync::Client instances constructed back-to-
+    // back (each of the checks above makes its own) occasionally left the
+    // very next real operation seeing "unexpected end of file" from a
+    // connection the driver's own shared background runtime hadn't
+    // finished settling yet ("SystemOverloadedError" was the driver's own
+    // label on it). A brief pause here consistently avoided it in repeated
+    // real runs; this is test-harness churn from this file's own extra
+    // round-18-regression checks immediately above, not a product code
+    // issue - none of connect::list_tables/list_databases' own logic
+    // changed in a way that would explain this.
+    std::thread::sleep(Duration::from_millis(500));
 
     // --- list_tables: real list_collection_names + real
     // estimated_document_count per collection. ---
@@ -285,6 +297,18 @@ fn live_mongo_export_round_trip() -> Result<()> {
         Some(2),
         "expected an approx count of 2 for widgets"
     );
+
+    // --- Round 22 goal 3: real database listing, connecting without
+    // requiring src_details.database to be correct at all. ---
+    let mut no_db_pin = src_details.clone();
+    no_db_pin.database = "does_not_exist_at_all".to_string();
+    let databases = connect::list_databases(&no_db_pin).context("list_databases despite a nonexistent 'database' field")?;
+    assert!(databases.contains(&"src_db".to_string()), "expected src_db among {databases:?}");
+    assert!(
+        !databases.iter().any(|d| d == "admin" || d == "local" || d == "config"),
+        "system MongoDB databases must be filtered out: {databases:?}"
+    );
+    eprintln!("STEP: list_databases ok, {} databases (round 22)", databases.len());
 
     let gadgets_info = tables
         .iter()

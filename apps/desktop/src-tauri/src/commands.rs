@@ -356,6 +356,20 @@ pub async fn list_db_tables(details: ConnectionDetailsDto) -> Result<Vec<TableIn
         .collect())
 }
 
+/// Round 22 goal 3: wizard step "show the developer the real list of
+/// databases/schemas" right after a connection succeeds - so the
+/// developer picks the real, correct one instead of a typed-in or auto-
+/// detected name being trusted blindly. Deliberately does not require
+/// `details.database` to already be correct (see each engine's own
+/// `list_databases` doc comment for how it avoids pinning to it).
+#[tauri::command]
+pub async fn list_db_schemas(details: ConnectionDetailsDto) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || ls_dbsource::connect::list_databases(&details.into()))
+        .await
+        .map_err(|e| format!("db list-schemas task panicked: {e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportedDumpDto {
     /// Absolute path on disk — handed straight back to `share_snapshot_wizard`

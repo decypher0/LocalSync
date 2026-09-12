@@ -114,23 +114,41 @@ fn open_client(details: &ConnectionDetails) -> Result<Client> {
 pub fn test_connection(details: &ConnectionDetails) -> Result<()> {
     let client = open_client(details)?;
 
-    // Round 18: same error-surfacing fix as `engines::mysql`/
-    // `engines::postgres` - the real underlying reason (server
-    // unreachable, auth failure, timeout, ...) must survive in the error
-    // chain, not get swallowed into one generic message. commands.rs
-    // converts this anyhow::Error to a String with `{:#}` (the full
-    // chain), not `.to_string()`.
+    // Round 22: friendly_error::connect_failure prepends a clean, human
+    // summary (e.g. "The connection attempt timed out") in front of the
+    // full raw driver error round 18's error-chain fix already preserves -
+    // MongoDB's own raw error text is a sprawling internal topology dump
+    // (real example captured in friendly_error's own doc comment), exactly
+    // the kind of "technically not swallowed but not actually clear"
+    // result that fix alone left in place.
     client
         .database(&details.database)
         .run_command(doc! { "ping": 1 })
         .run()
-        .with_context(|| {
-            format!(
-                "failed to connect to {}@{}:{}/{}",
-                details.username, details.host, details.port, details.database
-            )
+        .map_err(|e| {
+            crate::friendly_error::connect_failure(&details.username, &details.host, details.port, &details.database, e)
         })?;
     Ok(())
+}
+
+/// Round 22: the real list of databases on the server - `listDatabases`
+/// is a top-level admin command, needing no specific database context (or
+/// `details.database` to already be real) to run, which is exactly what
+/// makes browsing-before-trusting possible here. System databases
+/// (`admin`/`local`/`config`) are filtered out - a developer's own project
+/// database is never one of those.
+pub fn list_databases(details: &ConnectionDetails) -> Result<Vec<String>> {
+    let client = open_client(details)?;
+    let mut names = client
+        .list_database_names()
+        .run()
+        .map_err(|e| {
+            crate::friendly_error::connect_failure(&details.username, &details.host, details.port, &details.database, e)
+        })?;
+    const SYSTEM: &[&str] = &["admin", "local", "config"];
+    names.retain(|n| !SYSTEM.contains(&n.as_str()));
+    names.sort();
+    Ok(names)
 }
 
 /// Lists every real collection in `details.database`, with a cheap
@@ -170,6 +188,27 @@ pub fn list_tables(details: &ConnectionDetails) -> Result<Vec<TableInfo>> {
             }
         })
         .collect())
+}
+
+/// Round 22 goal 1: same reasoning as `engines::postgres::missing_pg_dump_hint`
+/// - a missing `mongodump` binary must say so plainly and point at how to
+/// fix it. MongoDB Database Tools aren't in Debian/Ubuntu/Kali's standard
+/// apt repos at all (unlike PostgreSQL's client package), so the Linux
+/// hint points at the manual-download step `scripts/setup-linux-deps.sh`
+/// documents rather than a plain `apt install`.
+fn missing_mongodump_hint(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        let hint = if cfg!(target_os = "linux") {
+            "see scripts/setup-linux-deps.sh for how to install MongoDB Database Tools (not in the standard apt repos)"
+        } else if cfg!(target_os = "macos") {
+            "install it with `brew install mongodb-database-tools`"
+        } else {
+            "install MongoDB Database Tools (they include mongodump) from mongodb.com/try/download/database-tools and make sure they're on PATH"
+        };
+        anyhow::anyhow!("mongodump is not installed (or not on PATH) - {hint}")
+    } else {
+        anyhow::Error::new(e).context("failed to run mongodump")
+    }
 }
 
 /// `mongodump --collection` takes the name as a literal argv value via
@@ -247,9 +286,7 @@ pub fn export_tables(details: &ConnectionDetails, tables: &[String]) -> Result<V
             cmd.arg(format!("--password={}", details.password));
         }
 
-        let output = cmd.output().with_context(|| {
-            format!("failed to run mongodump for collection '{name}' - is it installed and on PATH?")
-        })?;
+        let output = cmd.output().map_err(|e| missing_mongodump_hint(e))?;
         if !output.status.success() {
             bail!(
                 "mongodump failed for collection '{name}' (status {}): {}",
