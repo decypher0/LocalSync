@@ -72,6 +72,8 @@ mod tests {
             services: vec![],
             sender_pubkey: signing_key.verifying_key().to_bytes(),
             created_at: time::OffsetDateTime::now_utc(),
+            folders: vec![],
+            database_dumps: vec![],
         };
 
         let manifest_digest = Sha256::digest(serde_json::to_vec(&manifest).unwrap());

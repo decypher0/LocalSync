@@ -467,3 +467,258 @@ Step 1: genuinely nothing flashes on screen, the whole time. Steps 2–3: the
 panel shows real, live-updating content during a run, and that content is
 still there to read after a failure — not just before you'd sworn you saw
 something.
+
+---
+
+## Round 14 addendum: real macOS verification via CI (no Mac needed to check)
+
+Unlike every other addendum in this file, this one doesn't need real hardware
+you're sitting in front of — it needs you to click a button on GitHub and
+read the result.
+
+### What to do
+
+1. Go to the repo's **Actions** tab on GitHub → **macOS build & verification**
+   → **Run workflow** (it's `workflow_dispatch`-only on purpose, see the
+   workflow file's own comment — it doesn't run automatically, so this step
+   is required before anything below exists to check).
+2. Wait for both jobs to finish (`build-and-test` and
+   `podman-provisioning-investigation` run independently and don't block
+   each other).
+
+### What to check
+
+- **`build-and-test`**: green means the workspace actually compiled and its
+  tests actually ran on real macOS. Open the job's own step summary for the
+  real `cargo test --workspace` pass/fail breakdown (the `cargo-test-macos-log`
+  artifact has the full raw output if a summary line isn't enough). Download
+  the `LocalSync-macos-dmg` artifact and confirm it's a real `.dmg` — you
+  don't need a Mac to check the file exists and has a real size; opening/
+  installing it does need one.
+- **`podman-provisioning-investigation`**: read its step summary regardless
+  of whether the job shows green or red — **red here is an expected, honest
+  possible outcome**, not a bug in this round's work. It means Podman
+  couldn't fully provision inside GitHub's macOS runner (most likely a
+  nested-virtualization restriction — check the `sysctl kern.hv_support`
+  output in the first step's log for the real diagnostic signal), which is
+  itself the real answer to a real, previously-unknown question. Green means
+  a real container genuinely ran (`podman run --rm hello-world` succeeded).
+
+### What "success" looks like
+
+Note: "success" here doesn't mean "both jobs are green." It means you can
+now state, for the first time, a **real, evidence-based answer** — for both
+"does LocalSync build and pass its tests on real macOS" and "does Podman
+provisioning work inside macOS CI" — instead of the "should work by analogy"
+this project has had since round 5. If either investigation was blocked,
+that itself is the useful, honest outcome to record here.
+
+---
+
+## Round 15 addendum: the release pipeline, and the new Download & Install steps
+
+Also doesn't need you sitting at a specific machine to check the pipeline
+itself — but the *install steps* genuinely do, on all three OSes, since
+they're brand new and aimed at a first-time, non-technical user for the
+first time in this project.
+
+### What to do
+
+1. Go to the repo's **Actions** tab → **Release** → **Run workflow** (or
+   push a tag: `git tag v0.1.0 && git push origin v0.1.0` — either
+   triggers it). Wait for all four build/release jobs to finish.
+2. Confirm a new entry appears on the **Releases** page with three files
+   attached: a Windows `.exe`, a macOS `.dmg`, and both a Linux `.deb` and
+   `.AppImage`.
+
+### What to check
+
+- **On a real Windows machine you haven't already set up for development**:
+  download the `.exe` from the Release, run it, confirm SmartScreen shows
+  up and "More info" → "Run anyway" actually gets you through it, and that
+  the app installs and opens.
+- **On a real Mac**: download the `.dmg`, confirm the drag-to-Applications
+  step works as described, and that double-clicking normally really does
+  fail first (confirming the warning text in the README is accurate) before
+  right-click → Open succeeds.
+- **On a real Linux machine** (ideally one you haven't already installed
+  build dependencies on): try both the `.deb` and the AppImage per the
+  README's steps, including on a distro that doesn't ship `libfuse2` by
+  default if you have one handy, to confirm that specific guidance is
+  accurate too.
+- Confirm the version-naming scheme reads sensibly on the Releases page
+  either way you triggered it (a real `vX.Y.Z` tag, or the generated
+  `local-<date>-<sha>` name from a manual run) and that re-running a manual
+  build doesn't silently clobber a previous one's assets.
+
+### What "success" looks like
+
+A person who has never seen this project, following only the README's
+**Download & Install** section (not this checklist, not anything
+developer-facing), ends up with a running LocalSync on their machine,
+without ever feeling like something was broken versus merely unsigned.
+
+---
+
+## Round 16 addendum: real auto-update, and code-signing infrastructure
+
+Real hardware is the only way to check the actual update-and-restart
+click-through (nothing in this project's build/test environment has a
+display reliable enough for that final step — see the round's own commit
+for exactly what *could* be verified without one, which is most of it).
+
+### What to do
+
+1. Push a `v*` tag (or run the Release workflow manually) once
+   `TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are
+   added as repository secrets (see the values generated this round —
+   ask whoever ran round 16 for them, or generate a fresh pair yourself
+   with `npx tauri signer generate` and update `tauri.conf.json`'s
+   `plugins.updater.pubkey` to match if you do).
+2. Confirm the Release page gets a real `latest.json` asset attached
+   alongside the installers, and that its `platforms` object has real
+   (non-empty) `signature` values for `windows-x86_64`, `linux-x86_64`,
+   and `darwin-aarch64`.
+3. Install that release's build on a real machine, then intentionally
+   publish a *newer* one (bump `tauri.conf.json`'s `version` field first —
+   the updater compares real semver, so two same-version builds
+   correctly won't show an update between them). Open the installed
+   app: within a few seconds, the "Update available" banner should
+   appear on its own, unprompted but not auto-installing anything.
+4. Click **Install update**, confirm real download progress shows, and
+   that the app actually relaunches on the new version afterward.
+5. Click **Check for updates** manually (in Settings) when already on
+   the latest version — confirm it says "up to date" rather than
+   silently doing nothing.
+
+### Code-signing (part B) - only once you have real credentials
+
+See `docs/code-signing.md` for exactly what to obtain and which GitHub
+secrets to add. Once added:
+
+1. Re-run the release workflow, confirm the `build-windows`/`build-macos`
+   logs show "Imported certificate..." rather than "No ... secret
+   configured".
+2. On the built installer, verify the signature for real (not just "the
+   log said it worked") — `docs/code-signing.md`'s last section has the
+   exact `codesign`/`spctl`/right-click-Properties steps for each OS.
+3. Confirm SmartScreen/Gatekeeper's warning either disappears entirely
+   (EV cert / notarized build) or changes to show your real
+   organization name instead of "Unknown Publisher" (OV cert, before
+   SmartScreen reputation has built up).
+
+### What "success" looks like
+
+Someone with an older installed build, doing nothing except opening the
+app, sees a real, real update offered — reviews it, clicks once, and
+ends up on the new version without ever touching a terminal or
+re-downloading anything by hand.
+
+---
+
+## Round 17 addendum: guided database-source wizard for Send
+
+Round 17 replaces the Send tab's single-folder input with a real,
+multi-step wizard, and adds a new database-dump path into the snapshot
+manifest/payload. Everything below is verified in this build environment
+via real automated tests (multi-folder bundling, a real disposable local
+MariaDB instance, real connect/list/export, a real round-trip reimport,
+and the full command-layer flow via `wizard_send_flow_test.rs`) — what's
+deferred to real hardware is purely the *visual* click-through (does the
+wizard's UI actually render and step through correctly in a real running
+app), the same category of gap every prior round's UI work has had.
+
+### What changed
+
+- **Multi-folder Send.** The Send tab's "Browse…" now opens a real
+  multi-select directory picker; selected folders show in a removable
+  list before moving on.
+- **The wizard flow.** "Does this project need database access?" (asked
+  once) → per-folder detection (Spring Boot's `application.properties`/
+  `.yml`) → dump-already-exists vs. connect-and-export → manual entry
+  when detection fails, feeding into the same subsequent flow → a final
+  summary before the real Send.
+- **Real live database browsing.** When exporting, the wizard shows the
+  actual tables in the developer's own database (with approximate row
+  counts) before asking which to include — never a blind guess. Export
+  is always the full table content, never sampled.
+- **Manifest extension.** `Manifest.folders` and `Manifest.database_dumps`
+  are new, additive fields (old manifests deserialize fine without them;
+  old code reading a new manifest ignores them) carrying the per-folder
+  breakdown and `{folder, schema, dump_file, hash}` for each packaged
+  dump.
+- **A real bug found and fixed in the same area**: round 16's own
+  auto-update banner reused the id `update-banner`, silently colliding
+  with an older Receive-tab element of the same id (round 11's "a new
+  update just arrived from the sender" notification) — `document.
+  getElementById` was silently resolving to the wrong element for one of
+  the two. Renamed round 16's banner to `app-update-banner`; the Receive
+  tab's own push-update notification is unaffected but now actually
+  correct again.
+
+### What to do
+
+1. On the Send tab, click **Add folder(s)…** and select two or more
+   independent project folders in one picker (e.g. copies of this repo's
+   `sample-project`/`sample-project-node` fixtures, or your own real
+   multi-folder Spring Boot setup) — confirm they all show in the list
+   with working **Remove** buttons.
+2. Click **Next**, answer **Yes** to "Does this project need database
+   access?" — confirm the wizard walks each folder one at a time,
+   showing "Folder N of M".
+3. Point one folder at a real local MySQL/MariaDB with a Spring Boot
+   `application.properties`/`.yml` already configured — confirm the
+   wizard auto-detects and displays the real host/port/database/username
+   before asking anything.
+4. Choose **No, connect and export** — confirm a real table list appears
+   (with row-count estimates), select a subset, click **Export selected
+   tables**, and confirm a real size is reported.
+5. On a second folder, delete/rename its config so detection fails —
+   confirm manual entry is offered, and that submitting it re-attempts a
+   real connection before continuing into the same "do you have a dump"
+   question.
+6. On a third folder, answer **Yes, I have a dump file** and browse to
+   an existing `.sql` file directly — confirm no connection is attempted
+   for that folder.
+7. Reach the final **Ready to send** summary, confirm it correctly
+   labels each folder's outcome (no database / supplied dump / exported
+   dump), then click **Send** and complete a real receive on the other
+   side — confirm the diff review shows entries from every folder,
+   correctly prefixed by folder name.
+
+### What changed, and why (root causes, not guesses)
+
+`ls_security::diff_summary` originally hard-errored ("payload does not
+contain diff_stat.json") for any snapshot without a single top-level
+`diff_stat.json` — which is exactly what a multi-folder snapshot produces
+(each folder ships its own, at `<folder>/diff_stat.json`). Without
+fixing this, `receive_snapshot` itself would fail outright for every
+multi-folder send, before a human ever saw a review screen — found and
+fixed as part of this round's own work, verified by a real end-to-end
+test (`wizard_send_flow_test.rs`) that would fail immediately if this
+regressed.
+
+A second real, environment-specific finding (not a code bug, but worth
+recording exactly like the pasta-segfault and podman-storage-path issues
+documented earlier): this sandbox's `mariadbd` binary runs under an
+AppArmor profile that denies *any* process — including its own direct
+parent — from delivering it a signal at all (confirmed via `dmesg`'s
+audit log). A disposable test server's `Child::kill()` fails silently
+there, and the matching `Child::wait()` then hangs forever. Both new
+live-database test files stop their disposable server with a real SQL
+`SHUTDOWN` instead, which isn't a signal and isn't subject to that
+mediation — real hardware without this specific AppArmor confinement
+would never have hit this at all, but the fix is correct and harmless
+either way.
+
+### What "success" looks like
+
+A developer with several raw, uncontainerized project folders — some
+with a database, some without, some with an existing dump, some needing
+a fresh export — can go from "select folders" to "sent" without ever
+leaving the guided flow or being asked to decide anything about a
+database blind. The receiver can review the resulting diff, correctly
+broken out per folder, exactly as informatively as a single-folder send
+always could. Building and running whatever was received — especially
+several raw, non-containerized folders with no `docker-compose.yml`
+between them — is explicitly not yet solved; that's the next round's job.

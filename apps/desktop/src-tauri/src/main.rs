@@ -115,6 +115,15 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Round 16: real auto-update. Config (pubkey, endpoints) lives in
+        // tauri.conf.json - this just registers the plugin's commands
+        // (check/download/install) for app.js to call. Never installs
+        // anything without the user confirming first - see app.js's
+        // update-check listener; nothing here auto-applies an update.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Only used for its relaunch() command, called after a
+        // user-confirmed update finishes installing.
+        .plugin(tauri_plugin_process::init())
         .manage(state)
         .setup(move |app| {
             let firewall_msg = ufw_warning();
@@ -153,6 +162,11 @@ fn main() {
             commands::push_update,
             commands::respond_to_pull_request,
             commands::send_pull_request,
+            commands::detect_db_connection,
+            commands::test_db_connection,
+            commands::list_db_tables,
+            commands::export_db_tables,
+            commands::share_snapshot_wizard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");

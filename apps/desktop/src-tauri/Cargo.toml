@@ -8,7 +8,19 @@ license.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# Exact pin (round 16), not "2" - verified directly, not assumed: with the
+# Rust crate resolving to 2.11.5 while the npm @tauri-apps/cli that runs
+# `npm run tauri build` was still on 2.11.4 (its latest published version
+# as of this writing), a real local build produced a working AppImage +
+# updater .sig but also a real "Warn Failed to add bundler type to the
+# binary: __TAURI_BUNDLE_TYPE variable not found... Updater plugin may not
+# be able to update this package" - a genuine cross-package version-skew
+# bug in Tauri's own tooling, not something in this app's configuration.
+# Pinning both to the same exact 2.11.4 made the warning disappear on a
+# from-scratch rebuild. Safe to bump *both* together once a newer
+# @tauri-apps/cli is published to match, but bumping only the Rust side's
+# "2" back to an open range risks silently reintroducing this.
+tauri = { version = "=2.11.4", features = [] }
 # Real root cause of the Linux "Browse..." picker not appearing (round 8):
 # the default "gtk3" feature drives rfd's dialog through a *second*,
 # privately-spawned GTK thread (rfd::backend::gtk3::utils::GtkGlobalThread
@@ -23,6 +35,14 @@ tauri = { version = "2", features = [] }
 # xdg-desktop-portal-gtk) installed, which is the standard modern-Linux-DE
 # setup, GNOME/KDE/etc. all ship one out of the box.
 tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
+# Round 16: real auto-update, verified against ls_net's own signature scheme
+# (ed25519, same family - Tauri's updater uses minisign, a different format,
+# but the same "sign what you ship, verify before trusting" shape this
+# project already holds every snapshot to). tauri-plugin-process is only
+# here for its relaunch() command, called after a user-confirmed update
+# install - never used for anything else.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -45,10 +65,24 @@ ls-snapshot = { path = "../../../crates/ls-snapshot" }
 ls-net = { path = "../../../crates/ls-net" }
 ls-security = { path = "../../../crates/ls-security" }
 ls-containers = { path = "../../../crates/ls-containers" }
+ls-dbsource = { path = "../../../crates/ls-dbsource" }
+# Only for hashing a freshly-exported dump file (round 17) - already a
+# dependency two crates down the graph (ls-snapshot, ls-security); promoted
+# to a direct dependency here too rather than reaching through them.
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+# wizard_send_flow_test.rs's own disposable TestServer talks to it directly
+# (to seed data and to shut it down gracefully) - same crate ls-dbsource
+# already depends on, not a new one.
+mysql = { version = "25", default-features = false, features = ["minimal"] }
+# Same two crates ls-snapshot already depends on, to unpack a received
+# snapshot's tar.gz payload and check the packaged dump's bytes directly -
+# not a new format, just verifying one this test already produced.
+flate2 = "1"
+tar = "0.4"
 # Cargo unifies dev-dependency features into the dependency only for test
 # builds (not the shipped app) - this is what makes tauri::test::mock_app()
 # etc. available to tests/send_flow_test.rs without shipping test scaffolding

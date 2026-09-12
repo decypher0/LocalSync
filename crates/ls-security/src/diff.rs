@@ -24,30 +24,62 @@ pub struct DiffSummary {
     pub total_deletions: u32,
 }
 
-/// Unpacks just `diff_stat.json` from the verified snapshot's tar.gz payload
-/// and summarizes it. Does not touch `source/`, `docker-compose.yml`, or
+/// Unpacks `diff_stat.json` from the verified snapshot's tar.gz payload and
+/// summarizes it. Does not touch `source/`, `docker-compose.yml`, or
 /// `db-seed/` — those are `ls-containers`' concern once a human clicks run.
+///
+/// Round 17: a multi-folder snapshot (`ls_snapshot::create_snapshot_multi`)
+/// has no single top-level `diff_stat.json` — each folder ships its own, at
+/// `<folder>/diff_stat.json` (see `Manifest::folders`). Without this,
+/// receiving *any* multi-folder snapshot would hard-error right here before
+/// a human ever saw a review screen, which would make the whole wizard
+/// feature unusable end to end, not just "execution deferred" the way the
+/// round's own scope intends — so this reads every folder's diff_stat.json
+/// and merges them, prefixing each entry's `path` with its folder name so
+/// the review screen can tell which project a changed file belongs to.
+/// Single-folder snapshots (everything before round 17, and
+/// `create_snapshot`'s own output today) are checked first, and produce the
+/// exact same output as before — this is purely additive.
 pub fn diff_summary(verified: &VerifiedSnapshot) -> anyhow::Result<DiffSummary> {
-    let payload = &verified.snapshot().payload;
-    let mut archive = Archive::new(GzDecoder::new(&payload[..]));
-
+    let snapshot = verified.snapshot();
+    let mut archive = Archive::new(GzDecoder::new(&snapshot.payload[..]));
+    let mut files: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
-        if entry.path()?.to_str() == Some("diff_stat.json") {
-            let mut contents = String::new();
-            entry.read_to_string(&mut contents)?;
-            let entries: Vec<DiffEntry> = serde_json::from_str(&contents)?;
-            let total_insertions = entries.iter().map(|e| e.insertions).sum();
-            let total_deletions = entries.iter().map(|e| e.deletions).sum();
-            return Ok(DiffSummary {
-                entries,
-                total_insertions,
-                total_deletions,
-            });
+        let path = entry.path()?.to_string_lossy().into_owned();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf)?;
+        files.insert(path, buf);
+    }
+
+    if let Some(bytes) = files.get("diff_stat.json") {
+        let entries: Vec<DiffEntry> = serde_json::from_slice(bytes)?;
+        return Ok(summarize(entries));
+    }
+
+    if !snapshot.manifest.folders.is_empty() {
+        let mut merged = Vec::new();
+        for folder in &snapshot.manifest.folders {
+            let key = format!("{}/diff_stat.json", folder.name);
+            let Some(bytes) = files.get(&key) else {
+                anyhow::bail!("payload is missing {key}");
+            };
+            let entries: Vec<DiffEntry> = serde_json::from_slice(bytes)?;
+            merged.extend(entries.into_iter().map(|e| DiffEntry {
+                path: format!("{}/{}", folder.name, e.path),
+                ..e
+            }));
         }
+        return Ok(summarize(merged));
     }
 
     anyhow::bail!("payload does not contain diff_stat.json")
+}
+
+fn summarize(entries: Vec<DiffEntry>) -> DiffSummary {
+    let total_insertions = entries.iter().map(|e| e.insertions).sum();
+    let total_deletions = entries.iter().map(|e| e.deletions).sum();
+    DiffSummary { entries, total_insertions, total_deletions }
 }
 
 #[cfg(test)]
@@ -96,6 +128,8 @@ mod tests {
             services: vec![],
             sender_pubkey: signing_key.verifying_key().to_bytes(),
             created_at: time::OffsetDateTime::now_utc(),
+            folders: vec![],
+            database_dumps: vec![],
         };
         let manifest_digest = Sha256::digest(serde_json::to_vec(&manifest).unwrap());
         let payload_digest = Sha256::digest(&payload);

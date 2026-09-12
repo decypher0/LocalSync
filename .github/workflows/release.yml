@@ -1,0 +1,599 @@
+# Round 15: on-demand release pipeline. Builds a real installer for
+# Windows, Linux, and macOS and publishes them together as one GitHub
+# Release - the "developer clicks one button, gets three real, downloadable
+# installers a few minutes later" this round exists to deliver. See
+# README.md's "Download & Install" section for what a non-technical end
+# user actually does with what this produces.
+#
+# Two ways to trigger, both supported rather than forcing one:
+#   - workflow_dispatch: the "Run workflow" button in the Actions tab - no
+#     git tag syntax to remember, just a click.
+#   - push a tag matching v* (e.g. `git tag v0.1.0 && git push origin v0.1.0`)
+#     - for anyone who prefers the tag-based flow.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  # A manual run has no tag to name the release after - generate a real,
+  # non-colliding identifier (date + short commit SHA) rather than reusing
+  # a fixed name that would silently overwrite a previous manual release's
+  # assets. A tag push just uses the pushed tag, unchanged.
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${{ github.ref_name }}"
+          else
+            version="local-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Release version for this run: $version"
+
+  # ------------------------------------------------------------
+  # Windows: NSIS only, deliberately - see the comment on --bundles below.
+  # ------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      # Round 16, part B: real code-signing needs a real certificate the
+      # developer has to buy and provide - see docs/code-signing.md. This
+      # step is the whole conditionality: it only imports a certificate
+      # and computes a thumbprint if one was actually provided as a
+      # secret, and logs plainly either way. No secret => no thumbprint =>
+      # the build step below signs nothing and ships exactly the same
+      # unsigned .exe this pipeline has always produced - never a hard
+      # failure over a certificate nobody's added yet.
+      - name: Import Windows code-signing certificate (if configured)
+        id: import_cert
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE)) {
+            Write-Host "No WINDOWS_CERTIFICATE secret configured - shipping unsigned build. See docs/code-signing.md to add one."
+            echo "thumbprint=" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          New-Item -ItemType directory -Path certificate | Out-Null
+          Set-Content -Path certificate/tempCert.txt -Value $env:WINDOWS_CERTIFICATE
+          certutil -decode certificate/tempCert.txt certificate/certificate.pfx
+          $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath certificate/certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+          Remove-Item -Recurse -Force certificate
+          Write-Host "Imported certificate, thumbprint $($cert.Thumbprint) - build will be signed."
+          echo "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      # Round 16 part A, corrected: whether the updater signing key secret
+      # is actually present. `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`
+      # expands to an *empty string* when the secret doesn't exist, not to
+      # "unset" - and `tauri build` with `createUpdaterArtifacts: true`
+      # (tauri.conf.json) then tries to sign with that empty key and fails
+      # hard ("failed to decode secret key ... Missing comment in secret
+      # key"), instead of skipping. So: detect presence here, and when
+      # it's absent, the build step below turns `createUpdaterArtifacts`
+      # off via --config - the installer still builds, just without a
+      # (signed) update-capable artifact or a .sig, which is exactly the
+      # "clean skip when no secret" this was always meant to do.
+      - name: Check for the updater signing key
+        id: updater_key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is set - update-capable artifacts will be signed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret - building an unsigned installer with createUpdaterArtifacts disabled for this run (no .sig, no latest.json). See docs/code-signing.md / README round 16 to enable real auto-update."
+          fi
+
+      - name: Build the NSIS installer
+        # Deliberately `--bundles nsis`, not the config's default `"all"` -
+        # tauri.conf.json's `bundle.targets: "all"` would otherwise also
+        # attempt a WiX-based .msi, which needs Tauri's bundler to download
+        # the ~40MB WiX toolset on first use - a well-documented source of
+        # CI flakiness/timeouts for exactly this kind of on-demand pipeline,
+        # and not something this project has ever needed: NSIS (with round
+        # 8's firewall-rule install hook, apps/desktop/src-tauri/windows/hooks.nsh)
+        # is what's actually been built and proven reliable here since round 5.
+        # Restricting the bundle target avoids the whole flakiness question
+        # rather than adding retry/timeout logic around a build nobody asked
+        # for the output of.
+        #
+        # -c/--config (RFC 7396 JSON merge patch) is how the thumbprint from
+        # the step above gets applied *conditionally*, without ever needing
+        # to bake a real-or-placeholder certificateThumbprint into the
+        # checked-in tauri.conf.json: when import_cert found nothing, this
+        # merges in `certificateThumbprint: null`, Tauri's own documented
+        # way of explicitly disabling signing for a CI build.
+        #
+        # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) (round 16, part A): the
+        # *updater's* signing key, unrelated to code-signing - always set
+        # when the secret exists, so this bundle's real update-capable
+        # artifact (the setup.exe itself) gets a real update signature.
+        # Empty/absent is exactly as safe here as for code-signing above:
+        # tauri-plugin-updater simply has nothing to verify a nonexistent
+        # update against yet.
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npm install
+          # One --config merge patch carrying both independent decisions:
+          # the code-signing thumbprint (or null to disable), and - only
+          # when there's no updater signing key - createUpdaterArtifacts:false
+          # so the build doesn't try (and fail) to sign an update artifact.
+          $bundle = @{}
+          if ("${{ steps.import_cert.outputs.thumbprint }}" -ne "") {
+            $bundle.windows = @{ certificateThumbprint = "${{ steps.import_cert.outputs.thumbprint }}"; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" }
+          } else {
+            $bundle.windows = @{ certificateThumbprint = $null }
+          }
+          if ("${{ steps.updater_key.outputs.present }}" -ne "true") {
+            $bundle.createUpdaterArtifacts = $false
+          }
+          $cfg = @{ bundle = $bundle } | ConvertTo-Json -Depth 10 -Compress
+          Write-Host "tauri build --config $cfg"
+          npm run tauri build -- --bundles nsis --config $cfg
+
+      - name: Locate the built installer
+        id: find_installer
+        shell: bash
+        run: |
+          exe_path=$(find target/release/bundle/nsis -name '*.exe' | head -n1)
+          sig_path=$(find target/release/bundle/nsis -name '*.exe.sig' | head -n1)
+          if [ -z "$exe_path" ]; then
+            echo "No .exe found under target/release/bundle/nsis - build must have failed silently somewhere upstream." >&2
+            exit 1
+          fi
+          echo "found: $exe_path"
+          echo "exe_path=$exe_path" >> "$GITHUB_OUTPUT"
+          # Absent, not fatal - only appears when TAURI_SIGNING_PRIVATE_KEY
+          # was actually set above (round 16 part A secret, separate from
+          # this job's own code-signing certificate).
+          echo "sig_path=$sig_path" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-windows-installer
+          path: ${{ steps.find_installer.outputs.exe_path }}
+
+      # Separate, explicitly-conditional step rather than a second line in
+      # the path list above - an empty sig_path (no TAURI_SIGNING_PRIVATE_KEY
+      # secret configured) as a blank line in a multi-line `path:` is
+      # ambiguous to rely on; an explicit `if:` isn't.
+      - uses: actions/upload-artifact@v4
+        if: steps.find_installer.outputs.sig_path != ''
+        with:
+          name: LocalSync-windows-installer-sig
+          path: ${{ steps.find_installer.outputs.sig_path }}
+
+  # ------------------------------------------------------------
+  # Linux: .deb + AppImage, built on ubuntu-22.04 (not ubuntu-latest/24.04)
+  # on purpose - see the comment below.
+  # ------------------------------------------------------------
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        # Same package list scripts/setup-linux-deps.sh already documents
+        # for a human building this by hand, minus podman/podman-compose/
+        # uidmap/slirp4netns - those are the *running* app's runtime
+        # dependencies (Run-flow container orchestration), not needed to
+        # compile and bundle it.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      # See the identical step's comment in build-windows: an unset
+      # TAURI_SIGNING_PRIVATE_KEY secret expands to "" (not "unset"), and
+      # `tauri build` then fails hard trying to sign the AppImage's updater
+      # artifact with an empty key. When it's absent, disable
+      # createUpdaterArtifacts for this run so the AppImage/.deb still
+      # build, just without a (signed) update artifact.
+      - name: Check for the updater signing key
+        id: updater_key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is set - the AppImage's update artifact will be signed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret - building unsigned with createUpdaterArtifacts disabled for this run (no .sig, no latest.json)."
+          fi
+
+      - name: Build the .deb and AppImage
+        # ubuntu-22.04, not ubuntu-latest (24.04 as of this writing):
+        # building against a newer glibc raises the *minimum* glibc version
+        # the resulting binary needs at runtime - an AppImage bundles its
+        # other dependencies but not glibc itself, so a binary built on
+        # 24.04 would refuse to run on a 22.04 (or older-but-still-common)
+        # target machine with a real "GLIBC_2.3x not found" error. Building
+        # on the oldest still-supported base (22.04 is Tauri v2's own
+        # documented minimum, since it's the oldest Ubuntu LTS whose repos
+        # carry the libwebkit2gtk-4.1 this app needs) is what keeps the
+        # built installer runnable on the widest range of real Linux
+        # machines - the actual point of shipping a downloadable installer
+        # to people who aren't going to `cargo build` it themselves.
+        # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) (round 16, part A): the
+        # updater's signing key. Absent secret = Tauri prints a scary-
+        # looking but non-fatal "Error: ... no private key" line and simply
+        # doesn't produce a .sig - verified directly, not assumed: a real
+        # local build with these unset still exits 0 and still produces a
+        # normal, working AppImage. Only the AppImage gets a real
+        # update-capable .sig - Tauri's updater doesn't support .deb at
+        # all, so the .deb here stays a manual-download-only artifact
+        # either way.
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npm install
+          if [ "${{ steps.updater_key.outputs.present }}" = "true" ]; then
+            npm run tauri build -- --bundles deb,appimage
+          else
+            npm run tauri build -- --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+
+      - name: Dump target/ contents (diagnostic)
+        # Temporary, added to actually see what (if anything) the build
+        # step above produced - the build step itself reports success
+        # (green check, full elapsed time) but the locate step below finds
+        # nothing anywhere under target/, which is a different and more
+        # basic problem than "found it, just not where we assumed": either
+        # the bundler genuinely isn't running, or it's writing somewhere
+        # this diagnostic will now actually show. Remove once the real
+        # cause is confirmed from this output - not meant to stay
+        # permanently.
+        if: always()
+        run: |
+          echo "== apps/desktop/src-tauri/ top-level =="
+          ls -la apps/desktop/src-tauri/ || true
+          echo "== full recursive file listing under target =="
+          find target -type f 2>&1 | sort || echo "(target/ does not exist, or find itself failed)"
+          echo "== directories only, for a quicker shape-of-the-tree view =="
+          find target -type d 2>&1 | sort || true
+
+      - name: Locate the built installers
+        id: find_installers
+        run: |
+          # Same real bug the macOS .dmg lookup had, same fix: not
+          # target/release/bundle/<fmt> specifically - when the build
+          # resolves to an explicit target triple rather than the host's
+          # implicit one, Cargo/Tauri nest the whole build under
+          # target/<triple>/release/... instead. Matching on the
+          # bundle/<fmt>/*.<ext> path suffix under the whole target/ tree
+          # finds it regardless of which triple the build step used.
+          find_one() {
+            local fmt="$1" ext="$2"
+            local matches
+            matches=$(find target -type f -path "*/bundle/$fmt/*.$ext" 2>/dev/null)
+            if [ -z "$matches" ]; then
+              echo "No .$ext found anywhere under target (looked for */bundle/$fmt/*.$ext) - build must have failed silently somewhere upstream." >&2
+              return 1
+            fi
+            if [ "$(echo "$matches" | wc -l)" -gt 1 ]; then
+              echo "Note: more than one .$ext found, using the first - all matches:" >&2
+              echo "$matches" >&2
+            fi
+            echo "$matches" | head -n1
+          }
+
+          deb_path=$(find_one deb deb) || exit 1
+          appimage_path=$(find_one appimage AppImage) || exit 1
+          # Not required (absent whenever the signing secret isn't
+          # configured) - so it doesn't go through find_one's hard-fail path.
+          appimage_sig_path=$(find target -type f -path '*/bundle/appimage/*.AppImage.sig' 2>/dev/null | head -n1)
+          echo "found deb: $deb_path"
+          echo "found appimage: $appimage_path"
+          echo "found appimage sig: ${appimage_sig_path:-(none - no signing secret configured)}"
+          {
+            echo "deb_path=$deb_path"
+            echo "appimage_path=$appimage_path"
+            echo "appimage_sig_path=$appimage_sig_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-linux-deb
+          path: ${{ steps.find_installers.outputs.deb_path }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-linux-appimage
+          path: ${{ steps.find_installers.outputs.appimage_path }}
+
+      - uses: actions/upload-artifact@v4
+        if: steps.find_installers.outputs.appimage_sig_path != ''
+        with:
+          name: LocalSync-linux-appimage-sig
+          path: ${{ steps.find_installers.outputs.appimage_sig_path }}
+
+  # ------------------------------------------------------------
+  # macOS: reuses round 14's own build steps via the composite action
+  # extracted from macos.yml (.github/actions/build-macos-dmg) - the exact
+  # same build, not a second copy of it that could drift.
+  # ------------------------------------------------------------
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Round 16, part B (corrected): real signing+notarization needs a
+      # real Apple Developer Program enrollment - see docs/code-signing.md.
+      # Imports into a fresh, ephemeral keychain made just for this job (the
+      # standard pattern for unattended CI signing - a GitHub-hosted runner
+      # has no keychain unlocked/available by default) only if a certificate
+      # secret was actually provided.
+      #
+      # The correction: this used to emit an `identity` output that the
+      # build step passed as `APPLE_SIGNING_IDENTITY: ${{ ... }}` - which,
+      # when empty, still SETS that env var to "" (not "unset"), and
+      # `tauri build` then tries to codesign with an empty identity and
+      # fails ("Signing with identity ''  ...  : no identity found  ...
+      # failed to sign app"). So instead this writes APPLE_SIGNING_IDENTITY
+      # (and the notarization vars) into $GITHUB_ENV *only on the success
+      # path* - absent means the var is genuinely never set, which is what
+      # tauri build actually treats as "nothing to sign with".
+      - name: Import macOS signing certificate (if configured)
+        id: import_cert
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No APPLE_CERTIFICATE secret configured - shipping unsigned, non-notarized build. See docs/code-signing.md to add one."
+            exit 0
+          fi
+          keychain="build-$(date +%s).keychain-db"
+          keychain_password=$(openssl rand -base64 32)
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import certificate.p12 -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychain -d user -s "$keychain" login.keychain
+          rm -f certificate.p12
+          identity=$(security find-identity -v -p codesigning "$keychain" | grep -o '"[^"]*Developer ID Application[^"]*"' | head -n1 | tr -d '"')
+          if [ -z "$identity" ]; then
+            echo "APPLE_CERTIFICATE was provided but no 'Developer ID Application' identity was found in it after import - check the secret is a real exported .p12 of that certificate type. Shipping unsigned this run." >&2
+            exit 0
+          fi
+          echo "Imported certificate, signing identity: $identity - build will be signed."
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          # Notarization only if ALL of its own credentials are also present -
+          # otherwise leave them unset so tauri build signs but doesn't try
+          # (and fail) to notarize with half a credential set.
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            {
+              echo "APPLE_ID=$APPLE_ID"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+            } >> "$GITHUB_ENV"
+            echo "Notarization credentials present - the signed build will also be notarized."
+          else
+            echo "Signing only - APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID not all set, so no notarization this run."
+          fi
+
+      # Same fix as build-windows/build-linux: an unset
+      # TAURI_SIGNING_PRIVATE_KEY expands to "", and tauri build then fails
+      # hard trying to sign the macOS .app.tar.gz updater artifact with an
+      # empty key. Absent -> disable createUpdaterArtifacts for this run.
+      - name: Check for the updater signing key
+        id: updater_key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is set - the .app.tar.gz update artifact will be signed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret - building unsigned with createUpdaterArtifacts disabled for this run (no .app.tar.gz.sig, no latest.json)."
+          fi
+
+      - id: build_dmg
+        uses: ./.github/actions/build-macos-dmg
+        with:
+          # true when there's no updater signing key - the composite action
+          # then adds --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          # so the .dmg still builds without trying (and failing) to sign an
+          # update artifact.
+          disable-updater-artifacts: ${{ steps.updater_key.outputs.present != 'true' }}
+        env:
+          # The updater key itself is harmless as an empty env var once
+          # createUpdaterArtifacts is off; passed straight through when set.
+          # APPLE_* come from $GITHUB_ENV (import_cert step above) and are
+          # only present when there's a real certificate to sign with.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalSync-macos-dmg
+          path: ${{ steps.build_dmg.outputs.dmg_path }}
+
+      - name: Locate the updater .sig (if produced)
+        id: find_sig
+        shell: bash
+        run: |
+          sig_path=$(find target -type f -path '*/bundle/macos/*.app.tar.gz.sig' 2>/dev/null | head -n1)
+          tar_path=$(find target -type f -path '*/bundle/macos/*.app.tar.gz' 2>/dev/null | head -n1)
+          echo "found .app.tar.gz: ${tar_path:-(none)}"
+          echo "found .app.tar.gz.sig: ${sig_path:-(none - no signing secret configured)}"
+          echo "sig_path=$sig_path" >> "$GITHUB_OUTPUT"
+          echo "tar_path=$tar_path" >> "$GITHUB_OUTPUT"
+
+      # .app.tar.gz always exists once createUpdaterArtifacts is on
+      # (regardless of whether signing is configured - it's Tauri's real
+      # update-capable macOS artifact format, not a signing byproduct), so
+      # this always uploads it; the .sig is a separate, explicitly
+      # conditional step below since it depends on TAURI_SIGNING_PRIVATE_KEY
+      # actually being configured - same reasoning as the Windows .sig split.
+      - uses: actions/upload-artifact@v4
+        if: steps.find_sig.outputs.tar_path != ''
+        with:
+          name: LocalSync-macos-updater-archive
+          path: ${{ steps.find_sig.outputs.tar_path }}
+
+      - uses: actions/upload-artifact@v4
+        if: steps.find_sig.outputs.sig_path != ''
+        with:
+          name: LocalSync-macos-updater-archive-sig
+          path: ${{ steps.find_sig.outputs.sig_path }}
+
+  # ------------------------------------------------------------
+  # Publish: only this job gets contents:write, and only for as long as it
+  # needs it - the three build jobs above never touch the release itself.
+  # ------------------------------------------------------------
+  release:
+    needs: [determine-version, build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List what's about to be released
+        run: ls -la dist/
+
+      - name: Generate latest.json (update manifest)
+        # Round 16 part A: the file tauri.conf.json's updater.endpoints
+        # points at (see its own comment). "version" here is the app's real
+        # semver from tauri.conf.json - deliberately NOT
+        # needs.determine-version.outputs.version, which for a manual
+        # workflow_dispatch run is `local-<date>-<sha>` (not valid semver -
+        # the updater's own version comparison needs a real X.Y.Z). That
+        # also means two manual builds in a row currently produce the same
+        # manifest version (this project doesn't yet auto-bump
+        # tauri.conf.json's version per release) - the updater correctly
+        # won't see a "new" update between them until a real version bump
+        # happens; expected, not a bug, and worth knowing before assuming
+        # two dev builds should update each other.
+        #
+        # Only one macOS entry - darwin-aarch64 - since build-macos runs on
+        # macos-latest (Apple Silicon) with no explicit --target, so no
+        # x86_64 (Intel) binary exists to publish a URL for. An Intel-Mac
+        # entry would need a second, `--target x86_64-apple-darwin` macOS
+        # build job (or `--target universal-apple-darwin`) - not attempted
+        # here since round 14 never established that Podman/anything
+        # runs on this project's actual macOS CI target, and doubling
+        # macOS runner-minutes (10x cost) for an update channel with no
+        # confirmed userbase yet wasn't worth it unasked.
+        id: manifest
+        run: |
+          app_version=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
+          tag="${{ needs.determine-version.outputs.version }}"
+          repo="${{ github.repository }}"
+          pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          win_exe=$(find dist -maxdepth 1 -name '*-setup.exe' | head -n1)
+          win_sig_file=$(find dist -maxdepth 1 -name '*-setup.exe.sig' | head -n1)
+          linux_appimage=$(find dist -maxdepth 1 -name '*.AppImage' | head -n1)
+          linux_sig_file=$(find dist -maxdepth 1 -name '*.AppImage.sig' | head -n1)
+          macos_tar=$(find dist -maxdepth 1 -name '*.app.tar.gz' | head -n1)
+          macos_sig_file=$(find dist -maxdepth 1 -name '*.app.tar.gz.sig' | head -n1)
+
+          echo "Windows: exe=${win_exe:-(none)} sig=${win_sig_file:-(none)}"
+          echo "Linux:   appimage=${linux_appimage:-(none)} sig=${linux_sig_file:-(none)}"
+          echo "macOS:   tar=${macos_tar:-(none)} sig=${macos_sig_file:-(none)}"
+
+          if [ -z "$win_sig_file" ] || [ -z "$linux_sig_file" ] || [ -z "$macos_sig_file" ]; then
+            echo "One or more updater signatures missing - TAURI_SIGNING_PRIVATE_KEY probably isn't configured as a secret yet (see docs/code-signing.md). Skipping latest.json this run: installers are still released below, just without auto-update support until all three platforms have a real signature." >&2
+            echo "generated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          win_sig=$(cat "$win_sig_file")
+          linux_sig=$(cat "$linux_sig_file")
+          macos_sig=$(cat "$macos_sig_file")
+          win_url="https://github.com/$repo/releases/download/$tag/$(basename "$win_exe")"
+          linux_url="https://github.com/$repo/releases/download/$tag/$(basename "$linux_appimage")"
+          macos_url="https://github.com/$repo/releases/download/$tag/$(basename "$macos_tar")"
+
+          jq -n \
+            --arg version "$app_version" \
+            --arg pub_date "$pub_date" \
+            --arg win_sig "$win_sig" --arg win_url "$win_url" \
+            --arg linux_sig "$linux_sig" --arg linux_url "$linux_url" \
+            --arg macos_sig "$macos_sig" --arg macos_url "$macos_url" \
+            '{
+              version: $version,
+              notes: "See the GitHub Release page for details.",
+              pub_date: $pub_date,
+              platforms: {
+                "windows-x86_64": { signature: $win_sig, url: $win_url },
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
+                "darwin-aarch64": { signature: $macos_sig, url: $macos_url }
+              }
+            }' > dist/latest.json
+          echo "generated=true" >> "$GITHUB_OUTPUT"
+          echo "--- dist/latest.json ---"
+          cat dist/latest.json
+
+      - name: Create the GitHub Release
+        # softprops/action-gh-release: actions/create-release (the original
+        # GitHub-maintained one) is archived and no longer recommended;
+        # this is the actively-maintained, current standard replacement.
+        # Pinned to the v2 major tag (not the brand-new v3, released within
+        # the last couple of weeks as of this writing) for a release
+        # pipeline that's meant to be trustworthy on day one, not an early
+        # adopter of a major version bump.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.determine-version.outputs.version }}
+          name: LocalSync ${{ needs.determine-version.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+          # A workflow_dispatch build of an unreleased dev snapshot isn't a
+          # tagged version bump - marked as a pre-release so it's clearly
+          # distinguished from a real `vX.Y.Z` tag push on the Releases
+          # page, without needing two different release-creation steps.
+          prerelease: ${{ github.ref_type != 'tag' }}

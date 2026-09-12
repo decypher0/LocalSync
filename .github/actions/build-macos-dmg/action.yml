@@ -1,0 +1,96 @@
+name: Build LocalSync .dmg (macOS)
+description: >
+  Installs the Rust/Node toolchains and builds the real .dmg via the exact
+  command docs/macos-build.md documents for a human doing this by hand
+  (npm run tauri build -- --bundles dmg). Extracted from round 14's
+  macos.yml so round 15's release.yml can reuse the same setup/build steps
+  instead of duplicating them in a second file that could drift out of sync -
+  this is the one place "how do you build the macOS .dmg in CI" lives.
+  Assumes the caller has already checked out the repo (a composite action
+  runs in whatever's already on disk, checkout stays the caller's job).
+
+inputs:
+  disable-updater-artifacts:
+    description: >
+      "true" to build with createUpdaterArtifacts disabled (via --config) -
+      used by release.yml when no TAURI_SIGNING_PRIVATE_KEY secret is
+      configured, so `tauri build` doesn't try (and fail) to sign a macOS
+      .app.tar.gz update artifact with an empty key. Default "false" keeps
+      the config's own createUpdaterArtifacts:true, which is what
+      macos.yml's verification build wants.
+    required: false
+    default: 'false'
+
+outputs:
+  dmg_path:
+    description: Path to the built .dmg
+    value: ${{ steps.find_dmg.outputs.dmg_path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: macos-build
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 'lts/*'
+
+    - name: Build the .dmg
+      shell: bash
+      working-directory: apps/desktop
+      run: |
+        npm install
+        if [ "${{ inputs.disable-updater-artifacts }}" = "true" ]; then
+          npm run tauri build -- --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        else
+          npm run tauri build -- --bundles dmg
+        fi
+
+    - name: Dump target/ contents (diagnostic)
+      # Temporary, added to actually see what (if anything) the build step
+      # above produced - it reports success (green check, full elapsed
+      # time) but the locate step below finds nothing anywhere under
+      # target/, which is a different and more basic problem than "found
+      # it, just not where we assumed": either the bundler genuinely isn't
+      # running, or it's writing somewhere this diagnostic will now
+      # actually show. Remove once the real cause is confirmed from this
+      # output - not meant to stay permanently.
+      if: always()
+      shell: bash
+      run: |
+        echo "== apps/desktop/src-tauri/ top-level =="
+        ls -la apps/desktop/src-tauri/ || true
+        echo "== full recursive file listing under target =="
+        find target -type f 2>&1 | sort || echo "(target/ does not exist, or find itself failed)"
+        echo "== directories only, for a quicker shape-of-the-tree view =="
+        find target -type d 2>&1 | sort || true
+
+    - name: Locate the built .dmg
+      id: find_dmg
+      shell: bash
+      run: |
+        # Not target/release/bundle/dmg specifically - when `tauri build`
+        # is given (or defaults to) a specific target triple rather than
+        # the host's implicit one, Cargo/Tauri nest the whole build under
+        # target/<triple>/release/... instead (e.g.
+        # target/aarch64-apple-darwin/release/bundle/dmg,
+        # target/universal-apple-darwin/release/bundle/dmg) - exactly what
+        # docs/macos-build.md already documents as possible, but this
+        # lookup wasn't accounting for. Matching on the `bundle/dmg/*.dmg`
+        # suffix instead of the full path finds it under any triple
+        # (or none) without needing to know which one the build step used.
+        matches=$(find target -type f -path '*/bundle/dmg/*.dmg' 2>/dev/null)
+        if [ -z "$matches" ]; then
+          echo "No .dmg found anywhere under target - build must have failed silently somewhere upstream." >&2
+          exit 1
+        fi
+        dmg_path=$(echo "$matches" | head -n1)
+        if [ "$(echo "$matches" | wc -l)" -gt 1 ]; then
+          echo "Note: more than one .dmg found, using the first - all matches:" >&2
+          echo "$matches" >&2
+        fi
+        echo "found: $dmg_path"
+        echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
