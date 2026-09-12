@@ -14,10 +14,35 @@ log = "0.4"
 # desktop app that can't assume a system MySQL client library is installed.
 # "minimal" drops the (unused here) named-pipe/SSL-vendoring extras.
 mysql = { version = "25", default-features = false, features = ["minimal"] }
+# Round 18: real PostgreSQL connect/list support - same blocking-client
+# shape as the mysql crate above, from the same rust-postgres project.
+# NoTls only (no `tls` feature): this app's wizard targets a developer's
+# own local/dev database, same trust model the mysql crate already has
+# here with no TLS support at all.
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
 # Spring Boot's application.yml is real YAML - same crate ls-snapshot
 # already uses for docker-compose.yml, reused here rather than adding a
 # second YAML parser to the workspace.
 serde_yaml = "0.9"
+# Round 18: MongoDB's real driver, for connect-test/list_collections.
+# Export uses the real `mongodump` binary (see engines::mongo), not this
+# driver - BSON dump serialization is exactly the kind of thing worth
+# using the canonical tool for rather than reimplementing.
+mongodb = { version = "3", features = ["sync"] }
+# Round 18: mongodump can only be pointed at one shared output directory
+# per invocation, and `export_tables` must run it once per selected
+# collection into that one directory before producing a single Vec<u8>
+# blob - needs a real, auto-cleaned-up temp directory, not a dev-only
+# convenience. Same version this crate already used as a dev-dependency
+# for its own tests; promoted here rather than duplicated.
+tempfile = "3"
+# Round 18: tar+gzip mongodump's directory-of-.bson-files output into the
+# single blob this crate's `export_tables -> Vec<u8>` interface expects,
+# matching MySQL's/PostgreSQL's own single-blob return shape. Same
+# versions `ls-snapshot` already uses for its own tar+gzip payloads.
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]
-tempfile = "3"
+# live_postgres_test.rs's own JSONB round-trip check.
+serde_json = "1"

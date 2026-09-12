@@ -362,8 +362,13 @@ fn port_to_string(v: &serde_yaml::Value) -> Option<String> {
 /// is the one new, independently testable seam instead.
 ///
 /// Any `dumps` are appended as one more tar entry each, at
-/// `db-dumps/<folder>/<schema>.sql` — matching `DatabaseDumpEntry.dump_file`
+/// `db-dumps/<folder>/<file_name>` — matching `DatabaseDumpEntry.dump_file`
 /// exactly, since that's what a receiver needs to actually find the bytes.
+/// `file_name` (not just a bare schema name) is the caller's job to build —
+/// round 18: different engines' dumps get different extensions (a plain
+/// `.sql` text dump for MySQL/PostgreSQL, a `.tar.gz` of MongoDB's own
+/// `mongodump` directory output for MongoDB), which this function has no
+/// reason to know about; see `create_snapshot_multi`'s `dump_file_extension`.
 pub(crate) fn merge_folder_payloads(
     bundles: &[(String, GitBundle)],
     dumps: &[(String, String, Vec<u8>)],
@@ -391,8 +396,8 @@ pub(crate) fn merge_folder_payloads(
         }
     }
 
-    for (folder, schema, dump_bytes) in dumps {
-        let tar_path = format!("db-dumps/{folder}/{schema}.sql");
+    for (folder, file_name, dump_bytes) in dumps {
+        let tar_path = format!("db-dumps/{folder}/{file_name}");
         append_bytes(&mut tb, &tar_path, dump_bytes)?;
     }
 
