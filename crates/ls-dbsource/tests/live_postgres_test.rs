@@ -264,6 +264,16 @@ fn live_postgres_export_round_trip() -> Result<()> {
     );
     eprintln!("STEP: list_tables ok, {} tables", tables.len());
 
+    // --- Round 22 goal 3: real database listing, connecting via the
+    // standard "postgres" admin database rather than src_details.database
+    // (proving it doesn't need that field to already be correct). ---
+    let mut no_db_pin = src_details.clone();
+    no_db_pin.database = "does_not_exist_at_all".to_string();
+    let databases = connect::list_databases(&no_db_pin).context("list_databases despite a nonexistent 'database' field")?;
+    assert!(databases.contains(&"src_db".to_string()), "expected src_db among {databases:?}");
+    assert!(databases.contains(&"dst_db".to_string()), "expected dst_db among {databases:?}");
+    eprintln!("STEP: list_databases ok, {} databases (round 22)", databases.len());
+
     // --- export_tables: real pg_dump. ---
     let dump = export::export_tables(&src_details, &["widgets".to_string()]).context("export_tables for widgets")?;
     let dump_text = String::from_utf8(dump.clone()).expect("dump must be valid UTF-8 SQL text");

@@ -50,6 +50,19 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// *different* MySQL instance than the one actually listening on that
 /// port if more than one is running on the same machine.
 pub(crate) fn open_connection(details: &ConnectionDetails) -> Result<Conn> {
+    open_connection_impl(details, true)
+}
+
+/// Round 22: same connection, minus pinning to `details.database` as the
+/// session's default schema. Needed for [`list_databases`] - the whole
+/// point of browsing available schemas is that `details.database` (a
+/// developer-typed or auto-detected guess) might not exist yet, or might
+/// be wrong, so requiring it up front would defeat the feature before it
+/// could show anything. A connection that only needs host/port/user/pass
+/// to succeed is also a genuinely more honest "does this connection work
+/// at all" check than one that also silently depends on a specific
+/// database already existing.
+fn open_connection_impl(details: &ConnectionDetails, pin_database: bool) -> Result<Conn> {
     if details.engine != "mysql" {
         bail!(
             "unsupported database engine '{}' - only \"mysql\" (MySQL/MariaDB) is implemented here",
@@ -63,31 +76,29 @@ pub(crate) fn open_connection(details: &ConnectionDetails) -> Result<Conn> {
         details.host.clone()
     };
 
-    let opts = OptsBuilder::new()
+    let mut builder = OptsBuilder::new()
         .ip_or_hostname(Some(host))
         .tcp_port(details.port)
         .user(Some(details.username.clone()))
         .pass(Some(details.password.clone()))
-        .db_name(Some(details.database.clone()))
         .prefer_socket(false)
         .tcp_connect_timeout(Some(CONNECT_TIMEOUT))
         .read_timeout(Some(CONNECT_TIMEOUT))
         .write_timeout(Some(CONNECT_TIMEOUT));
+    if pin_database {
+        builder = builder.db_name(Some(details.database.clone()));
+    }
 
-    // Round 18: real underlying causes were being swallowed here.
-    // anyhow::Error's plain Display (what `.to_string()` at the Tauri
-    // command boundary used) only ever shows the outermost `with_context`
-    // message, silently dropping the actual reason (connection refused,
-    // wrong password, unknown database, ...) - verified directly by
-    // printing both forms against real failures in this sandbox. `{:#}`
-    // (alternate Display) walks the whole chain; commands.rs now uses that
-    // instead of `.to_string()` for every db-wizard command, so the real
-    // reason reaches the UI, not just "failed to connect".
-    Conn::new(opts).with_context(|| {
-        format!(
-            "failed to connect to {}@{}:{}/{}",
-            details.username, details.host, details.port, details.database
-        )
+    // Round 22: `friendly_error::connect_failure` prepends one clean,
+    // human sentence (e.g. "No database server appears to be listening at
+    // that host and port") in front of the exact same full raw driver
+    // error round 18's `{:#}` fix already made sure survives - real click-
+    // through found that surviving-but-unfiltered chain still read like
+    // "DriverError { Could not connect ... }" (the mysql crate's own error
+    // enum name, easily misread as "the driver is missing"), which is
+    // technically not swallowed but not actually clear either.
+    Conn::new(builder).map_err(|e| {
+        crate::friendly_error::connect_failure(&details.username, &details.host, details.port, &details.database, e)
     })
 }
 
@@ -104,6 +115,23 @@ pub fn test_connection(details: &ConnectionDetails) -> Result<()> {
         bail!("connected, but the test query (SELECT 1) returned an unexpected result");
     }
     Ok(())
+}
+
+/// Round 22: the real list of databases on the server - queried right
+/// after a real, successful connection (see `open_connection_impl`'s doc
+/// comment on why this doesn't pin to `details.database`), so the wizard
+/// can show the developer what's actually there instead of trusting a
+/// typed-in name blindly. `SHOW DATABASES` needs no special privilege
+/// beyond a normal login; the handful of MySQL/MariaDB-internal schemas
+/// are filtered out since a developer's own project database is never
+/// one of them.
+pub fn list_databases(details: &ConnectionDetails) -> Result<Vec<String>> {
+    let mut conn = open_connection_impl(details, false)?;
+    let names: Vec<String> = conn.query("SHOW DATABASES").context("failed to list databases")?;
+    const INTERNAL: &[&str] = &["information_schema", "mysql", "performance_schema", "sys"];
+    let mut names: Vec<String> = names.into_iter().filter(|n| !INTERNAL.contains(&n.as_str())).collect();
+    names.sort();
+    Ok(names)
 }
 
 /// Lists every table in `details.database`, each with a cheap approximate
