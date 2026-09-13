@@ -1,13 +1,26 @@
 # Cloud drop (Google Drive transport): what you need to obtain
 
-**Status as of round 23: the app-side integration is real and tested, but
-inert without a Google OAuth Client ID.** No such credential exists anywhere
-this project has touched — Claude Code cannot create one, since it requires
-registering a real project in Google Cloud Console under a real Google
-account. Without it, Settings → **Link Google account** shows a clear message
-pointing back at this file instead of doing anything, and Cloud drop mode
-isn't selectable. Adding the real credential is "set one environment
-variable," not "figure out the OAuth flow from scratch" — that part is done.
+**Status as of round 31: the app-side integration is real and tested, but
+inert without a Google OAuth Client ID and Client Secret.** Neither
+credential exists anywhere this project has touched — Claude Code cannot
+create them, since it requires registering a real project in Google Cloud
+Console under a real Google account. Without them, Settings → **Link Google
+account** shows a clear message pointing back at this file instead of doing
+anything, and Cloud drop mode isn't selectable. Adding the real credentials
+is "set two environment variables," not "figure out the OAuth flow from
+scratch" — that part is done.
+
+**Round 31 correction of a round 23 claim that real testing disproved**:
+round 23's version of this file said a Desktop-app OAuth client's token
+exchange never needs the client secret, since PKCE makes it unnecessary.
+Real testing against a live, correctly-configured Desktop-app client
+disproved that outright — Google's actual token endpoint rejected the
+exchange with `400 Bad Request: invalid_request - client_secret is
+missing`. Re-investigated rather than just patched around it: see
+"Why PKCE, and why a client secret anyway" below for exactly what Google's
+own docs say versus what real testing shows. **You now need to copy both
+values from the Credentials page, not just the Client ID** — step 4 below
+is updated accordingly.
 
 ## What you need to obtain
 
@@ -19,39 +32,71 @@ variable," not "figure out the OAuth flow from scratch" — that part is done.
    - **Scopes**: add `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile`, `.../auth/drive.file`, and `.../auth/drive.readonly`. See "A note on scopes and verification" below before assuming you need to add anything broader.
    - **Test users**: while your app is in "Testing" publishing status (the default, and almost certainly what you want to stay in — see below), add the Google accounts of everyone who'll actually test or use Cloud drop mode here. Google caps this at 100 users.
 4. **Create an OAuth Client ID** (APIs & Services → Credentials → Create Credentials → OAuth client ID):
-   - Application type: **Desktop app** (not "Web application" — this app doesn't have a server to hold a client secret, and Google's own guidance for installed/native apps is the Desktop app type + PKCE, no secret at all — see below).
-   - Give it a name, create it. Copy the **Client ID** it shows you (a string ending in `.apps.googleusercontent.com`) — that's the one value this app needs. There's a "Client secret" shown too; **this app never uses it** (see below) — you don't need to save it, and it should never be pasted into anything this app reads, since a "secret" hardcoded into a distributed desktop binary isn't actually secret.
+   - Application type: **Desktop app** (not "Web application" — Google's own guidance for installed/native apps is the Desktop app type + PKCE; see below for why that still doesn't mean no secret at all, despite what you might expect from that guidance).
+   - Give it a name, create it. **Copy both the Client ID** (a string ending in `.apps.googleusercontent.com`) **and the Client Secret** shown right next to it — this app needs both now (see below for why). Treat the secret the same way you'd treat the Client ID, not like a password: it's real, but Google's own position (and this app's own design) is that it isn't confidential for an installed application - see the note below before assuming it needs special protection this project doesn't already give the Client ID.
 
 ## Configuring the app to use it
 
-Set the `GOOGLE_OAUTH_CLIENT_ID` environment variable before launching LocalSync, to the Client ID from step 4:
+Set both the `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`
+environment variables before launching LocalSync, to the two values from
+step 4:
 
 ```
-GOOGLE_OAUTH_CLIENT_ID=123456789-abc...xyz.apps.googleusercontent.com ./localsync-desktop
+GOOGLE_OAUTH_CLIENT_ID=123456789-abc...xyz.apps.googleusercontent.com \
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-...your-real-secret... \
+./localsync-desktop
 ```
 
-(On Windows, set it as a normal environment variable before launching the
-`.exe` — System Properties → Environment Variables, or `$env:GOOGLE_OAUTH_CLIENT_ID = "..."`
+(On Windows, set both as normal environment variables before launching the
+`.exe` — System Properties → Environment Variables, or
+`$env:GOOGLE_OAUTH_CLIENT_ID = "..."` / `$env:GOOGLE_OAUTH_CLIENT_SECRET = "..."`
 in the same PowerShell session you launch from.) A real, permanent build
-would bake a real Client ID into the app at build time instead of requiring
-this to be set by hand every launch — not done here since no real Client ID
-exists yet to bake in; whoever adds one should also decide where it's read
-from long-term (an env var read at startup is the simplest thing that works
-today, and is what `crates/ls-clouddrop` actually implements).
+would bake both real values into the app at build time instead of requiring
+them to be set by hand every launch — not done here since no real
+credentials exist yet to bake in; whoever adds them should also decide
+where they're read from long-term (env vars read at startup are the
+simplest thing that works today, and are what `crates/ls-clouddrop`
+actually implements). Missing either one fails fast with a clear message
+naming exactly which variable is missing, before the app ever tries to
+build a request Google would just reject.
 
-## Why PKCE, no client secret, and a loopback redirect (not the old copy-paste code flow)
+## Why PKCE, and why a client secret anyway, and a loopback redirect (not the old copy-paste code flow)
 
 Google **deprecated the `urn:ietf:wg:oauth:2.0:oob` "copy this code into the
 app" flow in 2022** — it's no longer available for new OAuth clients. The
 current, Google-documented approach for a native desktop app is:
 
-- **Authorization Code flow with PKCE** (RFC 7636) instead of a client
-  secret. A secret baked into a distributed desktop binary isn't actually
-  secret (anyone can extract it from the binary) — PKCE proves the app that
+- **Authorization Code flow with PKCE** (RFC 7636). PKCE proves the app that
   requests the token is the same one that started the flow, using a
-  freshly-generated, single-use `code_verifier`/`code_challenge` pair
-  instead. This is exactly why the Client ID page above doesn't ask you to
-  wire up a client secret anywhere.
+  freshly-generated, single-use `code_verifier`/`code_challenge` pair.
+  Google's own generic "OAuth 2.0 for Native Apps" guide lists
+  `client_secret` as **"Optional"** in the token-exchange parameter table
+  for this reason — PKCE is *supposed* to make it unnecessary for a public,
+  installed-app client.
+- **In practice, for this app's exact request shape, Google's real token
+  endpoint enforces it anyway.** Confirmed by real testing against a live
+  Desktop-app client (a `400 Bad Request: invalid_request - client_secret
+  is missing` error, not a hypothetical), and corroborated independently by
+  multiple other real-world reports of the identical error against Google
+  specifically (its own developer forum among them) - not a fluke of one
+  misconfigured client. The common thread across those reports: it shows up
+  once `access_type=offline` is requested (asking for a `refresh_token`,
+  which this app always does, so it doesn't have to send someone through
+  the consent screen again every time). PKCE isn't accepted as a substitute
+  for the secret requirement the way it is for some other providers -
+  Google's generic "Optional" is real for a bare access-token-only
+  exchange; it doesn't hold for this app's actual request. `crates/ls-clouddrop`
+  now sends the secret on every request to the token endpoint (the initial
+  exchange and later refreshes alike - same client, same endpoint, same
+  authentication requirement on both).
+- **This doesn't make the secret confidential in the way "secret" usually
+  implies.** Google's own guidance is that installed-app credentials
+  (Client ID *and* Client Secret alike) aren't treated as something that
+  must never be extractable from a distributed binary - anyone can pull
+  either value out of a real installed copy of this app. That's exactly why
+  it's read from an environment variable rather than hardcoded (see above):
+  not because this project is protecting a real secret, but for the same
+  per-deployment-configuration reason the Client ID already works that way.
 - **A loopback IP redirect** (`http://127.0.0.1:<a locally-chosen free port>`)
   instead of the old out-of-band code. `crates/ls-clouddrop` opens the
   system's real default browser to Google's real consent screen, and starts
