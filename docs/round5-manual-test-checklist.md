@@ -1639,6 +1639,95 @@ required - and installing/removing the package is what actually turns
 that capability on and off, not a step someone has to discover and run
 by hand.
 
+## Round 30 addendum: root-cause "snapshot payload has no docker-compose.yml"
+
+Round 30 root-caused a real Run-time crash from real cross-machine testing (Windows → Linux, Local network, 168MB payload, database wizard used successfully, failed on Run with `snapshot payload has no docker-compose.yml`) - and confirmed it as a genuine packaging/unpacking mismatch, not a project that actually lacked a compose file.
+
+### What changed, and why (root cause confirmed, not guessed)
+
+- **The actual bug**: `ls_snapshot::create_snapshot_multi` (used by
+  `share_snapshot_wizard` - the only Send path since round 20, for every
+  send, even a single folder) nests every folder's files under its own
+  `manifest.folders[i].name` label unconditionally - there was never a
+  special case for exactly one folder. `ls_containers::run_snapshot`,
+  meanwhile, always looked for `docker-compose.yml` at the unpacked
+  payload's own top level. The result: **any** wizard-based single-folder
+  send with a real, perfectly correct `docker-compose.yml` failed this
+  way - the file was never missing, just nested one directory deeper than
+  `run_snapshot` ever looked.
+- **Why nothing caught this until now**: the only two tests that ever
+  call `ls_containers::run_snapshot` at all
+  (`pipeline_test.rs`/`pipeline_node_test.rs`) use the older, pre-round-17
+  single-folder `ls_snapshot::create_snapshot`, which never nests
+  anything - they never exercised the wizard's own packaging path all the
+  way through to a real Run. A new test,
+  `a_single_folder_wizard_send_can_actually_be_run` in
+  `wizard_send_flow_test.rs`, closes that gap: it drives the exact real
+  path a click-through does (`share_snapshot_wizard` ->
+  `receive_snapshot` -> `run_snapshot` -> `stop_session`) with one folder
+  and a real, minimal `docker-compose.yml` (busybox's own httpd, not a
+  real app image - fast, no slow Maven/MySQL pull needed since this
+  test's job is proving the file survives packaging, not re-proving a
+  real app build; nginx:alpine was tried first and rejected for a real
+  reason - it doesn't tolerate this project's own sandbox policy,
+  `read_only` rootfs with only `/tmp` mounted writable, without its own
+  cache directories - confirmed by directly reproducing the exact
+  failure with plain `podman-compose` outside the test entirely). Verified this
+  test actually has teeth: temporarily reverted the fix and confirmed the
+  test fails with the *exact* reported error string, then restored the
+  fix and confirmed it passes again.
+- **The fix**: `run_snapshot` now checks `manifest.folders` - if it holds
+  exactly one entry (a round-17+ wizard send with one folder), the real
+  compose root is `<unpacked payload>/<that folder's label>`, not the
+  payload's own top level; a multi-folder manifest (2+, or the older
+  empty-`folders` single-folder path) keeps the exact previous behavior
+  unchanged. `RunningSession.compose_dir` (used by `stop_session` too) now
+  consistently holds this same, correct directory, so teardown looks in
+  the same place `up` did.
+- **The error message, for the case that's still genuinely possible**: a
+  project with truly no `docker-compose.yml` at all (a real, separate,
+  already-known-and-deferred gap - see `docs/auto-containerization.md`)
+  now gets a clear, actionable message instead of a bare internal-looking
+  string: it names the actual problem and the concrete next step (add a
+  `docker-compose.yml`, then send again), rather than reading like an
+  internal error a developer would have to guess the meaning of.
+- **Deferred, on purpose, per this round's own hard budget rule**:
+  auto-generating a Dockerfile/compose file for a project that was never
+  containerized at all is real, separate scope - `docs/auto-
+  containerization.md` describes what that capability would need to do
+  and why it deserves its own dedicated round, without building any of it
+  here.
+
+### What to check on real hardware
+
+1. **The actual reported scenario, for real**: send a real, single-folder
+   project that has its own working `docker-compose.yml` through the
+   wizard (with or without the database wizard also being used) and
+   confirm Run now succeeds - this exact combination is what failed
+   before this round's fix.
+2. **A genuinely uncontainerized project**: send a real folder with no
+   `docker-compose.yml` at all and confirm Run now shows the new, clear,
+   actionable message (naming the real problem and suggesting adding a
+   compose file) rather than the old bare "snapshot payload has no
+   docker-compose.yml" string.
+3. **Multi-folder sends are unaffected**: send 2+ independent folders
+   through the wizard (round 17's own original multi-folder case) and
+   confirm the review/diff experience is unchanged - this round
+   deliberately did not attempt to make a genuinely multi-folder send
+   runnable, only fixed the single-folder case.
+
+### What "success" looks like
+
+A project with a real `docker-compose.yml`, sent through the one Send
+flow this app actually has today, runs on the receiver's machine -
+exactly as a developer sending their own real project would expect,
+regardless of whether they also used the database wizard. A project with
+no compose file at all gets told clearly what's missing and what to do
+about it, instead of a string that reads like something broke inside
+LocalSync itself. And the real, separate work of auto-generating a
+compose setup for an uncontainerized project is written down clearly
+enough to pick up later, not rediscovered from scratch.
+
 ## Round 31 addendum: OAuth token exchange now needs a client secret too
 
 Real testing against a live, correctly-configured Desktop-app OAuth client
