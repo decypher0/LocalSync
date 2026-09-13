@@ -4,16 +4,173 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LocalSync</title>
+  <!-- Round 21 goal 2: applied synchronously, before styles.css's own
+       [data-theme] rules ever get a chance to paint - inline and blocking
+       on purpose, so an explicit "Dark" override doesn't flash the OS's
+       light theme for one frame before app.js (loaded at the end of body)
+       gets a chance to run. Kept a one-line inline script rather than a
+       separate file for exactly this reason: a separate <script src> would
+       still be a network/disk round-trip after the stylesheet, reopening
+       the same flash this exists to close. -->
+  <script>
+    (function () {
+      var saved = localStorage.getItem("localsync.theme");
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.dataset.theme = saved;
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <!-- Round 21 goal 1: a small, curated icon set (real Lucide SVG source,
+       ISC-licensed, https://lucide.dev) vendored inline as <symbol> defs -
+       not an external sprite file or CDN script, so <use href="#icon-x">
+       always resolves from the same document regardless of which WebView
+       engine renders it (WebView2 on Windows, WebKitGTK on Linux, WKWebView
+       on macOS all handle same-document SVG fragments identically; a
+       cross-file <use> pointing at an external .svg is a known source of
+       inconsistent behavior across that exact engine spread). Hidden - only
+       ever referenced via <use>, never rendered on its own. -->
+  <svg style="position:absolute;width:0;height:0" aria-hidden="true" focusable="false">
+    <defs>
+    <symbol id="icon-settings" viewBox="0 0 24 24">
+      <path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
+  <circle cx="12" cy="12" r="3" />
+    </symbol>
+    <symbol id="icon-send" viewBox="0 0 24 24">
+      <path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" />
+  <path d="m21.854 2.147-10.94 10.939" />
+    </symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24">
+      <path d="M12 15V3" />
+  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+  <path d="m7 10 5 5 5-5" />
+    </symbol>
+    <symbol id="icon-refresh-cw" viewBox="0 0 24 24">
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+  <path d="M21 3v5h-5" />
+  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+  <path d="M8 16H3v5" />
+    </symbol>
+    <symbol id="icon-folder-plus" viewBox="0 0 24 24">
+      <path d="M12 10v6" />
+  <path d="M9 13h6" />
+  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24">
+      <path d="M18 6 6 18" />
+  <path d="m6 6 12 12" />
+    </symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24">
+      <path d="m12 19-7-7 7-7" />
+  <path d="M19 12H5" />
+    </symbol>
+    <symbol id="icon-arrow-right" viewBox="0 0 24 24">
+      <path d="M5 12h14" />
+  <path d="m12 5 7 7-7 7" />
+    </symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24">
+      <path d="M20 6 9 17l-5-5" />
+    </symbol>
+    <symbol id="icon-circle-x" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+  <path d="m15 9-6 6" />
+  <path d="m9 9 6 6" />
+    </symbol>
+    <symbol id="icon-folder-open" viewBox="0 0 24 24">
+      <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+    </symbol>
+    <symbol id="icon-plug" viewBox="0 0 24 24">
+      <path d="M12 22v-5" />
+  <path d="M15 8V2" />
+  <path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z" />
+  <path d="M9 8V2" />
+    </symbol>
+    <symbol id="icon-square-check" viewBox="0 0 24 24">
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+  <path d="m16 9-5.5 5.5L8 12" />
+    </symbol>
+    <symbol id="icon-square" viewBox="0 0 24 24">
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+    </symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24">
+      <path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z" />
+    </symbol>
+    <symbol id="icon-stop-circle" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+  <rect x="9" y="9" width="6" height="6" rx="1" />
+    </symbol>
+    <symbol id="icon-chevron-down" viewBox="0 0 24 24">
+      <path d="m6 9 6 6 6-6" />
+    </symbol>
+    <symbol id="icon-chevron-up" viewBox="0 0 24 24">
+      <path d="m18 15-6-6-6 6" />
+    </symbol>
+    <symbol id="icon-circle-check" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+  <path d="m16 9-5.5 5.5L8 12" />
+    </symbol>
+    <symbol id="icon-circle-help" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+  <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+  <path d="M12 17h.01" />
+    </symbol>
+    <symbol id="icon-save" viewBox="0 0 24 24">
+      <path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+  <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
+  <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+    </symbol>
+    <symbol id="icon-shield-alert" viewBox="0 0 24 24">
+      <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+  <path d="M12 8v4" />
+  <path d="M12 16h.01" />
+    </symbol>
+    <symbol id="icon-wifi" viewBox="0 0 24 24">
+      <path d="M12 20h.01" />
+  <path d="M2 8.82a15 15 0 0 1 20 0" />
+  <path d="M5 12.859a10 10 0 0 1 14 0" />
+  <path d="M8.5 16.429a5 5 0 0 1 7 0" />
+    </symbol>
+    <symbol id="icon-globe" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+  <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+  <path d="M2 12h20" />
+    </symbol>
+    <symbol id="icon-database" viewBox="0 0 24 24">
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+  <path d="M3 5V19A9 3 0 0 0 21 19V5" />
+  <path d="M3 12A9 3 0 0 0 21 12" />
+    </symbol>
+    <symbol id="icon-sun" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="4" />
+  <path d="M12 2v2" />
+  <path d="M12 20v2" />
+  <path d="m4.93 4.93 1.41 1.41" />
+  <path d="m17.66 17.66 1.41 1.41" />
+  <path d="M2 12h2" />
+  <path d="M20 12h2" />
+  <path d="m6.34 17.66-1.41 1.41" />
+  <path d="m19.07 4.93-1.41 1.41" />
+    </symbol>
+    <symbol id="icon-moon" viewBox="0 0 24 24">
+      <path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" />
+    </symbol>
+    <symbol id="icon-monitor" viewBox="0 0 24 24">
+      <rect width="20" height="14" x="2" y="3" rx="2" />
+  <line x1="8" x2="16" y1="21" y2="21" />
+  <line x1="12" x2="12" y1="17" y2="21" />
+    </symbol>
+    </defs>
+  </svg>
+
   <!-- Round 20 goal 1: everything used to render flush to the left edge of
        the window with no max-width - correct at any window size now that
        it's one centered, bounded shell instead of an unstyled document. -->
   <div class="app-shell">
   <header class="topbar">
     <h1>LocalSync</h1>
-    <button id="settings-toggle" class="ghost-btn" type="button">Settings</button>
+    <button id="settings-toggle" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-settings"></use></svg> Settings</button>
   </header>
 
   <p id="firewall-banner" class="warn hidden"></p>
@@ -30,10 +187,13 @@
        the intended element for either feature. Found and fixed as a real
        bug during round 17's own work in this area, not by design. -->
   <div id="app-update-banner" class="update-banner hidden">
-    <span id="update-banner-text"></span>
     <span class="inline-row">
-      <button id="update-install-btn" class="primary-btn" type="button">Install update</button>
-      <button id="update-dismiss-btn" class="ghost-btn" type="button">Later</button>
+      <svg class="icon"><use href="#icon-download"></use></svg>
+      <span id="update-banner-text"></span>
+    </span>
+    <span class="inline-row">
+      <button id="update-install-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-download"></use></svg> Install update</button>
+      <button id="update-dismiss-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Later</button>
     </span>
     <div id="update-progress-wrap" class="progress-wrap hidden">
       <div class="progress-track"><div id="update-progress-bar" class="progress-bar"></div></div>
@@ -49,8 +209,8 @@
     <div>
       <span class="mode-title">Connection mode</span>
       <span class="inline-row">
-        <label class="radio-label"><input type="radio" name="relay-mode" id="mode-local" value="local" checked /> Local network</label>
-        <label class="radio-label"><input type="radio" name="relay-mode" id="mode-remote" value="remote" /> Remote relay</label>
+        <label class="radio-label"><input type="radio" name="relay-mode" id="mode-local" value="local" checked /> <svg class="icon"><use href="#icon-wifi"></use></svg> Local network</label>
+        <label class="radio-label"><input type="radio" name="relay-mode" id="mode-remote" value="remote" /> <svg class="icon"><use href="#icon-globe"></use></svg> Remote relay</label>
       </span>
       <span class="hint">
         Local network: LocalSync hosts its own signaling relay automatically — nothing to
@@ -69,15 +229,28 @@
     <div>
       <span class="mode-title">Updates</span>
       <span class="inline-row">
-        <button id="check-updates-btn" class="ghost-btn" type="button">Check for updates</button>
+        <button id="check-updates-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Check for updates</button>
         <span id="check-updates-status" class="hint-inline"></span>
+      </span>
+    </div>
+    <!-- Round 21 goal 2: three real states, not a single on/off switch -
+         "System" isn't just the initial default, it's a real ongoing choice
+         (stay matched to the OS setting even if that changes later), same
+         distinction VS Code and most modern desktop apps make in their own
+         theme picker rather than collapsing it to just light/dark. -->
+    <div>
+      <span class="mode-title">Theme</span>
+      <span class="inline-row">
+        <label class="radio-label"><input type="radio" name="theme-choice" id="theme-system" value="system" checked /> <svg class="icon"><use href="#icon-monitor"></use></svg> System</label>
+        <label class="radio-label"><input type="radio" name="theme-choice" id="theme-light" value="light" /> <svg class="icon"><use href="#icon-sun"></use></svg> Light</label>
+        <label class="radio-label"><input type="radio" name="theme-choice" id="theme-dark" value="dark" /> <svg class="icon"><use href="#icon-moon"></use></svg> Dark</label>
       </span>
     </div>
   </section>
 
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="send">Send</button>
-    <button class="tab-btn" data-tab="receive">Receive</button>
+    <button class="tab-btn active" data-tab="send"><svg class="icon"><use href="#icon-send"></use></svg> Send</button>
+    <button class="tab-btn" data-tab="receive"><svg class="icon"><use href="#icon-download"></use></svg> Receive</button>
   </nav>
 
   <!-- ============ SEND ============ -->
@@ -95,7 +268,7 @@
       <span class="inline-row receivers-header">
         <span class="hint"><strong>Previously connected</strong> (still connected this session)</span>
         <span class="inline-row">
-          <button id="receivers-refresh-btn" class="ghost-btn" type="button">Refresh</button>
+          <button id="receivers-refresh-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Refresh</button>
           <span id="receivers-refresh-status" class="hint-inline"></span>
         </span>
       </span>
@@ -110,7 +283,7 @@
          code/progress/result further down; everything from choosing a
          transfer mode through the full database wizard happens inside the
          overlay, never as inline page content. -->
-    <button id="start-send-wizard-btn" class="primary-btn" type="button">Start a new send…</button>
+    <button id="start-send-wizard-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-send"></use></svg> Start a new send…</button>
 
     <!-- ---- Round 17/20: guided send wizard, presented as a real modal
          overlay (goal 4) - not flat inline page content. One step visible
@@ -126,7 +299,7 @@
       <div class="wizard-modal" role="dialog" aria-modal="true" aria-label="Send wizard">
         <div class="wizard-modal-header">
           <span id="wizard-progress-label" class="wizard-progress"></span>
-          <button id="wizard-cancel-btn" class="ghost-btn" type="button">Cancel</button>
+          <button id="wizard-cancel-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Cancel</button>
         </div>
         <div class="wizard-modal-body">
     <div id="send-wizard" class="wizard">
@@ -147,15 +320,15 @@
           (see README).
         </p>
         <span class="inline-row">
-          <label class="radio-label"><input type="radio" name="wiz-relay-mode" id="wiz-mode-local" value="local" checked /> Local network</label>
-          <label class="radio-label"><input type="radio" name="wiz-relay-mode" id="wiz-mode-remote" value="remote" /> Remote relay</label>
+          <label class="radio-label"><input type="radio" name="wiz-relay-mode" id="wiz-mode-local" value="local" checked /> <svg class="icon"><use href="#icon-wifi"></use></svg> Local network</label>
+          <label class="radio-label"><input type="radio" name="wiz-relay-mode" id="wiz-mode-remote" value="remote" /> <svg class="icon"><use href="#icon-globe"></use></svg> Remote relay</label>
         </span>
         <label id="wiz-relay-url-wrap" class="hidden">
           Remote relay URL
           <input id="wiz-relay-url" type="text" placeholder="ws://your-vps-ip:9090" />
         </label>
         <p id="wiz-mode-error" class="error"></p>
-        <button id="wiz-mode-next-btn" class="primary-btn" type="button">Next</button>
+        <button id="wiz-mode-next-btn" class="primary-btn" type="button">Next <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
       </div>
 
       <!-- Step: folder(s) -->
@@ -165,26 +338,26 @@
           Pick one or more independent project folders to send together as one snapshot
           (e.g. several standalone Spring Boot services).
         </p>
-        <button id="wiz-add-folders-btn" class="ghost-btn" type="button">Add folder(s)…</button>
+        <button id="wiz-add-folders-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-folder-plus"></use></svg> Add folder(s)…</button>
         <ul id="wiz-folder-list" class="ports-list"></ul>
         <p id="wiz-folders-error" class="error"></p>
-        <button id="wiz-folders-back-btn" class="ghost-btn" type="button">Back</button>
-        <button id="wiz-folders-next-btn" class="primary-btn" type="button">Next</button>
+        <button id="wiz-folders-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
+        <button id="wiz-folders-next-btn" class="primary-btn" type="button">Next <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
       </div>
 
       <!-- Step: needs database? (asked once) -->
       <div id="wiz-step-needs-db" class="wizard-step hidden">
-        <h3>Does this project need database access?</h3>
+        <h3><svg class="icon"><use href="#icon-database"></use></svg> Does this project need database access?</h3>
         <p class="hint">
           If yes, each selected folder is checked independently next — not every folder in a
           multi-folder project necessarily has its own database.
         </p>
         <span class="inline-row">
-          <button id="wiz-needs-db-yes-btn" class="primary-btn" type="button">Yes</button>
-          <button id="wiz-needs-db-no-btn" class="ghost-btn" type="button">No</button>
+          <button id="wiz-needs-db-yes-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-check"></use></svg> Yes</button>
+          <button id="wiz-needs-db-no-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> No</button>
         </span>
         <br />
-        <button id="wiz-needs-db-back-btn" class="ghost-btn" type="button">Back</button>
+        <button id="wiz-needs-db-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
       </div>
 
       <!-- Round 22 goal 6: only shown when >1 folder is selected. Asked
@@ -192,19 +365,19 @@
            to repeat the whole wizard for folders that genuinely share one
            database. -->
       <div id="wiz-step-shared-db" class="wizard-step hidden">
-        <h3>Do these folders share one database?</h3>
+        <h3><svg class="icon"><use href="#icon-database"></use></svg> Do these folders share one database?</h3>
         <p class="hint">
           If yes, you'll set up the connection once and it's reused for every folder — folders
           where auto-detection finds genuinely different connection details are still handled
           separately, automatically.
         </p>
         <span class="inline-row">
-          <button id="wiz-shared-db-yes-btn" class="primary-btn" type="button">Yes, one shared database</button>
-          <button id="wiz-shared-db-no-btn" class="ghost-btn" type="button">No, each folder is separate</button>
+          <button id="wiz-shared-db-yes-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-check"></use></svg> Yes, one shared database</button>
+          <button id="wiz-shared-db-no-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> No, each folder is separate</button>
         </span>
         <p id="wiz-shared-db-note" class="hint-inline"></p>
         <br />
-        <button id="wiz-shared-db-back-btn" class="ghost-btn" type="button">Back</button>
+        <button id="wiz-shared-db-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
       </div>
 
       <!-- Steps 3-5, reordered per round 22 goal 4: the dump-file question
@@ -244,8 +417,8 @@
           </div>
           <p><strong>Do you already have a dump file for this database?</strong></p>
           <span class="inline-row">
-            <button id="wiz-has-dump-yes-btn" class="ghost-btn" type="button">Yes, I have a dump file</button>
-            <button id="wiz-has-dump-no-btn" class="ghost-btn" type="button">No, connect and export</button>
+            <button id="wiz-has-dump-yes-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-check"></use></svg> Yes, I have a dump file</button>
+            <button id="wiz-has-dump-no-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-plug"></use></svg> No, connect and export</button>
           </span>
           <br />
           <button id="wiz-ask-edit-btn" class="ghost-btn hidden" type="button">These details are wrong — edit manually</button>
@@ -257,10 +430,10 @@
           <label>Schema/database name <input id="wiz-dump-schema" type="text" /></label>
           <span class="inline-row">
             <input id="wiz-dump-file-path" type="text" placeholder="/path/to/dump" disabled />
-            <button id="wiz-dump-browse-btn" class="ghost-btn" type="button">Browse…</button>
+            <button id="wiz-dump-browse-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-folder-open"></use></svg> Browse…</button>
           </span>
           <p id="wiz-dump-database-error" class="error"></p>
-          <button id="wiz-dump-confirm-btn" class="primary-btn" type="button">Use this dump file</button>
+          <button id="wiz-dump-confirm-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-check"></use></svg> Use this dump file</button>
           <p id="wiz-dump-error" class="error"></p>
         </div>
 
@@ -286,7 +459,7 @@
           <p id="wiz-manual-database-error" class="error"></p>
           <label>Username <input id="wiz-manual-username" type="text" /></label>
           <label>Password <input id="wiz-manual-password" type="password" /></label>
-          <button id="wiz-manual-continue-btn" class="primary-btn" type="button">Test connection &amp; continue</button>
+          <button id="wiz-manual-continue-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-plug"></use></svg> Test connection &amp; continue</button>
           <p id="wiz-manual-status" class="hint-inline"></p>
           <p id="wiz-manual-error" class="error"></p>
         </div>
@@ -301,7 +474,7 @@
         <div id="wiz-db-schemas" class="hidden">
           <p class="hint">Real databases/schemas on this server — pick the one this folder actually uses:</p>
           <ul id="wiz-schemas-list" class="ports-list"></ul>
-          <button id="wiz-schemas-continue-btn" class="primary-btn" type="button">Continue</button>
+          <button id="wiz-schemas-continue-btn" class="primary-btn" type="button">Continue <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
           <p id="wiz-schemas-error" class="error"></p>
         </div>
 
@@ -310,18 +483,18 @@
           <div class="db-table-toolbar">
             <p class="hint">Real <span id="wiz-tables-noun">tables</span> in <strong id="wiz-tables-database"></strong> — select what to include:</p>
             <span class="inline-row">
-              <button id="wiz-tables-select-all-btn" class="ghost-btn" type="button">Select all</button>
-              <button id="wiz-tables-select-none-btn" class="ghost-btn" type="button">Select none</button>
+              <button id="wiz-tables-select-all-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-square-check"></use></svg> Select all</button>
+              <button id="wiz-tables-select-none-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-square"></use></svg> Select none</button>
             </span>
           </div>
           <ul id="wiz-tables-list" class="db-table-list"></ul>
-          <button id="wiz-export-btn" class="primary-btn" type="button">Export selected <span id="wiz-tables-noun-2">tables</span></button>
+          <button id="wiz-export-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-download"></use></svg> Export selected <span id="wiz-tables-noun-2">tables</span></button>
           <p id="wiz-export-status" class="hint-inline"></p>
           <p id="wiz-tables-error" class="error"></p>
         </div>
 
         <p id="wiz-db-connect-error" class="error"></p>
-        <button id="wiz-db-back-btn" class="ghost-btn" type="button">Back</button>
+        <button id="wiz-db-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
       </div>
 
       <!-- Final step: summary + the actual Send -->
@@ -329,8 +502,8 @@
         <h3>Ready to send</h3>
         <ul id="wiz-ready-summary" class="manifest-card"></ul>
         <p id="wiz-send-error" class="error"></p>
-        <button id="wiz-ready-back-btn" class="ghost-btn" type="button">Back</button>
-        <button id="send-btn" class="primary-btn" type="button">Send</button>
+        <button id="wiz-ready-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
+        <button id="send-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-send"></use></svg> Send</button>
       </div>
     </div>
         </div>
@@ -359,7 +532,7 @@
         Room code (paste the code the sender gave you)
         <input id="receive-room-code" type="text" placeholder="e.g. 0007Y2N5wKp2mQ" />
       </label>
-      <button id="receive-btn" class="primary-btn" type="button">Receive</button>
+      <button id="receive-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-download"></use></svg> Receive</button>
 
       <div id="receive-progress-wrap" class="progress-wrap hidden">
         <div class="progress-track"><div id="receive-progress-bar" class="progress-bar"></div></div>
@@ -376,16 +549,16 @@
            this never gates or pre-fills anything below; Run/Reject are the
            only two buttons that actually decide anything here. ---- -->
       <div id="peer-recognized" class="peer-banner peer-banner-recognized hidden">
-        <span class="peer-banner-icon" aria-hidden="true">✓</span>
+        <span class="peer-banner-icon" aria-hidden="true"><svg class="icon"><use href="#icon-circle-check"></use></svg></span>
         <span>Recognized peer: <strong id="peer-recognized-name"></strong>
         <span id="peer-recognized-since" class="hint-inline"></span></span>
       </div>
       <div id="peer-new" class="peer-banner peer-banner-new hidden">
-        <span class="peer-banner-icon" aria-hidden="true">?</span>
+        <span class="peer-banner-icon" aria-hidden="true"><svg class="icon"><use href="#icon-circle-help"></use></svg></span>
         <span>New sender — haven't seen this identity before.</span>
         <span class="inline-row peer-remember-row">
           <input id="peer-remember-name" type="text" placeholder="Remember as…" />
-          <button id="peer-remember-btn" class="ghost-btn" type="button">Save</button>
+          <button id="peer-remember-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-save"></use></svg> Save</button>
         </span>
         <span id="peer-remember-done" class="hint hidden">Saved — future receives from this sender will show as recognized.</span>
         <p id="peer-remember-error" class="error"></p>
@@ -393,12 +566,13 @@
 
       <h2>Review before you run</h2>
       <p class="warn">
+        <svg class="icon"><use href="#icon-shield-alert"></use></svg>
         Nothing has executed yet. This project has only been verified and unpacked for
         inspection — clicking Run is what starts sandboxed containers.
       </p>
 
       <span class="inline-row ask-update-row">
-        <button id="ask-update-btn" class="ghost-btn" type="button">Ask for update</button>
+        <button id="ask-update-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Ask for update</button>
         <span id="ask-update-status" class="hint"></span>
       </span>
 
@@ -418,8 +592,8 @@
         <input id="work-dir" type="text" value="/tmp/localsync-work" />
       </label>
       <span class="inline-row">
-        <button id="run-btn" class="danger-btn" type="button">Run</button>
-        <button id="reject-btn" class="ghost-btn reject-btn" type="button">Reject</button>
+        <button id="run-btn" class="danger-btn" type="button"><svg class="icon"><use href="#icon-play"></use></svg> Run</button>
+        <button id="reject-btn" class="ghost-btn reject-btn" type="button"><svg class="icon"><use href="#icon-circle-x"></use></svg> Reject</button>
       </span>
       <p id="reject-error" class="error"></p>
 
@@ -428,7 +602,7 @@
           <span class="spinner" aria-hidden="true"></span>
           <span id="run-progress-label">Starting containers…</span>
         </div>
-        <button id="run-details-toggle" class="link-btn" type="button" aria-expanded="false">Show details ▾</button>
+        <button id="run-details-toggle" class="link-btn" type="button" aria-expanded="false"><svg class="icon"><use href="#icon-chevron-down"></use></svg> Show details</button>
         <pre id="run-log" class="run-log hidden"></pre>
       </div>
 
@@ -447,7 +621,7 @@
       </div>
       <h3>Service ports</h3>
       <ul id="s-ports" class="ports-list"></ul>
-      <button id="stop-btn" class="ghost-btn" type="button">Stop</button>
+      <button id="stop-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-stop-circle"></use></svg> Stop</button>
       <p id="stop-error" class="error"></p>
     </div>
   </section>
