@@ -1,9 +1,15 @@
 //! Proves round-10's configurable relay mode at the real Tauri command
-//! layer: `commands::start_send_session`/`commands::decode_room_code` now
-//! take `mode`/`relay_url`, extending (not replacing) the shape
+//! layer: `commands::start_send_session` takes `mode`/`relay_url` (a real
+//! sender-side choice, unchanged), extending (not replacing) the shape
 //! `send_flow_test.rs` already exercises for `share_snapshot`/
 //! `receive_snapshot` themselves (untouched, still called with a plain
 //! `room_code`/`signaling_url` pair either way).
+//!
+//! `commands::decode_room_code` no longer takes a `mode` at all as of round
+//! 25 - see its own doc comment for why a receiver-supplied mode was both
+//! redundant and a real bug (a receiver's own, unrelated Settings toggle
+//! could block a perfectly valid code). Every call to it below reflects
+//! that: the code alone decides which branch runs.
 //!
 //! "remote" mode's whole point is a relay that's already running somewhere
 //! else, separate from the app - proven here with a real
@@ -96,13 +102,13 @@ async fn remote_mode_transfers_a_real_payload_via_an_already_running_relay() {
     assert_eq!(send_info.room_code.len(), 4, "generate_room_id() ids are 4 characters");
     assert_eq!(send_info.signaling_url, relay_url, "remote mode must reuse the configured relay_url verbatim");
 
-    // ---- receiver side: decode_room_code("remote", <pasted code>, ...) ----
-    let decoded = commands::decode_room_code(
-        "remote".to_string(),
-        send_info.room_code.clone(),
-        Some(relay_url.clone()),
-    )
-    .expect("decode_room_code should succeed in remote mode");
+    // ---- receiver side: decode_room_code(<pasted code>, ...) ----
+    // Round 25: no `mode` argument anymore - a bare 4-character room id is
+    // unambiguously remote-shaped on its own (see decode_room_code's own
+    // doc comment), so this is real self-describing-code behavior, not a
+    // trimmed-down call.
+    let decoded = commands::decode_room_code(send_info.room_code.clone(), Some(relay_url.clone()))
+        .expect("decode_room_code should succeed for a remote-shaped code");
     assert_eq!(decoded.room_id, send_info.room_id, "the pasted code IS the room_id in remote mode");
     assert_eq!(decoded.signaling_url, relay_url);
 
@@ -148,13 +154,22 @@ async fn remote_mode_transfers_a_real_payload_via_an_already_running_relay() {
     assert!(held, "receive_snapshot should stash the verified snapshot in AppState");
 }
 
-/// Confirms the `mode == "local"` branch wasn't regressed by the new
-/// `mode`/`relay_url` parameters: still hosts its own relay and produces the
-/// old fixed-width, LAN-IP-encoded room code, unrelated to whatever
-/// `relay_url` happens to be (ignored in this mode). The full local-mode
-/// transfer path itself is already proven by
-/// `crates/ls-net/tests/embedded_relay_test.rs`, so this is a fast
-/// branch-didn't-regress check, not a re-proof of that path.
+/// Confirms the `mode == "local"` branch of `start_send_session` wasn't
+/// regressed: still hosts its own relay and produces the old fixed-width,
+/// LAN-IP-encoded room code. The full local-mode transfer path itself is
+/// already proven by `crates/ls-net/tests/embedded_relay_test.rs`, so this
+/// is a fast branch-didn't-regress check, not a re-proof of that path.
+///
+/// The `decode_room_code` call below is round 25's actual bug, proven
+/// directly: a receiver connects using nothing but the pasted code and
+/// `None` for `relay_url` - no relay configuration of any kind present,
+/// let alone consulted. Before round 25, the frontend independently
+/// gated this exact call behind a `mode` value read from Settings' own
+/// relay-mode toggle (meant for the *sender* side); if that toggle
+/// happened to be on "remote", a real local-mode code like this one would
+/// never even have reached this command - the frontend blocked it first
+/// with "Remote relay URL is required". This test proves the command
+/// itself no longer has - or needs - any such gate.
 #[tokio::test]
 async fn local_mode_still_produces_the_old_encoded_code() {
     let info = commands::start_send_session("local".to_string(), None)
@@ -165,8 +180,11 @@ async fn local_mode_still_produces_the_old_encoded_code() {
     assert!(info.room_code.chars().all(|c| c.is_ascii_alphanumeric()));
     assert_ne!(info.room_code, info.room_id, "local mode's room_code encodes IP+port+id, unlike remote mode");
 
-    let decoded = commands::decode_room_code("local".to_string(), info.room_code.clone(), None)
-        .expect("decode_room_code should succeed in local mode");
+    // Round 25: a receiver never picks a mode, never configures a relay
+    // URL for this case - `None` here, not just an empty string, is the
+    // whole point.
+    let decoded = commands::decode_room_code(info.room_code.clone(), None)
+        .expect("a local-mode code must decode with zero relay configuration present");
     assert_eq!(decoded.room_id, info.room_id);
     assert_eq!(decoded.signaling_url, info.signaling_url);
 }
@@ -182,10 +200,43 @@ async fn remote_mode_without_a_relay_url_is_a_real_error() {
     };
     assert!(err.contains("relay_url"), "error should mention the missing relay_url, got: {err}");
 
-    let result = commands::decode_room_code("remote".to_string(), "abcd".to_string(), None);
+    // "abcd" is a real, valid-shaped remote-mode code (generate_room_id()'s
+    // own 4-character output) - decode_room_code must recognize it as
+    // remote-shaped (not silently misread as an incomplete local code) and
+    // fail specifically because no relay_url was given, not because the
+    // code itself looked wrong.
+    let result = commands::decode_room_code("abcd".to_string(), None);
     let err = match result {
         Err(e) => e,
-        Ok(_) => panic!("remote mode must require a relay_url"),
+        Ok(_) => panic!("a remote-shaped code with no relay_url must fail"),
     };
-    assert!(err.contains("relay_url"), "error should mention the missing relay_url, got: {err}");
+    assert!(
+        err.contains("relay") || err.contains("URL"),
+        "error should mention needing a relay URL, got: {err}"
+    );
+}
+
+/// The actual self-describing-code claim round 25 makes: decode_room_code
+/// takes no `mode` argument at all anymore, and correctly tells a real
+/// local-shaped code apart from a real remote-shaped one purely from the
+/// code's own length/content - proven with one of each, back to back, in
+/// the same test, with no shared state or ordering dependency between them.
+#[tokio::test]
+async fn decode_room_code_tells_local_and_remote_codes_apart_with_no_mode_argument() {
+    let local_info = commands::start_send_session("local".to_string(), None)
+        .await
+        .expect("start_send_session should succeed in local mode");
+    let local_decoded =
+        commands::decode_room_code(local_info.room_code.clone(), None).expect("a local-shaped code must decode as local");
+    assert_eq!(local_decoded.signaling_url, local_info.signaling_url);
+
+    let (port, _relay_task) = ls_net::host_ephemeral_relay().await.expect("failed to start stand-in relay");
+    let relay_url = format!("ws://127.0.0.1:{port}");
+    let remote_info = commands::start_send_session("remote".to_string(), Some(relay_url.clone()))
+        .await
+        .expect("start_send_session should succeed in remote mode");
+    let remote_decoded = commands::decode_room_code(remote_info.room_code.clone(), Some(relay_url.clone()))
+        .expect("a remote-shaped code must decode as remote when a relay_url is available");
+    assert_eq!(remote_decoded.signaling_url, relay_url);
+    assert_eq!(remote_decoded.room_id, remote_info.room_id);
 }
