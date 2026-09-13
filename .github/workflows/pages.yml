@@ -1,0 +1,68 @@
+# Round 24: publishes web/ (the magic-link fallback/install-guide page) to
+# GitHub Pages. Deliberately decoupled from release.yml (round 15): this
+# page's own content barely ever changes (it fetches the current release's
+# download links live from GitHub's API at view time, see web/app.js) - the
+# only reason to redeploy it is a real edit to web/ itself, so that's what
+# this triggers on, not every release.
+#
+# Uses the official actions/deploy-pages flow (configure-pages + a real
+# artifact upload + deploy-pages), not a gh-pages branch or "deploy from a
+# branch/folder" - the modern, GitHub-documented approach, and the one that
+# keeps this page's own build/deploy history visible in the Actions tab
+# alongside every other workflow in this repo.
+#
+# One-time manual step this workflow cannot do for you: in this repo's
+# Settings -> Pages, set "Source" to "GitHub Actions" (it defaults to
+# "Deploy from a branch", which would ignore this workflow entirely). See
+# README's "Magic link" section for the full one-time setup, and exactly
+# what URL the page ends up at.
+name: Deploy magic-link page to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment at a time; a second push while one's still running
+# should replace it, not queue behind it - nobody needs an old in-flight
+# deploy to finish before a newer one goes live.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Real, automated coverage for the page's own logic (OS detection,
+      # asset picking, code parsing) - see web/test-magic-link-logic.js's
+      # own comment for exactly what this does and doesn't prove. A failing
+      # test here blocks the deploy, same as this project treats every
+      # other real test.
+      - name: Run the fallback page's logic tests
+        run: node --test web/test-magic-link-logic.js
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload web/ as the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

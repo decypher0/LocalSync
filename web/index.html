@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open in LocalSync</title>
+  <meta name="robots" content="noindex" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="card">
+    <h1>LocalSync</h1>
+    <p id="status" class="status">Checking…</p>
+
+    <div id="code-box">
+      <span class="hint">Your code:</span>
+      <code id="code-text" class="code-display"></code>
+      <button id="copy-code-btn" type="button">Copy code</button>
+      <span id="copy-status" class="hint-inline"></span>
+    </div>
+
+    <div id="downloads" class="downloads"></div>
+    <p id="ua-note" class="hint"></p>
+    <p id="error" class="error"></p>
+
+    <p class="hint footer-note">
+      Already have LocalSync? This page tried to open it automatically for you above.
+      If it didn't, make sure LocalSync is installed, then open it and paste in your code.
+    </p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

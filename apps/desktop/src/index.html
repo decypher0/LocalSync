@@ -161,6 +161,14 @@
   <line x1="8" x2="16" y1="21" y2="21" />
   <line x1="12" x2="12" y1="17" y2="21" />
     </symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24">
+      <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    </symbol>
+    <symbol id="icon-link" viewBox="0 0 24 24">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </symbol>
     </defs>
   </svg>
 
@@ -513,6 +521,17 @@
     <div id="send-code-wrap" class="room-code-wrap hidden">
       <span class="hint">Share this code with the receiver:</span>
       <code id="send-room-code-display" class="room-code-display"></code>
+      <!-- Round 24: two distinct actions, not one - a teammate who already
+           has LocalSync installed just needs the bare code (what "Copy
+           code" copies, unchanged from before this round); someone being
+           onboarded for the first time benefits from the full magic link
+           instead (what "Copy link" copies - see buildMagicLink() for
+           where that URL points and why). -->
+      <span class="inline-row send-code-actions">
+        <button id="copy-code-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-copy"></use></svg> Copy code</button>
+        <button id="copy-link-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-link"></use></svg> Copy link</button>
+        <span id="copy-status" class="hint-inline"></span>
+      </span>
       <p id="send-code-expiry" class="hint-inline"></p>
     </div>
 
