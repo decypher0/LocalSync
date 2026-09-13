@@ -1181,17 +1181,20 @@ protocol over real `ls_net` connections — already has 43 passing automated
 tests (41 in `ls-clouddrop`, 2 in the new `cloud_drop_protocol_test.rs`); this
 checklist is for the rest.
 
-### Before you start: get a real Client ID
+### Before you start: get a real Client ID and Client Secret
 
 Follow `docs/google-drive-setup.md` start to finish first — a Google Cloud
 project, the Drive API enabled, an OAuth consent screen in "Testing" status
 with **two of your own Google accounts** added as test users (one to act as
-sender, one as receiver), and a Desktop-app-type OAuth Client ID. Set
-`GOOGLE_OAUTH_CLIENT_ID` to that value before launching either app instance.
-Without it, Settings → **Link Google account** fails immediately with a
-message pointing back at that doc — confirm that's what you see if you
-launch without setting it, as a sanity check that the failure path itself is
-honest before you set the real value.
+sender, one as receiver), and a Desktop-app-type OAuth Client ID. Set both
+`GOOGLE_OAUTH_CLIENT_ID` **and** `GOOGLE_OAUTH_CLIENT_SECRET` (round 31 -
+see that round's own addendum below for why the secret is needed at all
+despite this being a PKCE flow) to the two values from that Client ID's
+Credentials page entry, before launching either app instance. Without
+either one, Settings → **Link Google account** fails immediately with a
+message naming exactly which variable is missing — confirm that's what you
+see if you launch with one or both unset, as a sanity check that the
+failure path itself is honest before you set the real values.
 
 ### What to check
 
@@ -1453,6 +1456,189 @@ actually served by a real install reflects the real, current source -
 confirmed as far as this sandbox can reach, with a concrete next check
 for the one part it couldn't fully verify itself.
 
+## Round 26 addendum: real release publishing (magic-link + auto-update both depend on it)
+
+Two apparently separate bugs — the magic-link page's "GitHub API returned
+404" and the app's own "could not fetch a valid release JSON" — turned out
+to share a root cause investigated and confirmed directly against this
+repo's real GitHub state (via the public REST API), not assumed: this
+project's only real Release existed with real assets, but GitHub's
+`/releases/latest` alias structurally excludes prereleases, and every
+release this workflow has ever produced via `workflow_dispatch` is
+deliberately marked prerelease. The fix publishes a second, fixed `latest`
+tag on every run that both consumers now address directly, sidestepping
+that alias entirely — confirmed against GitHub's own REST API docs (not
+guessed) that a tag-based lookup has no such exclusion. Separately, no
+`latest.json` had ever been generated at all, because `TAURI_SIGNING_PRIVATE_KEY`
+has never been added as a repository secret — a real, independent gap,
+not fixed by the tag change above, and not fixable without the
+maintainer's own action (see `docs/auto-update-signing.md`, new this
+round).
+
+### What's already confirmed, without needing to trigger anything
+
+- The repo's real Releases were queried directly (`GET /repos/decypher0/LocalSync/releases`
+  and `/releases/latest`) - confirmed the 404 and confirmed a real,
+  non-draft release with real installer assets already existed, just
+  marked `prerelease: true`, before writing any fix.
+- `pickInstallerAssets`/`parseCode`/`detectOS`/`buildSchemeUrl` (the
+  fallback page's pure logic) are unchanged and all 24 of their existing
+  tests still pass - only the URL the page fetches from changed.
+- The new `release.yml` step's YAML structure and the exact `make_latest`/
+  tag-lookup semantics it relies on were confirmed against GitHub's own
+  REST API documentation before being written, not assumed from memory.
+
+### What to check once you actually trigger the release workflow
+
+1. **Run the Release workflow** (Actions tab → Run workflow, or push a
+   `v*` tag). Confirm the new "Publish/update the rolling 'latest' release"
+   step succeeds, and that a release tagged exactly `latest` now exists on
+   the Releases page (separate from the versioned one) with the same
+   installer assets attached.
+2. **Confirm the alias fix, for real**: `curl -s https://api.github.com/repos/decypher0/LocalSync/releases/tags/latest`
+   should return a real release object (not 404) even though it's a
+   `workflow_dispatch` run. `curl -sI https://github.com/decypher0/LocalSync/releases/download/latest/<some-asset-name>`
+   should redirect to a real download, not 404.
+3. **The magic-link page, for real**: open `https://decypher0.github.io/LocalSync/?code=test`
+   (after re-deploying `web/`, if it hasn't picked up this round's `app.js`
+   change yet) with LocalSync not installed, and confirm real OS-specific
+   download links render instead of the "couldn't reach GitHub" fallback
+   message.
+4. **Auto-update, only after adding `TAURI_SIGNING_PRIVATE_KEY`** (see
+   `docs/auto-update-signing.md` for exactly how): re-run the release
+   workflow, confirm the "Generate latest.json" step now prints
+   `generated=true`, and confirm `curl -s https://api.github.com/repos/decypher0/LocalSync/releases/tags/latest | jq '.assets[].name'`
+   lists `latest.json`. Install an older build on real hardware and confirm
+   Settings → **Check for updates** now reports a real update rather than
+   an error - the actual install-and-restart click-through is still the
+   same real-hardware-only gap round 16's own scope note already
+   documented, unchanged by this round.
+
+### What "success" looks like
+
+Both consumers resolve a real, current release without needing anyone to
+have ever pushed a real `vX.Y.Z` tag - a plain `workflow_dispatch` dev
+build is enough for the magic-link page and (once the signing secret
+exists) the in-app updater to both find real data, every single run, not
+just the lucky first time someone tags a release.
+
+---
+
+## Round 27 addendum: magic-link on real Windows and real Linux
+
+Real testing on real hardware found two distinct bugs the same round's
+own investigation confirmed have two distinct root causes - not one fix.
+Both are genuinely platform-behavioral, so both still need a real
+click-through on real hardware to fully confirm; what's below is exactly
+what this sandbox could and couldn't check on its own.
+
+### What changed, and what's already confirmed without real hardware
+
+- **Windows (false "not installed")**: the install-detection heuristic
+  (`visibilitychange`/`blur` within a fixed timeout) is confirmed, via
+  real research into how every implementation of this technique works
+  across browsers, to have no fully reliable signal on any of them - this
+  was never fixable by picking the "right" timeout number alone. Fixed
+  two ways: the timeout itself moved from 1750ms to 2500ms (the most
+  commonly referenced reference implementation for this exact technique
+  defaults to 2000ms and documents raising it for a slower-starting app),
+  and - the real fix - the page now keeps listening after the fallback UI
+  renders and corrects its own message the moment a late success signal
+  arrives, rather than leaving a confidently-wrong "doesn't seem to be
+  installed" on screen next to an app that's visibly already open. The
+  initial fallback message itself was also softened to acknowledge it can
+  still be wrong at that exact moment, not assert a negative outright.
+  `web/test-magic-link-logic.js`'s 24 existing tests (all pure-function,
+  untouched by this change) still pass; this specific fix lives in
+  browser/timer orchestration code this project's own test split has
+  never covered with automation - see "What to check" below.
+- **Linux (deep link doesn't reach the app at all)**: root-caused to a
+  real, confirmed, currently-open upstream Tauri bug
+  (`tauri-apps/tauri#16014`) - the bundler's default `.desktop` template's
+  `Exec=` line has no `%u`/`%U` field code, so per the Desktop Entry
+  Specification itself, a launcher invokes the app with *no arguments at
+  all* when a link is clicked, regardless of whether the URL scheme is
+  otherwise correctly registered. A custom `.desktop` template
+  (`apps/desktop/src-tauri/linux/main.desktop`, wired via
+  `bundle.linux.deb.desktopTemplate`) adds `%u` and a hardcoded
+  `MimeType=x-scheme-handler/localsync;` line (confirmed the default
+  template's own `mime_type` template variable isn't populated from this
+  project's deep-link scheme config - only from an unrelated
+  file-association feature this project doesn't use). New
+  `postInstallScript`/`postRemoveScript` entries run
+  `update-desktop-database` after install/removal, so the OS's cached
+  MIME index actually picks up the change immediately rather than waiting
+  on an unrelated future trigger (another package install, a reboot, ...).
+  All three new files were validated for real in this sandbox, not just
+  reviewed: a real `.deb` was actually built in this project's own WSL2
+  environment (`npm run tauri build -- --bundles deb`) - which itself
+  caught a real bug before this round shipped it (the header comment
+  originally described the default template's own Handlebars syntax
+  using literal double-brace mustaches, which the bundler's template
+  engine tried to parse as real template code and failed on; fixed by
+  rewording the comment, confirmed by a second successful build). The
+  built `.deb`'s contents were then extracted (`dpkg-deb -e`/`-x`) and
+  inspected directly: the rendered `.desktop` file shows the real
+  `Exec=localsync-desktop %u` and `MimeType=x-scheme-handler/localsync;`
+  lines exactly as intended, and both `postinst`/`postrm` scripts are
+  present with real `rwxr-xr-x` executable permissions and clean LF-only
+  line endings (`file` reports plain "POSIX shell script, ASCII text
+  executable" - no CRLF flag). The `.gitattributes` addition this round
+  is what makes that last part true: a CRLF-corrupted shebang line
+  silently breaks a maintainer script's execution on Linux, and this was
+  confirmed to be a real risk on this project's own Windows-checked-out
+  clone before the fix (git flagged the exact line-ending conversion on
+  first `git add`), not a hypothetical one. Not run in this sandbox (no
+  passwordless `sudo` available to install it): `desktop-file-validate`
+  itself, for an independent, spec-conformance-focused second opinion
+  beyond a successful real build and manual inspection - worth running
+  once on a real machine (`desktop-file-validate LocalSync.desktop` after
+  extracting it) alongside the real-hardware checks below.
+
+### What to check on real hardware
+
+1. **Windows, the actual contradiction**: click a real magic link with
+   LocalSync already installed. Confirm the browser tab's message never
+   ends up asserting "doesn't seem to be installed" while the app is
+   simultaneously visibly open on screen - if the app opens slower than
+   2500ms, confirm the page instead shows "Looks like LocalSync just
+   opened" once it catches up, rather than staying wrong indefinitely.
+2. **Windows, genuinely not installed**: click a magic link on a machine
+   that has never had LocalSync, and confirm the softened message
+   ("If LocalSync just opened, you're all set — otherwise...") still
+   reads clearly and the real download options still render below it.
+3. **Linux, the actual deep link**: install the `.deb` on a real Linux
+   desktop (GNOME and KDE both worth trying, if you have access to both -
+   MIME/URL-scheme handling is desktop-environment-specific in practice
+   even though the underlying mechanism is a shared freedesktop.org
+   standard), then click a real magic link. Confirm LocalSync actually
+   launches (or focuses, if already running - see round 24's
+   single-instance handling) with the Receive tab pre-filled with the
+   real code, not the default Send screen.
+4. **Linux, the registration itself, independently of clicking a link**:
+   after installing the `.deb`, run `xdg-mime query default
+   x-scheme-handler/localsync` (or check a browser's own "always open
+   these types of links" settings) and confirm LocalSync is listed as the
+   real, registered handler - this is the direct, independent
+   confirmation that installation itself (not just a lucky click) did the
+   right thing.
+5. **Linux, uninstall**: remove the `.deb` and confirm
+   `xdg-mime query default x-scheme-handler/localsync` no longer points
+   at LocalSync (or reports nothing) - proving `postRemoveScript` actually
+   ran and the stale registration didn't linger.
+
+### What "success" looks like
+
+On Windows, the fallback page never contradicts what the person is
+actually looking at - it's either right the first time, or corrects
+itself the moment it learns better, and never confidently claims "not
+installed" when the app is open. On Linux, clicking a magic link does
+exactly what it already does on Windows and macOS: launches or focuses
+the app with the real code already in the Receive tab, no manual copy-paste
+required - and installing/removing the package is what actually turns
+that capability on and off, not a step someone has to discover and run
+by hand.
+
 ## Round 30 addendum: root-cause "snapshot payload has no docker-compose.yml"
 
 Round 30 root-caused a real Run-time crash from real cross-machine testing (Windows → Linux, Local network, 168MB payload, database wizard used successfully, failed on Run with `snapshot payload has no docker-compose.yml`) - and confirmed it as a genuine packaging/unpacking mismatch, not a project that actually lacked a compose file.
@@ -1479,9 +1665,14 @@ Round 30 root-caused a real Run-time crash from real cross-machine testing (Wind
   `wizard_send_flow_test.rs`, closes that gap: it drives the exact real
   path a click-through does (`share_snapshot_wizard` ->
   `receive_snapshot` -> `run_snapshot` -> `stop_session`) with one folder
-  and a real, minimal `docker-compose.yml` (nginx:alpine - fast, no slow
-  Maven/MySQL pull needed since this test's job is proving the file
-  survives packaging, not re-proving a real app build). Verified this
+  and a real, minimal `docker-compose.yml` (busybox's own httpd, not a
+  real app image - fast, no slow Maven/MySQL pull needed since this
+  test's job is proving the file survives packaging, not re-proving a
+  real app build; nginx:alpine was tried first and rejected for a real
+  reason - it doesn't tolerate this project's own sandbox policy,
+  `read_only` rootfs with only `/tmp` mounted writable, without its own
+  cache directories - confirmed by directly reproducing the exact
+  failure with plain `podman-compose` outside the test entirely). Verified this
   test actually has teeth: temporarily reverted the fix and confirmed the
   test fails with the *exact* reported error string, then restored the
   fix and confirmed it passes again.
@@ -1536,3 +1727,58 @@ about it, instead of a string that reads like something broke inside
 LocalSync itself. And the real, separate work of auto-generating a
 compose setup for an uncontainerized project is written down clearly
 enough to pick up later, not rediscovered from scratch.
+
+## Round 31 addendum: OAuth token exchange now needs a client secret too
+
+Real testing against a live, correctly-configured Desktop-app OAuth client
+found round 23's "PKCE means no client secret needed" claim wrong: Google's
+real token endpoint rejected the exchange outright with `400 Bad Request:
+invalid_request - client_secret is missing`. Investigated before fixing -
+confirmed against Google's own docs and multiple independent real-world
+reports of the identical error against Google specifically (not a fluke of
+one misconfigured client) - see `crates/ls-clouddrop/src/oauth.rs`'s own
+module doc comment and `docs/google-drive-setup.md` for the full
+explanation. `GOOGLE_OAUTH_CLIENT_SECRET` is now a second required
+environment variable alongside `GOOGLE_OAUTH_CLIENT_ID` - see this
+checklist's own round 23 addendum above, updated to mention both.
+
+### What's already confirmed, without needing real hardware
+
+- All 40 of `ls-clouddrop`'s existing tests still pass with the new
+  required `client_secret` field threaded through every `OAuthConfig`
+  construction site.
+- Two existing wiremock-backed tests - one for the authorization-code
+  exchange (`run_oauth_flow_completes_end_to_end_against_a_simulated_browser_redirect`),
+  one for the refresh exchange (`refresh_access_token_sends_expected_request_and_parses_response`) -
+  were strengthened with an explicit `client_secret=...` body assertion:
+  if the real request built by this code ever omitted it, the mock
+  wouldn't match and these tests would fail with a connection/response
+  error, not silently pass.
+- `cargo build --workspace` and `cargo test --workspace` both still pass
+  in full after this change - no other crate was touched.
+
+### What to check on real hardware
+
+1. **The actual failure this round fixes**: with only `GOOGLE_OAUTH_CLIENT_ID`
+   set (not the secret), confirm Settings → **Link Google account** fails
+   fast with a clear message naming `GOOGLE_OAUTH_CLIENT_SECRET`
+   specifically, rather than opening a browser toward a request Google
+   would reject anyway.
+2. **The real fix**: set both `GOOGLE_OAUTH_CLIENT_ID` and
+   `GOOGLE_OAUTH_CLIENT_SECRET` (see `docs/google-drive-setup.md`) and
+   confirm the full link flow this checklist's round 23 addendum already
+   describes now completes successfully against a real Desktop-app OAuth
+   client - the exact scenario that failed before this round's fix.
+3. **Refresh, specifically**: if you can wait for (or force) a stored
+   token to near its expiry, confirm `ensure_valid_access_token`'s real
+   refresh call against Google's live endpoint succeeds too, not just the
+   initial exchange - the fix applies to both, but only the initial
+   exchange was the one real testing actually hit first.
+
+### What "success" looks like
+
+Linking a Google account works end to end against a real Desktop-app OAuth
+client without any client-secret-related error - the exact failure this
+round exists to fix - and continues working across a real token refresh,
+not just the first exchange.
+

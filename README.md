@@ -87,12 +87,13 @@ cargo test --workspace
 
 Two sample projects (`sample-project/`, a Spring Boot + MySQL app, and `sample-project-node/`, an Express + PostgreSQL app) are included for trying out the full send/receive flow locally without needing a real project on hand.
 
-### Optional: enabling Cloud drop and code-signing
+### Optional: enabling Cloud drop, code-signing, and auto-update
 
 - Cloud drop (Google Drive) mode needs a Google OAuth Client ID you register yourself — see [`docs/google-drive-setup.md`](docs/google-drive-setup.md).
 - Producing signed, warning-free installers needs a real code-signing certificate (Windows) and Apple Developer Program enrollment (macOS) — see [`docs/code-signing.md`](docs/code-signing.md).
+- Shipping update-capable installers (so "Check for updates" can find something) needs a locally-generated signing key added as a repository secret — see [`docs/auto-update-signing.md`](docs/auto-update-signing.md).
 
-Neither is required to build or use the app — both are optional, and everything works without them beyond the warnings described above.
+None of these are required to build or use the app — all three are optional, and everything works without them beyond the warnings/limitations described in each doc.
 
 ## 🔒 Security model
 
@@ -103,7 +104,7 @@ Neither is required to build or use the app — both are optional, and everythin
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. If you're picking this up for the first time, `docs/` has setup guides for the pieces that need external credentials (Google Drive, code-signing), and `docs/round5-manual-test-checklist.md` has the accumulated manual-testing notes for the parts that need a real screen to verify.
+Issues and pull requests are welcome. If you're picking this up for the first time, `docs/` has setup guides for the pieces that need external credentials (Google Drive, code-signing, auto-update signing), and `docs/round5-manual-test-checklist.md` has the accumulated manual-testing notes for the parts that need a real screen to verify.
 
 ## 📄 License
 
