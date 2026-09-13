@@ -8,10 +8,38 @@
 //!   method, is no longer supported." The loopback IP redirect
 //!   (`http://127.0.0.1:<port>`) is the current recommended replacement for
 //!   desktop apps.
-//! - For a "Desktop app" OAuth client, the client secret is documented as
-//!   **optional** on the token exchange - PKCE (RFC 7636) is what makes a
-//!   client secret unnecessary for a public/installed-app client, so this
-//!   module never sends one; [`OAuthConfig`] has no secret field at all.
+//! - **Round 31 correction of a round-23 claim that turned out wrong in
+//!   real testing**: round 23's own comment here said the client secret was
+//!   documented as optional for a Desktop-app client's token exchange, and
+//!   that this module never sends one. A real, confirmed Desktop-app OAuth
+//!   client's token exchange actually failed against Google's real token
+//!   endpoint with `400 Bad Request: invalid_request - client_secret is
+//!   missing`. Re-investigated rather than just patched around: Google's
+//!   own generic "OAuth 2.0 for Native Apps" guide's parameter table really
+//!   does list `client_secret` as "Optional" for the token exchange step -
+//!   but real-world reports (Google's own developer forum, other OAuth
+//!   client implementations hitting the identical error against Google
+//!   specifically) consistently confirm the *actual* token endpoint
+//!   enforces it for a Desktop-type client once `access_type=offline` is
+//!   requested (i.e. asking for a `refresh_token`, which this module always
+//!   does - see below) - PKCE is not accepted as a substitute the way it is
+//!   for confidential-client-secret requirements with some other
+//!   providers. The generic doc's "optional" is real for a bare
+//!   access-token-only exchange; it doesn't hold for this module's actual
+//!   request shape. [`OAuthConfig`] now carries the secret and every
+//!   request to the token endpoint (both the initial exchange and a later
+//!   refresh - the same client authenticates on both, so both need it)
+//!   includes it.
+//! - Google's own position (confirmed in the same native-app guide) is that
+//!   this value is **not treated as confidential** for an installed/desktop
+//!   application - anyone can extract it from a distributed binary, the
+//!   same reasoning this project already applied to needing no client
+//!   secret at all before round 31's real-world correction. It's read from
+//!   the environment (`GOOGLE_OAUTH_CLIENT_SECRET`), never hardcoded, for
+//!   the same reason `GOOGLE_OAUTH_CLIENT_ID` already is - not because it's
+//!   being treated as a secret that must never appear in source, but for
+//!   consistency with how this project already handles per-deployment
+//!   OAuth client configuration.
 //! - `access_type=offline` on the authorization request is what's required
 //!   to get a `refresh_token` back at all (confirmed against Google's OIDC
 //!   docs). `prompt=consent` is added alongside it: without it, Google only
@@ -49,22 +77,30 @@ pub const CLOUD_DROP_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/drive.readonly",
 ];
 
-/// Configuration for the OAuth flow. Just a client ID - PKCE-based
-/// installed-app flows don't use a client secret (see module doc comment).
-/// The client ID itself comes from the environment, matching this
-/// project's existing convention for optional/deployment-specific config
-/// (e.g. `ls-net`'s `LOCALSYNC_TURN_URL`).
+/// Configuration for the OAuth flow. Both values come from the
+/// environment, matching this project's existing convention for
+/// optional/deployment-specific config (e.g. `ls-net`'s
+/// `LOCALSYNC_TURN_URL`) - see the module doc comment's round 31 note for
+/// why `client_secret` is required here despite this being a PKCE flow,
+/// and for why reading it from the environment rather than hardcoding it
+/// doesn't mean this project is treating it as a real secret.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
     pub client_id: String,
+    pub client_secret: String,
 }
 
 impl OAuthConfig {
-    /// Reads `GOOGLE_OAUTH_CLIENT_ID` from the environment.
+    /// Reads `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` from
+    /// the environment.
     pub fn from_env() -> Result<Self> {
         let client_id = std::env::var("GOOGLE_OAUTH_CLIENT_ID")
             .context("GOOGLE_OAUTH_CLIENT_ID is not set - Cloud drop needs a Google OAuth Desktop app client ID")?;
-        Ok(Self { client_id })
+        let client_secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").context(
+            "GOOGLE_OAUTH_CLIENT_SECRET is not set - Google's token endpoint rejects this app's \
+             Desktop-app OAuth client without it, even with PKCE (see docs/google-drive-setup.md)",
+        )?;
+        Ok(Self { client_id, client_secret })
     }
 }
 
@@ -329,6 +365,10 @@ where
             ("code", code.as_str()),
             ("redirect_uri", redirect_uri.as_str()),
             ("client_id", config.client_id.as_str()),
+            // Round 31: Google's real token endpoint rejects this exact
+            // request shape (Desktop-app client + access_type=offline)
+            // without it - see the module doc comment for the full story.
+            ("client_secret", config.client_secret.as_str()),
             ("code_verifier", pkce.verifier.as_str()),
         ])
         .send()
@@ -359,6 +399,12 @@ async fn refresh_access_token_with(
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("client_id", config.client_id.as_str()),
+            // Round 31: same client authenticating to the same endpoint as
+            // the authorization_code exchange above - if Google requires
+            // the secret there, there's no reason to expect a refresh to be
+            // exempt, and nothing in Google's docs suggests grant type
+            // changes this client's own authentication requirement.
+            ("client_secret", config.client_secret.as_str()),
         ])
         .send()
         .await
@@ -436,7 +482,10 @@ mod tests {
 
     #[test]
     fn auth_url_has_all_required_query_params() {
-        let config = OAuthConfig { client_id: "test-client-id.apps.googleusercontent.com".into() };
+        let config = OAuthConfig {
+            client_id: "test-client-id.apps.googleusercontent.com".into(),
+            client_secret: "test-client-secret".into(),
+        };
         let endpoints = Endpoints::default();
         let url_str = build_auth_url(
             &endpoints,
@@ -493,6 +542,12 @@ mod tests {
             .and(body_string_contains("grant_type=refresh_token"))
             .and(body_string_contains("refresh_token=my-refresh-token"))
             .and(body_string_contains("client_id=my-client-id"))
+            // Round 31: if this were ever missing, wiremock would reject the
+            // real request as unmatched and this test would fail with a
+            // connection/response error, not silently pass - see
+            // `client_secret_is_present_on_both_grant_types` below for a
+            // test dedicated to exactly this, on both grant types.
+            .and(body_string_contains("client_secret=my-client-secret"))
             .respond_with(ResponseTemplate::new(200).set_body_json(google_token_success_body("fresh-access-token", false)))
             .mount(&server)
             .await;
@@ -502,7 +557,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let config = OAuthConfig { client_id: "my-client-id".into() };
+        let config = OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() };
         let endpoints = Endpoints {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: format!("{}/token", server.uri()),
@@ -528,7 +583,7 @@ mod tests {
             ResponseTemplate::new(200).set_body_json(google_userinfo_body("user@example.com")),
         ).mount(&server).await;
 
-        let config = OAuthConfig { client_id: "my-client-id".into() };
+        let config = OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() };
         let endpoints = Endpoints {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: format!("{}/token", server.uri()),
@@ -550,7 +605,7 @@ mod tests {
             })),
         ).mount(&server).await;
 
-        let config = OAuthConfig { client_id: "my-client-id".into() };
+        let config = OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() };
         let endpoints = Endpoints {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: format!("{}/token", server.uri()),
@@ -575,7 +630,7 @@ mod tests {
             })),
         ).mount(&server).await;
 
-        let config = OAuthConfig { client_id: "my-client-id".into() };
+        let config = OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() };
         let endpoints = Endpoints {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: format!("{}/token", server.uri()),
@@ -608,7 +663,7 @@ mod tests {
             token_url: "http://127.0.0.1:1".to_string(),
             userinfo_url: "http://127.0.0.1:1".to_string(),
         };
-        let config = OAuthConfig { client_id: "my-client-id".into() };
+        let config = OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() };
         let token = ensure_valid_access_token_in(&config, &endpoints, dir.path()).await.unwrap();
         assert_eq!(token, "still-good");
     }
@@ -638,7 +693,7 @@ mod tests {
             token_url: format!("{}/token", server.uri()),
             userinfo_url: format!("{}/userinfo", server.uri()),
         };
-        let config = OAuthConfig { client_id: "my-client-id".into() };
+        let config = OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() };
         let token = ensure_valid_access_token_in(&config, &endpoints, dir.path()).await.unwrap();
         assert_eq!(token, "refreshed-access-token");
 
@@ -651,14 +706,23 @@ mod tests {
     #[tokio::test]
     async fn run_oauth_flow_completes_end_to_end_against_a_simulated_browser_redirect() {
         let server = MockServer::start().await;
-        Mock::given(method("POST")).and(path("/token")).and(body_string_contains("grant_type=authorization_code")).respond_with(
-            ResponseTemplate::new(200).set_body_json(google_token_success_body("brand-new-access-token", true)),
-        ).mount(&server).await;
+        // Round 31: `body_string_contains("client_secret=my-client-secret")`
+        // here is what actually proves this - if the real request built by
+        // `run_oauth_flow_with` omitted it, wiremock would treat this
+        // request as unmatched and the flow below would fail with a
+        // connection/response error rather than the success this test
+        // asserts on.
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("grant_type=authorization_code"))
+            .and(body_string_contains("client_secret=my-client-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(google_token_success_body("brand-new-access-token", true)))
+            .mount(&server).await;
         Mock::given(method("GET")).and(path("/userinfo")).respond_with(
             ResponseTemplate::new(200).set_body_json(google_userinfo_body("someone@gmail.com")),
         ).mount(&server).await;
 
-        let config = OAuthConfig { client_id: "my-client-id".into() };
+        let config = OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() };
         let endpoints = Endpoints {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: format!("{}/token", server.uri()),
