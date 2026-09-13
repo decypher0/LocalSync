@@ -66,7 +66,7 @@ function detectOS(userAgent) {
 
 /**
  * Given GitHub's own `release.assets` array (from
- * GET /repos/{owner}/{repo}/releases/latest) and a detected OS, returns the
+ * GET /repos/{owner}/{repo}/releases/tags/latest) and a detected OS, returns the
  * matching download(s) as `{ label, url }` — an empty array if this
  * release genuinely has nothing for that OS (e.g. a build that failed for
  * one platform; better to show nothing than a wrong link). Linux
@@ -166,7 +166,20 @@ function init() {
       "Best guess from your browser — it isn't always right (this page always shows every option below regardless).";
 
     try {
-      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`, {
+      // Round 26: not `/releases/latest` - that's GitHub's own *computed*
+      // alias for "the most recent non-prerelease, non-draft release",
+      // confirmed against GitHub's REST API docs to structurally exclude
+      // prereleases with no way to override it (even the API's own
+      // `make_latest` field explicitly can't set a prerelease as latest).
+      // Every release this project's CI produces via workflow_dispatch is
+      // deliberately marked prerelease (see release.yml), so that alias
+      // 404s even when a real release with real assets exists - this was
+      // the actual root cause of the "GitHub API returned 404" this page
+      // used to show. `/releases/tags/latest` looks up the fixed, literal
+      // tag named "latest" that release.yml now publishes/updates on every
+      // run specifically for this purpose - confirmed via GitHub's own
+      // docs to have no prerelease-exclusion behavior at all.
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/latest`, {
         headers: { Accept: "application/vnd.github+json" },
       });
       if (!res.ok) {
@@ -202,7 +215,7 @@ function init() {
         "). You can browse releases directly instead.";
       const a = document.createElement("a");
       a.className = "download-btn";
-      a.href = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
+      a.href = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tag/latest`;
       a.textContent = "Open the Releases page";
       downloadsEl.appendChild(a);
     }

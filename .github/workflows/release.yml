@@ -597,3 +597,58 @@ jobs:
           # distinguished from a real `vX.Y.Z` tag push on the Releases
           # page, without needing two different release-creation steps.
           prerelease: ${{ github.ref_type != 'tag' }}
+
+      - name: Publish/update the rolling "latest" release
+        # Round 26: root-caused two separate consumer failures (the
+        # magic-link fallback page's "GitHub API returned 404" and the
+        # app's own "could not fetch a valid release JSON") to the same
+        # mechanism - confirmed against GitHub's own REST API docs, not
+        # assumed: `/releases/latest` (and the `.../releases/latest/
+        # download/...` alias tauri.conf.json's updater endpoint used) is
+        # GitHub's *computed* pointer to "the most recent non-prerelease,
+        # non-draft release" - it structurally excludes prereleases, full
+        # stop (confirmed: even the Releases API's own `make_latest` field
+        # cannot override this - "Drafts and prereleases cannot be set as
+        # latest"). Every release this workflow has ever produced via
+        # workflow_dispatch is deliberately marked prerelease by the step
+        # above, and this repo has never had a real `vX.Y.Z` tag push - so
+        # a real Release with real assets has existed the whole time (this
+        # round confirmed that directly via the API), but that alias has
+        # never once resolved to it. This was never "no Release object
+        # exists" (the original hypothesis) - it's an alias that can't see
+        # the only kind of release this project has actually produced.
+        #
+        # Fix: publish the exact same assets a second time under a fixed,
+        # literal tag named "latest" - not GitHub's dynamic alias, a real
+        # tag this action creates the first time and updates in place on
+        # every subsequent run (confirmed via softprops/action-gh-release's
+        # own docs: "If a tag already has a GitHub release, the existing
+        # release will be updated with the release assets", default
+        # `overwrite_files: true`). Both consumers now address this fixed
+        # tag directly instead of the dynamic alias - `releases/download/
+        # latest/...` (tauri.conf.json) and `releases/tags/latest`
+        # (web/app.js's API call) - confirmed against GitHub's docs that
+        # neither has any prerelease-exclusion behavior at all; they just
+        # look up that one exact tag, published or not.
+        #
+        # `make_latest: false` keeps this fixed tag decoupled from GitHub's
+        # own "Latest" badge on the human-facing Releases page - that badge
+        # should keep meaning "the most recent real release" (or nothing,
+        # until one exists), not get hijacked by every dev-snapshot run
+        # this produces just because this tag happens to update often.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "LocalSync (latest build)"
+          body: >-
+            Automatically updated on every Release workflow run - always
+            points at whichever build is actually newest, tagged release or
+            dev snapshot alike. See the versioned release above for real
+            release notes; this one exists only so the in-app updater and
+            the magic-link fallback page always have a stable, resolvable
+            URL to fetch from (GitHub's own "latest release" alias
+            explicitly excludes prereleases, which this project's
+            dev-snapshot builds always are).
+          files: dist/*
+          prerelease: false
+          make_latest: false

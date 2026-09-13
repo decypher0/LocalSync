@@ -1329,3 +1329,71 @@ real page that tells them what to download for their machine and holds
 onto their code until they're ready to paste it in. Neither path needed
 a backend, a database, or a hardcoded download URL that would go stale
 the next time a release ships.
+
+---
+
+## Round 26 addendum: real release publishing (magic-link + auto-update both depend on it)
+
+Two apparently separate bugs — the magic-link page's "GitHub API returned
+404" and the app's own "could not fetch a valid release JSON" — turned out
+to share a root cause investigated and confirmed directly against this
+repo's real GitHub state (via the public REST API), not assumed: this
+project's only real Release existed with real assets, but GitHub's
+`/releases/latest` alias structurally excludes prereleases, and every
+release this workflow has ever produced via `workflow_dispatch` is
+deliberately marked prerelease. The fix publishes a second, fixed `latest`
+tag on every run that both consumers now address directly, sidestepping
+that alias entirely — confirmed against GitHub's own REST API docs (not
+guessed) that a tag-based lookup has no such exclusion. Separately, no
+`latest.json` had ever been generated at all, because `TAURI_SIGNING_PRIVATE_KEY`
+has never been added as a repository secret — a real, independent gap,
+not fixed by the tag change above, and not fixable without the
+maintainer's own action (see `docs/auto-update-signing.md`, new this
+round).
+
+### What's already confirmed, without needing to trigger anything
+
+- The repo's real Releases were queried directly (`GET /repos/decypher0/LocalSync/releases`
+  and `/releases/latest`) - confirmed the 404 and confirmed a real,
+  non-draft release with real installer assets already existed, just
+  marked `prerelease: true`, before writing any fix.
+- `pickInstallerAssets`/`parseCode`/`detectOS`/`buildSchemeUrl` (the
+  fallback page's pure logic) are unchanged and all 24 of their existing
+  tests still pass - only the URL the page fetches from changed.
+- The new `release.yml` step's YAML structure and the exact `make_latest`/
+  tag-lookup semantics it relies on were confirmed against GitHub's own
+  REST API documentation before being written, not assumed from memory.
+
+### What to check once you actually trigger the release workflow
+
+1. **Run the Release workflow** (Actions tab → Run workflow, or push a
+   `v*` tag). Confirm the new "Publish/update the rolling 'latest' release"
+   step succeeds, and that a release tagged exactly `latest` now exists on
+   the Releases page (separate from the versioned one) with the same
+   installer assets attached.
+2. **Confirm the alias fix, for real**: `curl -s https://api.github.com/repos/decypher0/LocalSync/releases/tags/latest`
+   should return a real release object (not 404) even though it's a
+   `workflow_dispatch` run. `curl -sI https://github.com/decypher0/LocalSync/releases/download/latest/<some-asset-name>`
+   should redirect to a real download, not 404.
+3. **The magic-link page, for real**: open `https://decypher0.github.io/LocalSync/?code=test`
+   (after re-deploying `web/`, if it hasn't picked up this round's `app.js`
+   change yet) with LocalSync not installed, and confirm real OS-specific
+   download links render instead of the "couldn't reach GitHub" fallback
+   message.
+4. **Auto-update, only after adding `TAURI_SIGNING_PRIVATE_KEY`** (see
+   `docs/auto-update-signing.md` for exactly how): re-run the release
+   workflow, confirm the "Generate latest.json" step now prints
+   `generated=true`, and confirm `curl -s https://api.github.com/repos/decypher0/LocalSync/releases/tags/latest | jq '.assets[].name'`
+   lists `latest.json`. Install an older build on real hardware and confirm
+   Settings → **Check for updates** now reports a real update rather than
+   an error - the actual install-and-restart click-through is still the
+   same real-hardware-only gap round 16's own scope note already
+   documented, unchanged by this round.
+
+### What "success" looks like
+
+Both consumers resolve a real, current release without needing anyone to
+have ever pushed a real `vX.Y.Z` tag - a plain `workflow_dispatch` dev
+build is enough for the magic-link page and (once the signing secret
+exists) the in-app updater to both find real data, every single run, not
+just the lucky first time someone tags a release.
