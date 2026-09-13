@@ -115,6 +115,10 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Round 23: opens the system browser for the Google OAuth consent
+        // screen (commands::link_google_account) - registration only, the
+        // command itself is the only caller.
+        .plugin(tauri_plugin_opener::init())
         // Round 16: real auto-update. Config (pubkey, endpoints) lives in
         // tauri.conf.json - this just registers the plugin's commands
         // (check/download/install) for app.js to call. Never installs
@@ -126,6 +130,15 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .manage(state)
         .setup(move |app| {
+            // Round 23: enforce any Cloud-drop retention that's come due
+            // since LocalSync last ran. Fire-and-forget, same "check when
+            // convenient, no background scheduler" convention as everything
+            // else in this app - see commands::cleanup_expired_cloud_drops's
+            // doc comment. A no-op (returns immediately) if no Google
+            // account is linked, so this costs nothing for anyone not using
+            // Cloud drop.
+            tauri::async_runtime::spawn(commands::cleanup_expired_cloud_drops());
+
             let firewall_msg = ufw_warning();
             if let Some(msg) = &firewall_msg {
                 log::warn!("startup: {msg}");
@@ -168,6 +181,12 @@ fn main() {
             commands::list_db_tables,
             commands::export_db_tables,
             commands::share_snapshot_wizard,
+            commands::link_google_account,
+            commands::google_account_status,
+            commands::unlink_google_account,
+            commands::start_cloud_drop_session,
+            commands::respond_to_cloud_access_request,
+            commands::request_cloud_drop_access,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");
