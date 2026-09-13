@@ -172,6 +172,29 @@ pub enum ControlMessage {
     /// receiver's control-channel listener knows to call `receive_payload`
     /// next rather than keep waiting on this channel.
     IncomingUpdate,
+    /// Round 23 (Cloud drop transport): receiver -> sender, "I have this
+    /// Google account, please grant it access to what you uploaded." Carries
+    /// only an email address - an identity announcement, not a payload
+    /// channel, same class of message `PullRequest` already established.
+    /// The sender's own Cloud-drop upload (which Drive file this refers to)
+    /// is looked up server-side by the connection's own room/peer id, never
+    /// sent by the receiver - a request can only ever *name who's asking*,
+    /// never *what they should receive*.
+    CloudAccessRequest { google_email: String },
+    /// Sender -> receiver, only ever sent in reply to a `CloudAccessRequest`.
+    /// `accepted: true` means the sender has already called the Drive API to
+    /// grant that account real read access - by the time this arrives, the
+    /// permission is live, not merely promised. `drive_file_id` is `Some`
+    /// exactly when `accepted` is `true` - the receiver has no other way to
+    /// learn which Drive file to download (they never had it, and `drive.file`
+    /// scope means they can't discover it by listing/searching their own
+    /// Drive either - see `docs/google-drive-setup.md`).
+    CloudAccessResponse { accepted: bool, drive_file_id: Option<String> },
+    /// Receiver -> sender, sent once the receiver has successfully
+    /// downloaded the file from Drive. Purely a signal (no payload, same
+    /// shape as `PullRequest`) - lets the sender apply "delete immediately
+    /// after a confirmed download" retention without polling Drive.
+    CloudDownloadConfirmed,
 }
 
 /// Sends one [`ControlMessage`] on `conn`'s control channel. Independent of

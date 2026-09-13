@@ -185,6 +185,41 @@ listen("pull-request", (evt) => {
   $("pull-requests").appendChild(div);
 });
 
+// ---------- round 23: cloud-access requests (sender-side: a receiver asked
+// to be granted Drive access) - same rendering/dedup pattern as the
+// pull-request banner above, reusing the same container since both are
+// "an incoming request from a connected peer, shown until acted on". ----------
+listen("cloud-access-request", (evt) => {
+  const { peer_id: peerId, google_email: googleEmail } = evt.payload;
+  const existing = [...$("pull-requests").children].find((el) => el.dataset.peer === peerId);
+  if (existing) return;
+  const div = document.createElement("div");
+  div.dataset.peer = peerId;
+  div.className = "peer-banner";
+  div.innerHTML = `
+    <span>Cloud drop access request from <strong>${escapeHtml(googleEmail)}</strong></span>
+    <span class="inline-row">
+      <button class="ghost-btn accept-btn" type="button">Grant access</button>
+      <button class="ghost-btn decline-btn" type="button">Decline</button>
+    </span>
+    <p class="error"></p>
+  `;
+  const errorEl = div.querySelector(".error");
+  const respond = async (accept) => {
+    div.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try {
+      await invoke("respond_to_cloud_access_request", { peerId, accept });
+      div.remove();
+    } catch (err) {
+      errorEl.textContent = String(err);
+      div.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    }
+  };
+  div.querySelector(".accept-btn").addEventListener("click", () => respond(true));
+  div.querySelector(".decline-btn").addEventListener("click", () => respond(false));
+  $("pull-requests").appendChild(div);
+});
+
 // ---------- snapshot updated (receiver-side: sender pushed a fresh snapshot) ----------
 // Same payload shape receive_snapshot resolves with, so this reuses
 // renderReview verbatim - a pushed update goes through the exact same
@@ -242,6 +277,46 @@ applyTheme(savedTheme);
     localStorage.setItem(THEME_KEY, choice);
     applyTheme(choice);
   });
+});
+
+// ---------- round 23: linked Google account (Cloud drop) ----------
+async function refreshGoogleAccountStatus() {
+  try {
+    const linked = await invoke("google_account_status");
+    $("google-account-status").textContent = linked ? `Linked as ${linked.email}` : "Not linked.";
+    $("unlink-google-btn").classList.toggle("hidden", !linked);
+  } catch (err) {
+    $("google-account-status").textContent = String(err);
+  }
+}
+refreshGoogleAccountStatus();
+
+$("link-google-btn").addEventListener("click", async () => {
+  $("google-account-error").textContent = "";
+  $("link-google-btn").disabled = true;
+  $("google-account-status").textContent = "Opening your browser for Google sign-in…";
+  try {
+    // Blocks until the browser redirect completes (or times out) - see
+    // commands::link_google_account. The system browser opens itself; there's
+    // nothing further to do here until this resolves.
+    await invoke("link_google_account");
+    await refreshGoogleAccountStatus();
+  } catch (err) {
+    $("google-account-error").textContent = String(err);
+    await refreshGoogleAccountStatus();
+  } finally {
+    $("link-google-btn").disabled = false;
+  }
+});
+
+$("unlink-google-btn").addEventListener("click", async () => {
+  $("google-account-error").textContent = "";
+  try {
+    await invoke("unlink_google_account");
+    await refreshGoogleAccountStatus();
+  } catch (err) {
+    $("google-account-error").textContent = String(err);
+  }
 });
 
 // ---------- relay mode (persisted in localStorage — set once, survives restarts) ----------
@@ -1052,6 +1127,34 @@ function resetSendWizard() {
   $("wiz-send-error").textContent = "";
 }
 
+// ---------- round 23: Cloud drop toggle + retention picker (Send tab) ----------
+$("cloud-drop-toggle").addEventListener("change", () => {
+  $("cloud-drop-options").classList.toggle("hidden", !$("cloud-drop-toggle").checked);
+});
+$("retention-custom").addEventListener("change", () => {
+  $("retention-custom-wrap").classList.toggle("hidden", !$("retention-custom").checked);
+});
+document.querySelectorAll('input[name="cloud-retention"]').forEach((r) =>
+  r.addEventListener("change", () => $("retention-custom-wrap").classList.toggle("hidden", r.value !== "custom" || !r.checked))
+);
+
+/// Builds the `RetentionChoiceDto` `start_cloud_drop_session` expects.
+/// 24h and custom both collapse to `After { after_rfc3339 }` — they're the
+/// same case on the Rust side (see `ls_clouddrop::retention::Retention`'s
+/// doc comment), just different ways of picking the instant.
+function retentionChoiceDto() {
+  if ($("retention-24h").checked) {
+    const at = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    return { kind: "after", afterRfc3339: at.toISOString() };
+  }
+  if ($("retention-custom").checked) {
+    const raw = $("retention-custom-datetime").value;
+    if (!raw) throw new Error("Pick a date/time for the custom retention option.");
+    return { kind: "after", afterRfc3339: new Date(raw).toISOString() };
+  }
+  return { kind: "deleteAfterDownload" };
+}
+
 $("send-btn").addEventListener("click", async () => {
   $("send-error").textContent = "";
   $("wiz-send-error").textContent = "";
@@ -1076,6 +1179,46 @@ $("send-btn").addEventListener("click", async () => {
   }
 
   $("send-btn").disabled = true;
+
+  // Round 23: Cloud drop bundles+uploads a single project (see
+  // commands::start_cloud_drop_session's doc comment on why only
+  // wizardFolders[0] - same documented boundary push_update/pull-requests
+  // already have for a wizard-originated send) and hosts the same kind of
+  // room code, but never opens a bulk-transfer channel - the "Send" click
+  // just waits for a receiver to request access, exactly like the
+  // room-code-then-wait UX below already shows.
+  if ($("cloud-drop-toggle").checked) {
+    try {
+      const retention = retentionChoiceDto();
+      const info = await invoke("start_cloud_drop_session", {
+        mode,
+        relayUrl: mode === "remote" ? url : null,
+        projectPath: wizardFolders[0].path,
+        retention,
+      });
+      // Round 20 goal 4: same reason the non-Cloud-drop path below closes
+      // the modal on success - the room code renders on the main Send tab
+      // page, behind the modal's backdrop, and would be invisible if the
+      // wizard stayed open. The code is a real, paste-able room code here
+      // too (request_cloud_drop_access decodes it exactly like a normal
+      // receive), so round 24's Copy code/Copy link buttons work on it the
+      // same way - currentRoomCode is what they read from.
+      closeSendWizard();
+      currentRoomCode = info.room_code;
+      $("send-room-code-display").textContent = info.room_code;
+      $("copy-status").textContent = "";
+      $("send-code-wrap").classList.remove("hidden");
+      startCodeExpiryCountdown(info.code_expires_in_seconds);
+      $("send-result").textContent = `Uploaded to Drive as ${info.file_id}. Waiting for the receiver to request access…`;
+      resetSendWizard();
+    } catch (err) {
+      $("send-error").textContent = String(err);
+      $("wiz-send-error").textContent = String(err);
+    } finally {
+      $("send-btn").disabled = false;
+    }
+    return;
+  }
 
   try {
     // "local": hosts an embedded relay + derives a LAN-IP-encoded room code
@@ -1208,6 +1351,10 @@ let currentSnapshotId = null;
 let currentSenderPubkeyHex = null;
 let currentSessionId = null;
 
+$("cloud-drop-receive-toggle").addEventListener("change", () => {
+  $("cloud-drop-receive-hint").classList.toggle("hidden", !$("cloud-drop-receive-toggle").checked);
+});
+
 $("receive-btn").addEventListener("click", async () => {
   const roomCode = $("receive-room-code").value.trim();
   $("receive-error").textContent = "";
@@ -1220,6 +1367,27 @@ $("receive-btn").addEventListener("click", async () => {
   const url = relayUrl();
   if (mode === "remote" && !url) {
     $("receive-error").textContent = "Remote relay URL is required in Settings for Remote relay mode.";
+    return;
+  }
+
+  // Round 23: waits for the sender's Accept/Reject over the control
+  // channel, then downloads straight from Drive - no `receive-progress`
+  // events fire for this path (there's no P2P bulk transfer to report
+  // progress on), so this skips straight to renderReview on success.
+  if ($("cloud-drop-receive-toggle").checked) {
+    $("receive-btn").disabled = true;
+    try {
+      const outcome = await invoke("request_cloud_drop_access", { mode, code: roomCode, relayUrl: mode === "remote" ? url : null });
+      if (!outcome.accepted) {
+        $("receive-error").textContent = "The sender declined this request.";
+      } else {
+        renderReview(outcome.info);
+      }
+    } catch (err) {
+      $("receive-error").textContent = String(err);
+    } finally {
+      $("receive-btn").disabled = false;
+    }
     return;
   }
 

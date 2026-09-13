@@ -1044,3 +1044,383 @@ pub async fn stop_session(state: State<'_, AppState>, session_id: String) -> Res
 
     ls_containers::stop_session(&session).await.map_err(|e| e.to_string())
 }
+
+// ---------- round 23: Cloud drop transport (Google Drive) ----------
+//
+// A third connectivity mode alongside Local network (round 8) and Remote
+// relay (round 10): the bulk payload travels over the sender's and
+// receiver's own Google Drive (`ls_clouddrop::drive`) instead of a P2P data
+// channel. `ls_net`'s signaling/relay machinery is still reused, but only
+// for its *control* channel — the identity-request/response handshake below
+// — never for the payload itself. Everything past a successful download
+// (`finalize_received_snapshot`, the review/consent/Run gate) is the exact
+// same, unmodified pipeline every other transport already uses.
+
+#[derive(Clone, Serialize)]
+pub struct LinkedAccountInfo {
+    pub email: String,
+}
+
+fn cloud_drop_config() -> Result<ls_clouddrop::oauth::OAuthConfig, String> {
+    ls_clouddrop::oauth::OAuthConfig::from_env().map_err(|e| e.to_string())
+}
+
+/// Opens the system browser to Google's real consent screen and blocks until
+/// the user finishes (or cancels) sign-in. Requires `GOOGLE_OAUTH_CLIENT_ID`
+/// to be set — see `docs/google-drive-setup.md`; without it this fails
+/// immediately with a message pointing there, rather than trying to build a
+/// request Google would just reject.
+#[tauri::command]
+pub async fn link_google_account<R: tauri::Runtime>(app: AppHandle<R>) -> Result<LinkedAccountInfo, String> {
+    let config = cloud_drop_config()?;
+    let opener = app.clone();
+    let tokens = ls_clouddrop::oauth::run_oauth_flow(&config, ls_clouddrop::oauth::CLOUD_DROP_SCOPES, move |url| {
+        use tauri_plugin_opener::OpenerExt;
+        if let Err(e) = opener.opener().open_url(url, None::<&str>) {
+            log::warn!("link_google_account: could not open the system browser automatically: {e}");
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let email = tokens.email.clone();
+    ls_clouddrop::store::save_tokens(&tokens).map_err(|e| e.to_string())?;
+    log::info!("link_google_account: linked {email}");
+    Ok(LinkedAccountInfo { email })
+}
+
+/// `None` if no account is linked yet — Settings shows a "Link Google
+/// account" action either way, this just decides whether to also show whose
+/// account it already is.
+#[tauri::command]
+pub fn google_account_status() -> Result<Option<LinkedAccountInfo>, String> {
+    Ok(ls_clouddrop::store::load_tokens()
+        .map_err(|e| e.to_string())?
+        .map(|t| LinkedAccountInfo { email: t.email }))
+}
+
+#[tauri::command]
+pub fn unlink_google_account() -> Result<(), String> {
+    ls_clouddrop::store::clear_tokens().map_err(|e| e.to_string())
+}
+
+/// Mirrors `ls_clouddrop::retention::Retention` at the IPC boundary — kept
+/// separate so that crate has no reason to know this app's serde/IPC
+/// conventions (same split `ConnectionDetailsDto` uses for `ls_dbsource`).
+/// The frontend computes the concrete instant for both the "24h" and
+/// "custom date/time" choices (they're the same case here — see
+/// `Retention::After`'s own doc comment) and sends it as `after_rfc3339`.
+// `rename_all = "camelCase"` (not `snake_case`) so this behaves the same as
+// every other IPC-facing type in this file regardless of exactly how far
+// Tauri's own camelCase<->snake_case argument conversion reaches - explicit
+// here rather than relying on it, since this struct is new and untested
+// against a real invoke() call.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RetentionChoiceDto {
+    DeleteAfterDownload,
+    After { after_rfc3339: String },
+}
+
+impl RetentionChoiceDto {
+    fn into_retention(self) -> Result<ls_clouddrop::retention::Retention, String> {
+        match self {
+            RetentionChoiceDto::DeleteAfterDownload => Ok(ls_clouddrop::retention::Retention::DeleteAfterDownload),
+            RetentionChoiceDto::After { after_rfc3339 } => {
+                let at = time::OffsetDateTime::parse(&after_rfc3339, &time::format_description::well_known::Rfc3339)
+                    .map_err(|e| format!("invalid retention date {after_rfc3339:?}: {e}"))?;
+                Ok(ls_clouddrop::retention::Retention::After(at))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct CloudDropSessionInfo {
+    pub room_code: String,
+    pub room_id: String,
+    pub signaling_url: String,
+    pub code_expires_in_seconds: u64,
+    pub file_id: String,
+}
+
+/// Sender side: bundles `project_path` exactly like `share_snapshot` does,
+/// uploads it to the sender's own Drive (never grants anyone access yet),
+/// then hosts the same kind of signaling room `start_send_session` does —
+/// not to carry the payload (Drive already has it), only so a receiver who
+/// pastes `room_code` can reach this sender's control channel to ask for
+/// access. Blocks until that receiver connects, same as `share_snapshot`'s
+/// `connect_as_sender` call.
+#[tauri::command]
+pub async fn start_cloud_drop_session<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    mode: String,
+    relay_url: Option<String>,
+    project_path: String,
+    retention: RetentionChoiceDto,
+) -> Result<CloudDropSessionInfo, String> {
+    let retention = retention.into_retention()?;
+    let config = cloud_drop_config()?;
+    let access_token = ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map_err(|e| e.to_string())?;
+
+    log::info!("start_cloud_drop_session: bundling project_path={project_path}");
+    let root = PathBuf::from(&project_path);
+    let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot(&root, None))
+        .await
+        .map_err(|e| format!("snapshot task panicked: {e}"))?
+        .map_err(|e| e.to_string())?;
+    let filename = format!("{}@{}.localsync-snapshot", snapshot.manifest.project_name, snapshot.manifest.git_commit);
+    let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+
+    log::info!("start_cloud_drop_session: uploading {filename} ({} bytes) to Drive", bytes.len());
+    let folder_id = ls_clouddrop::drive::get_or_create_app_folder(&access_token).await.map_err(|e| e.to_string())?;
+    let uploaded = ls_clouddrop::drive::upload_file(&access_token, &folder_id, &filename, &bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ls_clouddrop::retention::add_tracked_upload(ls_clouddrop::retention::TrackedUpload {
+        file_id: uploaded.file_id.clone(),
+        retention,
+        downloaded: false,
+        uploaded_at: time::OffsetDateTime::now_utc(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let send_info = start_send_session(mode, relay_url).await?;
+    log::info!("start_cloud_drop_session: waiting for a receiver on room={}", send_info.room_code);
+    let conn = ls_net::connect_as_sender(&send_info.signaling_url, &send_info.room_code)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    state.cloud_drop_uploads.lock().map_err(|e| e.to_string())?.insert(
+        send_info.room_code.clone(),
+        crate::state::CloudDropUpload { conn: std::sync::Arc::new(conn), file_id: uploaded.file_id.clone(), retention },
+    );
+    tauri::async_runtime::spawn(listen_for_cloud_access_requests(app, send_info.room_code.clone()));
+
+    Ok(CloudDropSessionInfo {
+        room_code: send_info.room_code,
+        room_id: send_info.room_id,
+        signaling_url: send_info.signaling_url,
+        code_expires_in_seconds: send_info.code_expires_in_seconds,
+        file_id: uploaded.file_id,
+    })
+}
+
+#[derive(Clone, Serialize)]
+pub struct CloudAccessRequestNotice {
+    pub peer_id: String,
+    pub google_email: String,
+}
+
+/// Background task (one per Cloud-drop upload, mirrors `listen_for_pull_requests`):
+/// waits for the receiver's `CloudAccessRequest` and surfaces it to the
+/// frontend as a `cloud-access-request` event. The email is stashed in
+/// `state.cloud_access_requests` — it has nowhere else to live between now
+/// and `respond_to_cloud_access_request` actually needing it to grant access.
+async fn listen_for_cloud_access_requests<R: tauri::Runtime>(app: AppHandle<R>, peer_id: String) {
+    loop {
+        let conn = {
+            let state = app.state::<AppState>();
+            let Ok(uploads) = state.cloud_drop_uploads.lock() else { return };
+            let Some(entry) = uploads.get(&peer_id) else { return };
+            entry.conn.clone()
+        };
+
+        match ls_net::recv_control(&conn).await {
+            Ok(ls_net::ControlMessage::CloudAccessRequest { google_email }) => {
+                log::info!("start_cloud_drop_session: access request from peer_id={peer_id} email={google_email}");
+                let state = app.state::<AppState>();
+                if let Ok(mut pending) = state.cloud_access_requests.lock() {
+                    pending.insert(peer_id.clone(), google_email.clone());
+                }
+                let _ = app.emit("cloud-access-request", CloudAccessRequestNotice { peer_id: peer_id.clone(), google_email });
+            }
+            Ok(ls_net::ControlMessage::CloudDownloadConfirmed) => {
+                // Flips `DeleteAfterDownload` uploads due (see
+                // `ls_clouddrop::retention::due_for_deletion`) - actual
+                // deletion still only happens via `cleanup_expired_cloud_drops`
+                // at next startup, not from inside this listener.
+                let state = app.state::<AppState>();
+                let file_id = state.cloud_drop_uploads.lock().ok().and_then(|u| u.get(&peer_id).map(|e| e.file_id.clone()));
+                if let Some(file_id) = file_id {
+                    log::info!("start_cloud_drop_session: receiver confirmed download of {file_id}");
+                    if let Err(e) = ls_clouddrop::retention::mark_downloaded(&file_id) {
+                        log::warn!("start_cloud_drop_session: could not mark {file_id} downloaded: {e:#}");
+                    }
+                }
+            }
+            Ok(other) => {
+                log::warn!("start_cloud_drop_session: unexpected control message from receiver: {other:?}");
+            }
+            Err(e) => {
+                log::info!("start_cloud_drop_session: control channel for peer_id={peer_id} ended: {e:#}");
+                return;
+            }
+        }
+    }
+}
+
+/// The sender's response to a `cloud-access-request` event. Accepting is the
+/// only path in this whole round that calls `grant_reader_access` — a real,
+/// targeted (`type: "user"`, one specific email) Drive permission grant, not
+/// a promise. Declining sends `CloudAccessResponse { accepted: false, .. }`
+/// and grants nothing at all.
+#[tauri::command]
+pub async fn respond_to_cloud_access_request(
+    state: State<'_, AppState>,
+    peer_id: String,
+    accept: bool,
+) -> Result<(), String> {
+    let google_email = state
+        .cloud_access_requests
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&peer_id)
+        .ok_or_else(|| format!("no pending cloud-access request from peer_id={peer_id}"))?;
+    let (conn, file_id, retention) = {
+        let uploads = state.cloud_drop_uploads.lock().map_err(|e| e.to_string())?;
+        let entry = uploads
+            .get(&peer_id)
+            .ok_or_else(|| format!("no cloud-drop upload session for peer_id={peer_id}"))?;
+        (entry.conn.clone(), entry.file_id.clone(), entry.retention)
+    };
+
+    if !accept {
+        log::info!("respond_to_cloud_access_request: declined for peer_id={peer_id}");
+        return ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessResponse { accepted: false, drive_file_id: None })
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    let config = cloud_drop_config()?;
+    let access_token = ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map_err(|e| e.to_string())?;
+    // Only `After(t)` carries an instant Drive's own expirationTime can be
+    // asked to enforce - DeleteAfterDownload has no time cap of its own
+    // (see ls_clouddrop::retention::Retention's doc comment), so nothing is
+    // requested for it; the app-level retention cleanup is what enforces
+    // that case regardless.
+    let expiration = match retention {
+        ls_clouddrop::retention::Retention::After(t) => Some(t),
+        ls_clouddrop::retention::Retention::DeleteAfterDownload => None,
+    };
+    let grant = ls_clouddrop::drive::grant_reader_access(&access_token, &file_id, &google_email, expiration)
+        .await
+        .map_err(|e| e.to_string())?;
+    log::info!(
+        "respond_to_cloud_access_request: granted {google_email} access to {file_id} (expiration_applied={})",
+        grant.expiration_applied
+    );
+
+    ls_net::send_control(
+        &conn,
+        &ls_net::ControlMessage::CloudAccessResponse { accepted: true, drive_file_id: Some(file_id) },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Serialize)]
+pub struct CloudDropReceiveOutcome {
+    pub accepted: bool,
+    /// `Some` exactly when `accepted` is `true` — held, not auto-run, via
+    /// the exact same `finalize_received_snapshot` every other transport
+    /// uses.
+    pub info: Option<IncomingSnapshotInfo>,
+}
+
+/// Receiver side: decodes `code` (via the existing, unmodified
+/// `decode_room_code`), connects to the sender's control channel, announces
+/// this receiver's own linked Google account, and waits for the sender's
+/// Accept/Reject. On accept, downloads straight from Drive and runs the
+/// result through the same review/consent/Run pipeline every other
+/// transport already uses.
+#[tauri::command]
+pub async fn request_cloud_drop_access(
+    state: State<'_, AppState>,
+    mode: String,
+    code: String,
+    relay_url: Option<String>,
+) -> Result<CloudDropReceiveOutcome, String> {
+    let config = cloud_drop_config()?;
+    let tokens = ls_clouddrop::store::load_tokens()
+        .map_err(|e| e.to_string())?
+        .ok_or("not linked to a Google account yet - link one in Settings first")?;
+    let access_token = ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map_err(|e| e.to_string())?;
+
+    let decoded = decode_room_code(mode, code, relay_url)?;
+    log::info!("request_cloud_drop_access: connecting for room={}", decoded.room_id);
+    let conn = ls_net::connect_as_receiver(&decoded.signaling_url, &decoded.room_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: tokens.email.clone() })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match ls_net::recv_control(&conn).await.map_err(|e| e.to_string())? {
+        ls_net::ControlMessage::CloudAccessResponse { accepted: false, .. } => {
+            log::info!("request_cloud_drop_access: sender declined");
+            Ok(CloudDropReceiveOutcome { accepted: false, info: None })
+        }
+        ls_net::ControlMessage::CloudAccessResponse { accepted: true, drive_file_id: Some(file_id) } => {
+            log::info!("request_cloud_drop_access: accepted, downloading file_id={file_id}");
+            let bytes = ls_clouddrop::drive::download_file(&access_token, &file_id).await.map_err(|e| e.to_string())?;
+            let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let info = finalize_received_snapshot(&state, snapshot)?;
+            ls_net::send_control(&conn, &ls_net::ControlMessage::CloudDownloadConfirmed)
+                .await
+                .map_err(|e| e.to_string())?;
+            log::info!("request_cloud_drop_access: done, id={}", info.snapshot_id);
+            Ok(CloudDropReceiveOutcome { accepted: true, info: Some(info) })
+        }
+        other => Err(format!("unexpected response from sender: {other:?}")),
+    }
+}
+
+/// Deletes every Drive upload whose retention has come due, regardless of
+/// whether it was ever downloaded (see `ls_clouddrop::retention`'s doc
+/// comment: `After(t)` is a hard cap, not merely "until downloaded"). Called
+/// once at app startup (see `main.rs`) rather than on a timer, matching
+/// `ls_containers::ProvisioningLog`'s "check when convenient" convention —
+/// this app has no background scheduler and round 23 doesn't need to add
+/// one. Silently does nothing if no Google account is linked yet (nothing
+/// to clean up) or if the stored token can't be refreshed (logged, not
+/// fatal — cleanup just retries next launch).
+pub async fn cleanup_expired_cloud_drops() {
+    let Ok(Some(_)) = ls_clouddrop::store::load_tokens() else { return };
+    let config = match ls_clouddrop::oauth::OAuthConfig::from_env() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let access_token = match ls_clouddrop::oauth::ensure_valid_access_token(&config).await {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("cleanup_expired_cloud_drops: could not refresh access token: {e:#}");
+            return;
+        }
+    };
+    let uploads = match ls_clouddrop::retention::load_tracked_uploads() {
+        Ok(u) => u,
+        Err(e) => {
+            log::warn!("cleanup_expired_cloud_drops: could not load tracked uploads: {e:#}");
+            return;
+        }
+    };
+    let due: Vec<String> = ls_clouddrop::retention::due_for_deletion(&uploads, time::OffsetDateTime::now_utc())
+        .into_iter()
+        .map(|u| u.file_id.clone())
+        .collect();
+    for file_id in due {
+        match ls_clouddrop::drive::delete_file(&access_token, &file_id).await {
+            Ok(()) => {
+                log::info!("cleanup_expired_cloud_drops: deleted {file_id}");
+                if let Err(e) = ls_clouddrop::retention::remove_tracked_upload(&file_id) {
+                    log::warn!("cleanup_expired_cloud_drops: deleted {file_id} from Drive but could not untrack it: {e:#}");
+                }
+            }
+            Err(e) => log::warn!("cleanup_expired_cloud_drops: failed to delete {file_id}: {e:#}"),
+        }
+    }
+}

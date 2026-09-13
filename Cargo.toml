@@ -6,6 +6,7 @@ members = [
     "crates/ls-security",
     "crates/ls-containers",
     "crates/ls-dbsource",
+    "crates/ls-clouddrop",
     "apps/desktop/src-tauri",
 ]
 
@@ -15,3 +16,16 @@ license = "MIT"
 
 [profile.dev]
 opt-level = 0
+# Round 23: ls-clouddrop's real dependency on reqwest (rustls + hyper +
+# their own transitive trees) got linked into every localsync-desktop test
+# binary the moment ls-clouddrop became a normal dependency of that crate -
+# full (level 2) debug info for that much code pushed the combined PDB past
+# MSVC's hard 4GB link-time limit on Windows (`LINK : fatal error LNK1140:
+# limit exceeded for program database`), breaking `cargo test --workspace`
+# outright. "line-tables-only" keeps `#[track_caller]`/panic locations and
+# basic backtraces (this project's own `anyhow::Context` chains still point
+# at the right line) while dropping the much larger per-type/per-variable
+# debug records that were actually responsible for the size - the standard,
+# documented fix for this exact class of Windows link failure on large
+# dependency graphs, not a reason to strip test coverage.
+debug = "line-tables-only"

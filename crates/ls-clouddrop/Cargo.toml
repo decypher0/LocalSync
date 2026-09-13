@@ -1,0 +1,60 @@
+[package]
+name = "ls-clouddrop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Timestamps everywhere in this crate (token expiry, upload/retention
+# instants) - same crate + feature set ls-security/ls-snapshot already use.
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "io-util"] }
+# `default-features = false` + `native-tls`, not reqwest's default
+# rustls/aws-lc-rs backend. Investigated (not just assumed) after hitting a
+# real `STATUS_ENTRYPOINT_NOT_FOUND` crash (0xc0000139) running this
+# project's desktop test binaries natively on Windows: that crash turned out
+# to be pre-existing and unrelated to this crate specifically (it reproduces
+# identically on unmodified pre-round-23 code, via `ls-dbsource`'s own
+# separate reqwest/rustls dependency - this project's tests have only ever
+# actually been run in WSL2 before, never natively on Windows, so nothing
+# had surfaced it yet; see round 23's own report for the full trail).
+# `native-tls` is kept anyway on its own merits, not as that crash's fix: it
+# uses the OS's own TLS stack (Schannel/Secure Transport/OpenSSL) instead of
+# a bundled crypto backend, avoiding a *second* independent
+# rustls+aws-lc-rs dependency chain on top of the one `ls-dbsource` already
+# carries - the standard, broadly-compatible choice for a cross-platform
+# desktop app talking to one well-known HTTPS API.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "form", "native-tls"] }
+# PKCE code_challenge = base64url(sha256(code_verifier)) - same sha2
+# version ls-snapshot/ls-security already use.
+sha2 = "0.10"
+# Already resolved in the lock (reqwest itself depends on 0.22.1) - reused
+# rather than adding a second base64 major version to the tree.
+base64 = "0.22"
+# PKCE code_verifier randomness - same version ls-snapshot already uses
+# for its ed25519 key generation (rand::rngs::OsRng).
+rand = "0.8"
+# Clean, correctly-percent-encoded query-string construction for the Google
+# authorization URL and Drive `q=` search parameter - already in the
+# dependency graph transitively via reqwest, added directly here rather
+# than hand-rolling percent-encoding.
+url = "2"
+# Cross-platform OS data-dir lookup for google_tokens.json /
+# cloud_drop_uploads.json - same convention/version ls-security uses for
+# known_peers.json.
+dirs = "5"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+# Round 23: no live Google OAuth credentials exist in this environment, so
+# the token-exchange/refresh, userinfo, and Drive API v3 HTTP client code
+# is exercised against a real local mock server instead - asserting the
+# actual method/path/headers/body sent, and parsing realistic fixture
+# responses (including error shapes), rather than merely "it compiles".
+# A real, well-regarded Rust HTTP mocking crate; justified here because
+# this crate's whole job is talking to a specific external HTTP API.
+wiremock = "0.6"
