@@ -47,7 +47,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJGNzUzRTJEODUxNjcwREMKUldUY2NCYUZMVDUxditSTmlBVmxTNU1sUFREY1NXN3Rwb3dCVXpzNmlUdVFHd2YvR1hZcnBnK0wK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM3OUVGNDU1M0RCNDA5NzQKUldSMENiUTlWZlNlTjZCVDJzT01VQ0tXakFxdlFrcUlGTFdTRFQ4WUNtMXlCS3pqTTJJYi9UeUsK",
       "endpoints": [
         "https://github.com/decypher0/LocalSync/releases/download/latest/latest.json"
       ]
