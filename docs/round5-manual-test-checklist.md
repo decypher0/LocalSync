@@ -1162,3 +1162,85 @@ type, elevation — that's the same system on every screen instead of
 whatever felt right when that screen was originally built. Whether it
 actually *looks* good is a judgment call this sandbox is structurally
 unable to make; that call belongs to the developer, on a real screen.
+
+## Round 24 addendum: magic link (custom URL scheme + static fallback page)
+
+Round 24 adds a real `https://` link on top of the existing room code: click it with LocalSync installed and it opens straight to a pre-filled Receive tab; click it without LocalSync installed and a static GitHub Pages site walks you through installing it, with your code ready to paste in afterward. **This is the round most dependent on real-hardware confirmation of any so far** — everything about whether a custom URL scheme actually reaches an installed app, or correctly falls back when it doesn't, is OS/browser behavior this sandbox cannot observe or simulate at all.
+
+### What was code-verified (not real-hardware — see below for that)
+
+- The Rust side builds cleanly with `tauri-plugin-deep-link`,
+  `tauri-plugin-single-instance` (with its `deep-link` feature), and
+  `tauri-plugin-clipboard-manager` all registered — confirmed via a real
+  `cargo build -p localsync-desktop`, and `cargo tree -p localsync-desktop`
+  was used to directly confirm the `deep-link` feature really pulled
+  `tauri-plugin-deep-link` in as a dependency of
+  `tauri-plugin-single-instance`, not just declared in Cargo.toml.
+- `capabilities/default.json` was updated with the exact permissions each
+  new plugin's own manifest requires (`deep-link:default`,
+  `clipboard-manager:allow-write-text`) — found by reading each plugin's
+  real `permissions/default.toml` from its downloaded crate source, not
+  guessed; a missing permission here would fail silently at runtime
+  (a rejected `invoke`), not at compile time, so this was checked
+  deliberately rather than assumed to be unnecessary.
+- The fallback page's real logic — `parseCode`, `detectOS`,
+  `pickInstallerAssets`, and the exact `localsync://...` URL it builds —
+  has 24 passing automated tests (`node --test
+  web/test-magic-link-logic.js`, Node's own built-in test runner, no new
+  dependency), covering real edge cases: Android's user agent containing
+  the substring "Linux" (and this not being misread as a Linux desktop
+  build to offer), a release with no build for a given OS, a missing/empty
+  code parameter, and characters in a code that need percent-encoding for
+  the URL to be valid.
+- `.github/workflows/pages.yml` was validated with `actionlint` (zero
+  findings, alongside every other workflow in this repo) and runs the same
+  test file as a real deploy gate.
+- The exact GitHub API field names used (`assets[].name`,
+  `assets[].browser_download_url`) were confirmed against a real
+  `GET /repos/.../releases/latest` response from a real public repo with
+  real release assets, not assumed from memory of the API's shape.
+
+### What to check on real hardware
+
+1. **Install the app, then click a real magic link** (generate one from
+   Send's new "Copy link" button, paste it into a browser on the same
+   machine): confirm it opens LocalSync directly, switches to the Receive
+   tab, and the code is already filled in — you should only need to click
+   Receive, never retype anything.
+2. **Click a second magic link while LocalSync is already running**
+   (Windows and Linux specifically — this is the exact case
+   `tauri-plugin-single-instance`'s `deep-link` feature exists for):
+   confirm it brings the *existing* window to the front with the new
+   code filled in, rather than opening a second LocalSync window/process.
+3. **Click a magic link with LocalSync *not* installed**: confirm the
+   browser lands on the static fallback page (once GitHub Pages is
+   actually enabled and deployed — see below), that it shows your real
+   code with a working copy button, and that it highlights the right
+   installer for the machine you're using (then confirm the *other*
+   OSes' downloads are still visible, just less prominent — a wrong OS
+   guess should never hide the real option).
+4. **Confirm the fallback page's own real download links work**: click
+   through to an actual installer from the page and confirm the URL
+   GitHub's API returned really downloads the file it claims to, for
+   whichever OS you're testing on.
+5. **The one-time GitHub Pages setup**: in this repo's Settings → Pages,
+   confirm "Source" is set to "GitHub Actions" (see this round's README
+   section for why this can't be automated), then confirm a push to
+   `web/` (or a manual `workflow_dispatch` run of "Deploy magic-link page
+   to GitHub Pages") actually publishes the page and that
+   `https://decypher0.github.io/LocalSync/?code=test` loads.
+6. **Copy code vs. Copy link**: after starting a send, confirm both new
+   buttons work, copy genuinely different things (the bare code vs. the
+   full `https://...?code=...` link), and that pasting each works where
+   you'd expect (the bare code into LocalSync's own Receive field, the
+   link into a browser or a chat message to someone else).
+
+### What "success" looks like
+
+Someone who already has LocalSync installed clicks a link and lands
+straight in a pre-filled Receive tab — no copy-pasting a code by hand.
+Someone who doesn't have it yet clicks the same kind of link, lands on a
+real page that tells them what to download for their machine and holds
+onto their code until they're ready to paste it in. Neither path needed
+a backend, a database, or a hardcoded download URL that would go stale
+the next time a release ships.
