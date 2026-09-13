@@ -16,15 +16,21 @@
 const GITHUB_OWNER = "decypher0";
 const GITHUB_REPO = "LocalSync";
 const SCHEME = "localsync";
-// Real technique this round's own brief specifies: try the custom-scheme
-// handoff, then use a short timeout combined with a visibility/blur
-// heuristic to guess whether it worked. 1750ms sits in the specified
-// 1.5-2s window - long enough that a slow OS handoff (antivirus scanning
-// the protocol handler, a cold-starting app) still has a real chance to
-// blur this tab before the timer fires, short enough that a person whose
-// browser really has no handler installed isn't left staring at "trying to
-// open the app..." for long.
-const HANDOFF_TIMEOUT_MS = 1750;
+// Round 27: raised from round 24's original 1750ms after real Windows
+// testing found the app genuinely opening (confirmed by screenshot) later
+// than that window - the page had already rendered "doesn't seem to be
+// installed" by the time it did, a real, confusing contradiction. 2500ms
+// isn't a guess: the most commonly referenced reference implementation for
+// this exact technique (the `custom-protocol-check` library) defaults to
+// 2000ms and documents that it should be raised for an app with a slower
+// first-screen load - a Tauri app's cold start plus, on Chrome/Edge, the
+// time a person actually takes to notice and click through the browser's
+// own native "Open LocalSync?" confirmation dialog (shown before the OS
+// ever launches the handler at all) can both land past 2000ms in practice.
+// This alone can't make the detection actually reliable - see
+// markHandoffSucceeded's own comment for the real fix - it only reduces
+// how often a real, working launch is slower than a fixed window.
+const HANDOFF_TIMEOUT_MS = 2500;
 
 // ---------------------------------------------------------------------
 // Pure logic - no `window`/`document`/`navigator`/`fetch` in this section.
@@ -138,8 +144,26 @@ function init() {
 
   // ---- Step 1: attempt the custom-scheme handoff ----
   let handoffLikelySucceeded = false;
+  let fallbackRendered = false;
+  // Round 27: blur/visibilitychange are a heuristic, not a guarantee, on
+  // every browser that implements this technique (confirmed - there is no
+  // fully reliable cross-browser way to detect whether a custom-scheme
+  // handoff actually launched an app; every real implementation of this
+  // pattern relies on exactly this same signal). Real Windows testing hit
+  // the case that heuristic can't cover by raising the timeout alone: the
+  // signal arrived, just *after* HANDOFF_TIMEOUT_MS had already elapsed and
+  // the "doesn't seem to be installed" fallback had already rendered - a
+  // direct contradiction with the app the person was actually looking at.
+  // Rather than only ever narrowing that window with a bigger number (which
+  // can never fully close it - a slow enough machine always exists), this
+  // keeps listening after the fallback renders and corrects the message the
+  // moment a late signal arrives, so the page can't go on asserting
+  // something already visibly false.
   const markHandoffSucceeded = () => {
     handoffLikelySucceeded = true;
+    if (fallbackRendered) {
+      statusEl.textContent = "Looks like LocalSync just opened — you can close this tab.";
+    }
   };
   // Either signal is treated as "the OS switched away to the installed
   // app" - a real visibilitychange to "hidden" (most browsers) or a bare
@@ -155,7 +179,14 @@ function init() {
 
   setTimeout(() => {
     if (handoffLikelySucceeded) return; // assume it worked; nothing more to do here
-    statusEl.textContent = "LocalSync doesn't seem to be installed yet — download it below, then paste the code in.";
+    fallbackRendered = true;
+    // Round 27: softened from a confident "doesn't seem to be installed" -
+    // this heuristic firing at all only means no success signal has arrived
+    // *yet*, never that the app definitely isn't installed (see
+    // markHandoffSucceeded's own comment). Acknowledging that up front
+    // avoids stating something that real testing showed can still be
+    // actively wrong at this exact moment.
+    statusEl.textContent = "If LocalSync just opened, you're all set — otherwise, install it below and paste the code in.";
     renderDownloads();
   }, HANDOFF_TIMEOUT_MS);
 

@@ -36,6 +36,13 @@
         "installerHooks": "./windows/hooks.nsh"
       }
     },
+    "linux": {
+      "deb": {
+        "desktopTemplate": "./linux/main.desktop",
+        "postInstallScript": "./linux/postinst.sh",
+        "postRemoveScript": "./linux/postrm.sh"
+      }
+    },
     "createUpdaterArtifacts": true
   },
   "plugins": {
