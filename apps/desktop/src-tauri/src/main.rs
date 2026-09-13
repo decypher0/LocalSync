@@ -5,7 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use localsync_desktop::{commands, send_log, state::AppState};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// Two demo instances (sender + receiver) commonly run on the same Linux
 /// box at once. They don't collide on `~/.localsync/identity.key` (only the
@@ -114,6 +114,27 @@ fn main() {
     let preload_info = preload_snapshot(&state);
 
     tauri::Builder::default()
+        // Round 24: must be registered before tauri_plugin_deep_link below -
+        // its own README is explicit that plugins run in registration order,
+        // and its "deep-link" feature works by intercepting a second
+        // instance's launch *before* handing control to deep-link's own
+        // argument parsing. Only matters on Windows/Linux in practice (see
+        // this crate's Cargo.toml comment) - macOS never spawns a second
+        // process for a URL open, so this callback simply never fires there.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // The single-instance event itself is the "someone clicked a
+            // magic link while the app was already running" signal - the
+            // "deep-link" feature (enabled in Cargo.toml) has already
+            // forwarded _argv into this same process's tauri-plugin-deep-link
+            // state by the time this callback runs, which is what fires the
+            // "deep-link://new-url" event app.js listens for. All this needs
+            // to do is bring the existing window to the front, so the person
+            // who just clicked a link actually sees it react.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         // Round 23: opens the system browser for the Google OAuth consent
         // screen (commands::link_google_account) - registration only, the
@@ -128,6 +149,8 @@ fn main() {
         // Only used for its relaunch() command, called after a
         // user-confirmed update finishes installing.
         .plugin(tauri_plugin_process::init())
+        // Round 24: "Copy code"/"Copy link" in the Send flow.
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
         .setup(move |app| {
             // Round 23: enforce any Cloud-drop retention that's come due

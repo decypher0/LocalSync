@@ -12,6 +12,7 @@ const { listen } = window.__TAURI__.event;
 const { open } = window.__TAURI__.dialog;
 const { check: checkForUpdate } = window.__TAURI__.updater;
 const { relaunch } = window.__TAURI__.process;
+const { writeText: writeClipboardText } = window.__TAURI__.clipboardManager;
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,6 +28,44 @@ listen("firewall-warning", (evt) => {
   $("firewall-banner").textContent = evt.payload;
   $("firewall-banner").classList.remove("hidden");
 });
+
+// ---------- round 24: magic-link deep-link handoff (localsync://receive?code=...) ----------
+// Only ever pre-fills the Receive tab's own code input and switches to it -
+// reuses the exact existing code-entry path rather than a parallel one, and
+// never itself calls receive_snapshot. Accepting a P2P connection always
+// still needs the same explicit Receive click a person typing the code by
+// hand would make.
+function handleDeepLinkUrls(urls) {
+  if (!urls) return;
+  for (const raw of urls) {
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      continue; // not a parseable URL at all - ignore rather than throw
+    }
+    const code = url.searchParams.get("code");
+    if (!code) continue;
+    switchToTab("receive");
+    $("receive-room-code").value = code;
+    $("receive-error").textContent = "";
+    break; // only one link is ever meaningful per launch/event
+  }
+}
+
+// Two separate entry points, matching how the plugin itself splits this:
+// getCurrent() covers "this process was just launched by clicking a link"
+// (a fresh Windows/Linux process's own CLI argument, or macOS's equivalent -
+// both already parsed into plugin state by the time this JS runs); onOpenUrl
+// covers "a link was clicked again while this process is already running"
+// (macOS's native re-open event, or a second Windows/Linux process
+// redirected here by tauri-plugin-single-instance's "deep-link" feature -
+// see main.rs for why that plugin exists at all).
+window.__TAURI__.deepLink
+  .getCurrent()
+  .then((urls) => handleDeepLinkUrls(urls))
+  .catch((err) => console.error("deep-link getCurrent failed:", err));
+window.__TAURI__.deepLink.onOpenUrl((urls) => handleDeepLinkUrls(urls));
 
 // ---------- round 16: auto-update (checking is silent; installing is never) ----------
 // pendingUpdate holds the real Update object check() returned - only
@@ -124,8 +163,8 @@ listen("pull-request", (evt) => {
   div.innerHTML = `
     <span>Pull request from <strong>${escapeHtml(peerId)}</strong></span>
     <span class="inline-row">
-      <button class="ghost-btn accept-btn" type="button">Accept</button>
-      <button class="ghost-btn decline-btn" type="button">Decline</button>
+      <button class="ghost-btn accept-btn" type="button"><svg class="icon"><use href="#icon-check"></use></svg> Accept</button>
+      <button class="ghost-btn decline-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Decline</button>
     </span>
     <p class="error"></p>
   `;
@@ -200,6 +239,46 @@ $("settings-toggle").addEventListener("click", () => {
 });
 $("data-dir-display").value = "(read at launch; not editable here)";
 
+// ---------- theme: system default, with a persisted manual override ----------
+// Three real states, not a boolean: "system" (default) tracks
+// prefers-color-scheme live, for as long as the developer never overrides
+// it; "light"/"dark" are explicit, persisted choices that win regardless
+// of the OS setting. The actual color values for each theme live entirely
+// in styles.css's :root/[data-theme] blocks - this only ever decides which
+// one applies, never touches a color itself.
+const THEME_KEY = "localsync.theme";
+
+function applyTheme(choice) {
+  if (choice === "light" || choice === "dark") {
+    document.documentElement.dataset.theme = choice;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+function currentThemeChoice() {
+  const saved = localStorage.getItem(THEME_KEY);
+  return saved === "light" || saved === "dark" ? saved : "system";
+}
+
+// index.html's own inline bootstrap script already applied a saved
+// light/dark override before first paint (avoiding a flash of the wrong
+// theme) - this just brings the radios themselves in sync with it, and
+// re-applies for the "system" case too (a no-op today since the
+// bootstrap script only ever sets light/dark, but keeps this function the
+// single source of truth rather than splitting theme-application logic
+// across two files).
+const savedTheme = currentThemeChoice();
+$(`theme-${savedTheme}`).checked = true;
+applyTheme(savedTheme);
+
+["system", "light", "dark"].forEach((choice) => {
+  $(`theme-${choice}`).addEventListener("change", () => {
+    localStorage.setItem(THEME_KEY, choice);
+    applyTheme(choice);
+  });
+});
+
 // ---------- round 23: linked Google account (Cloud drop) ----------
 async function refreshGoogleAccountStatus() {
   try {
@@ -273,17 +352,66 @@ if (localStorage.getItem(MODE_KEY) === "remote") $("mode-remote").checked = true
 $("relay-url").value = localStorage.getItem(RELAY_URL_KEY) || "";
 updateModeUi();
 
+// Round 20 goal 3: the Send wizard's own transfer-mode step - a separate
+// radio group from Settings' (Receive still reads Settings' via
+// relayMode()/relayUrl() above; that flow isn't part of this round's
+// scope), but backed by the exact same localStorage keys, so choosing a
+// mode here updates the one real shared default rather than creating a
+// second, divergent setting - Settings and the wizard just become two
+// surfaces onto the same underlying choice.
+function wizRelayMode() {
+  return $("wiz-mode-remote").checked ? "remote" : "local";
+}
+function wizRelayUrl() {
+  return $("wiz-relay-url").value.trim();
+}
+function updateWizModeUi() {
+  $("wiz-relay-url-wrap").classList.toggle("hidden", wizRelayMode() !== "remote");
+}
+// Called every time step 1 is (re)entered, so it always reflects the most
+// recent choice - made here, or made in Settings since the wizard was last
+// opened.
+function syncWizModeFromStorage() {
+  $("wiz-mode-remote").checked = localStorage.getItem(MODE_KEY) === "remote";
+  $("wiz-mode-local").checked = !$("wiz-mode-remote").checked;
+  $("wiz-relay-url").value = localStorage.getItem(RELAY_URL_KEY) || "";
+  updateWizModeUi();
+}
+$("wiz-mode-local").addEventListener("change", () => {
+  updateWizModeUi();
+  localStorage.setItem(MODE_KEY, wizRelayMode());
+});
+$("wiz-mode-remote").addEventListener("change", () => {
+  updateWizModeUi();
+  localStorage.setItem(MODE_KEY, wizRelayMode());
+});
+$("wiz-relay-url").addEventListener("input", () => {
+  localStorage.setItem(RELAY_URL_KEY, wizRelayUrl());
+});
+$("wiz-mode-next-btn").addEventListener("click", () => {
+  if (wizRelayMode() === "remote" && !wizRelayUrl()) {
+    $("wiz-mode-error").textContent = "Remote relay URL is required for Remote relay mode.";
+    return;
+  }
+  $("wiz-mode-error").textContent = "";
+  showWizardStep("wiz-step-folders");
+});
+
 // ---------- tabs ----------
+// Extracted so round 24's deep-link handler can switch to Receive the same
+// way a real click does, rather than duplicating this in two places.
+function switchToTab(name) {
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+  document.querySelector(`.tab-btn[data-tab="${name}"]`).classList.add("active");
+  $(`tab-${name}`).classList.add("active");
+  // Show "Previously connected" the moment someone looks at the Send tab,
+  // not only after they've just sent something or clicked Refresh by hand.
+  if (name === "send") refreshReceivers();
+}
+
 document.querySelectorAll(".tab-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
-    $(`tab-${btn.dataset.tab}`).classList.add("active");
-    // Show "Previously connected" the moment someone looks at the Send tab,
-    // not only after they've just sent something or clicked Refresh by hand.
-    if (btn.dataset.tab === "send") refreshReceivers();
-  });
+  btn.addEventListener("click", () => switchToTab(btn.dataset.tab));
 });
 
 // ---------- send: round 17/22 database-source wizard ----------
@@ -316,10 +444,54 @@ function wizFolderLabel(path) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
 }
 
+// Round 20 goal 4: coarse-grained phases for the modal's "Step X of N"
+// header - the per-folder database sub-flow (detect/manual/dump/schemas/
+// tables) has a genuinely variable number of screens depending on what's
+// detected and which branch the developer takes, so it's shown as one
+// numbered phase ("Database setup") rather than pretending to a false,
+// ever-changing step count within it.
+const WIZARD_PHASES = [
+  { step: "wiz-step-mode", label: "Transfer mode" },
+  { step: "wiz-step-folders", label: "Project folder(s)" },
+  { step: "wiz-step-needs-db", label: "Database setup" },
+  { step: "wiz-step-shared-db", label: "Database setup" },
+  { step: "wiz-step-db-folder", label: "Database setup" },
+  { step: "wiz-step-ready", label: "Ready to send" },
+];
+const WIZARD_PHASE_COUNT = new Set(WIZARD_PHASES.map((p) => p.label)).size;
+
+function updateWizardProgress(id) {
+  const entry = WIZARD_PHASES.find((p) => p.step === id);
+  if (!entry) return;
+  const phaseNumber = new Set(WIZARD_PHASES.slice(0, WIZARD_PHASES.indexOf(entry) + 1).map((p) => p.label)).size;
+  $("wizard-progress-label").textContent = `Step ${phaseNumber} of ${WIZARD_PHASE_COUNT}: ${entry.label}`;
+}
+
 function showWizardStep(id) {
   document.querySelectorAll("#send-wizard .wizard-step").forEach((el) => el.classList.add("hidden"));
   $(id).classList.remove("hidden");
+  updateWizardProgress(id);
 }
+
+// ---------- round 20 goal 4: the wizard as a real modal overlay ----------
+
+function openSendWizard() {
+  resetSendWizard();
+  $("send-wizard-overlay").classList.remove("hidden");
+  syncWizModeFromStorage();
+  showWizardStep("wiz-step-mode");
+}
+
+function closeSendWizard() {
+  $("send-wizard-overlay").classList.add("hidden");
+}
+
+$("start-send-wizard-btn").addEventListener("click", openSendWizard);
+
+$("wizard-cancel-btn").addEventListener("click", () => {
+  closeSendWizard();
+  resetSendWizard();
+});
 
 function hideAllDbSubPanels() {
   ["wiz-db-detecting", "wiz-db-ask-has-dump", "wiz-db-pick-dump", "wiz-db-manual", "wiz-db-connecting", "wiz-db-schemas", "wiz-db-tables"].forEach(
@@ -337,7 +509,9 @@ function renderWizardFolderList() {
     const removeBtn = document.createElement("button");
     removeBtn.className = "ghost-btn remove-folder-btn";
     removeBtn.type = "button";
-    removeBtn.textContent = "Remove";
+    // innerHTML is safe here: the icon markup is a fixed literal, nothing
+    // from f.path (already escaped above via escapeHtml) ever reaches it.
+    removeBtn.innerHTML = '<svg class="icon"><use href="#icon-x"></use></svg> Remove';
     removeBtn.addEventListener("click", () => {
       wizardFolders.splice(i, 1);
       renderWizardFolderList();
@@ -358,6 +532,8 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
   }
   renderWizardFolderList();
 });
+
+$("wiz-folders-back-btn").addEventListener("click", () => showWizardStep("wiz-step-mode"));
 
 $("wiz-folders-next-btn").addEventListener("click", () => {
   if (wizardFolders.length === 0) {
@@ -867,6 +1043,22 @@ $("wiz-ready-back-btn").addEventListener("click", () => {
 
 let unlistenSendProgress = null;
 let codeExpiryInterval = null;
+// Round 24: the room code from the send session currently on screen - set
+// once, right after start_send_session returns, and read by both the
+// "Copy code" and "Copy link" buttons below. Not persisted anywhere; a new
+// send session (or the wizard resetting) simply overwrites it.
+let currentRoomCode = null;
+
+// Round 24: where the magic-link fallback page (web/) is actually hosted -
+// see .github/workflows/pages.yml and the README's "Magic link" section
+// for how it gets there and what one-time manual repo setting this URL
+// depends on (GitHub Pages' project-page URL shape, derived from the repo
+// owner/name, not something this app can discover at runtime).
+const MAGIC_LINK_BASE_URL = "https://decypher0.github.io/LocalSync/";
+
+function buildMagicLink(roomCode) {
+  return `${MAGIC_LINK_BASE_URL}?code=${encodeURIComponent(roomCode)}`;
+}
 
 // Visible countdown instead of a silent background timer (round 12) - the
 // room code is only good until the sender's connect_as_sender call (started
@@ -899,8 +1091,31 @@ function stopCodeExpiryCountdown() {
   $("send-code-expiry").textContent = "";
 }
 
-// Resets the wizard back to step 1, for the next send after this one
-// finishes (or after a failure the developer wants to redo from scratch).
+// Round 24: distinct from each other on purpose - a teammate who already
+// has LocalSync installed only needs the bare code (unchanged behavior,
+// just given a real button instead of relying on the code display's own
+// user-select:all); someone who doesn't has nothing useful to do with a
+// bare code until they've installed the app, which is exactly what the
+// magic link's fallback page (web/) walks them through.
+async function copyToClipboard(text, statusIfOk) {
+  try {
+    await writeClipboardText(text);
+    $("copy-status").textContent = statusIfOk;
+  } catch (err) {
+    $("copy-status").textContent = `Couldn't copy automatically (${err}) — select the code above and copy it manually.`;
+  }
+}
+$("copy-code-btn").addEventListener("click", () => {
+  if (currentRoomCode) copyToClipboard(currentRoomCode, "Code copied.");
+});
+$("copy-link-btn").addEventListener("click", () => {
+  if (currentRoomCode) copyToClipboard(buildMagicLink(currentRoomCode), "Link copied.");
+});
+
+// Resets all wizard state, for the next send after this one finishes (or
+// after a failure/cancel the developer wants to redo from scratch). Doesn't
+// itself decide which step to show - openSendWizard (the only place that
+// reveals the modal) always does that explicitly right after calling this.
 function resetSendWizard() {
   wizardFolders = [];
   wizardFolderIndex = 0;
@@ -909,7 +1124,7 @@ function resetSendWizard() {
   wizardSharedResolved = null;
   renderWizardFolderList();
   $("wiz-folders-error").textContent = "";
-  showWizardStep("wiz-step-folders");
+  $("wiz-send-error").textContent = "";
 }
 
 // ---------- round 23: Cloud drop toggle + retention picker (Send tab) ----------
@@ -942,6 +1157,7 @@ function retentionChoiceDto() {
 
 $("send-btn").addEventListener("click", async () => {
   $("send-error").textContent = "";
+  $("wiz-send-error").textContent = "";
   $("send-result").textContent = "";
   $("send-code-wrap").classList.add("hidden");
   stopCodeExpiryCountdown();
@@ -951,10 +1167,14 @@ $("send-btn").addEventListener("click", async () => {
     return;
   }
 
-  const mode = relayMode();
-  const url = relayUrl();
+  // Round 20 goal 3: the mode chosen explicitly in the wizard's own first
+  // step, not Settings' (that toggle now only matters for Receive) - see
+  // wizRelayMode()'s own doc comment for why these are deliberately
+  // separate accessors onto the same underlying persisted default.
+  const mode = wizRelayMode();
+  const url = wizRelayUrl();
   if (mode === "remote" && !url) {
-    $("send-error").textContent = "Remote relay URL is required in Settings for Remote relay mode.";
+    $("send-error").textContent = "Remote relay URL is required for Remote relay mode.";
     return;
   }
 
@@ -976,13 +1196,24 @@ $("send-btn").addEventListener("click", async () => {
         projectPath: wizardFolders[0].path,
         retention,
       });
+      // Round 20 goal 4: same reason the non-Cloud-drop path below closes
+      // the modal on success - the room code renders on the main Send tab
+      // page, behind the modal's backdrop, and would be invisible if the
+      // wizard stayed open. The code is a real, paste-able room code here
+      // too (request_cloud_drop_access decodes it exactly like a normal
+      // receive), so round 24's Copy code/Copy link buttons work on it the
+      // same way - currentRoomCode is what they read from.
+      closeSendWizard();
+      currentRoomCode = info.room_code;
       $("send-room-code-display").textContent = info.room_code;
+      $("copy-status").textContent = "";
       $("send-code-wrap").classList.remove("hidden");
       startCodeExpiryCountdown(info.code_expires_in_seconds);
       $("send-result").textContent = `Uploaded to Drive as ${info.file_id}. Waiting for the receiver to request access…`;
       resetSendWizard();
     } catch (err) {
       $("send-error").textContent = String(err);
+      $("wiz-send-error").textContent = String(err);
     } finally {
       $("send-btn").disabled = false;
     }
@@ -997,7 +1228,13 @@ $("send-btn").addEventListener("click", async () => {
     const info = await invoke("start_send_session", { mode, relayUrl: mode === "remote" ? url : null });
     const roomId = info.room_id;
     const signalingUrl = info.signaling_url;
+    // Round 20 goal 4: the modal's job ends once there's a real room code
+    // to show - close it now so that code/the live progress below render
+    // on the main Send tab page, exactly where they always have.
+    closeSendWizard();
+    currentRoomCode = info.room_code;
     $("send-room-code-display").textContent = info.room_code;
+    $("copy-status").textContent = "";
     $("send-code-wrap").classList.remove("hidden");
     startCodeExpiryCountdown(info.code_expires_in_seconds);
 
@@ -1036,7 +1273,13 @@ $("send-btn").addEventListener("click", async () => {
     refreshReceivers(); // this send may have just added a new roster entry
     resetSendWizard();
   } catch (err) {
+    // Round 20 goal 4: the wizard modal only closes on success (right before
+    // the room code is shown), so a failure here can happen while it's still
+    // open - #send-error lives on the main Send tab page, behind the modal's
+    // backdrop, and would be invisible at exactly the moment it matters.
+    // Writing to both costs nothing (the hidden one is simply never seen).
     $("send-error").textContent = String(err);
+    $("wiz-send-error").textContent = String(err);
     stopCodeExpiryCountdown();
   } finally {
     $("send-btn").disabled = false;
@@ -1044,8 +1287,17 @@ $("send-btn").addEventListener("click", async () => {
 });
 
 // ---------- connected receivers roster (sender-side) ----------
-async function refreshReceivers() {
+//
+// Round 20 goal 2: a real, confirmed-broken-by-direct-use bug - clicking
+// Refresh was wired to a real handler calling a real command (nothing was
+// actually missing), but gave zero visible feedback when the result was
+// unchanged from before (the common case: usually zero or the same
+// receivers), which reads exactly like "the button does nothing". `reportStatus`
+// mirrors the same silent-vs-explicit pattern round 16's own
+// runUpdateCheck already uses for the same reason.
+async function refreshReceivers(reportStatus) {
   $("receivers-error").textContent = "";
+  if (reportStatus) $("receivers-refresh-status").textContent = "Refreshing…";
   try {
     const list = await invoke("list_connected_receivers");
     $("receivers-wrap").classList.remove("hidden");
@@ -1056,16 +1308,21 @@ async function refreshReceivers() {
       li.innerHTML = `
         <span class="mono">${escapeHtml(r.peer_id)}</span>
         <span class="hint-inline">connected ${escapeHtml(r.connected_at)}</span>
-        <button class="ghost-btn push-btn" type="button" data-peer="${escapeHtml(r.peer_id)}">Push update</button>
+        <button class="ghost-btn push-btn" type="button" data-peer="${escapeHtml(r.peer_id)}"><svg class="icon"><use href="#icon-send"></use></svg> Push update</button>
         <span class="hint push-status"></span>
       `;
       ul.appendChild(li);
     }
+    if (reportStatus) {
+      $("receivers-refresh-status").textContent =
+        list.length === 0 ? "No receivers connected." : `${list.length} connected.`;
+    }
   } catch (err) {
     $("receivers-error").textContent = String(err);
+    if (reportStatus) $("receivers-refresh-status").textContent = "";
   }
 }
-$("receivers-refresh-btn").addEventListener("click", refreshReceivers);
+$("receivers-refresh-btn").addEventListener("click", () => refreshReceivers(true));
 
 // Delegated so newly-rendered rows don't need their own listener wiring.
 $("receivers-list").addEventListener("click", async (e) => {
@@ -1310,13 +1567,23 @@ $("reject-btn").addEventListener("click", async () => {
 
 let unlistenRunProgress = null;
 
+// Round 21: the chevron direction itself communicates expanded/collapsed,
+// same as the label text always did - kept as innerHTML (fixed literals
+// only, nothing dynamic ever reaches this button) rather than duplicating
+// two full icon+label strings at every call site.
+function setDetailsToggleExpanded(expanded) {
+  $("run-details-toggle").innerHTML = expanded
+    ? '<svg class="icon"><use href="#icon-chevron-up"></use></svg> Hide details'
+    : '<svg class="icon"><use href="#icon-chevron-down"></use></svg> Show details';
+  $("run-details-toggle").setAttribute("aria-expanded", String(expanded));
+}
+
 // Collapsed by default — toggling only shows/hides the log already
 // accumulated in #run-log, doesn't (re)fetch anything.
 $("run-details-toggle").addEventListener("click", () => {
   const expanded = !$("run-log").classList.contains("hidden");
   $("run-log").classList.toggle("hidden");
-  $("run-details-toggle").textContent = expanded ? "Show details ▾" : "Hide details ▲";
-  $("run-details-toggle").setAttribute("aria-expanded", String(!expanded));
+  setDetailsToggleExpanded(!expanded);
 });
 
 $("run-btn").addEventListener("click", async () => {
@@ -1332,8 +1599,7 @@ $("run-btn").addEventListener("click", async () => {
   // shouldn't show last attempt's log lines glued onto this one.
   $("run-log").textContent = "";
   $("run-log").classList.add("hidden");
-  $("run-details-toggle").textContent = "Show details ▾";
-  $("run-details-toggle").setAttribute("aria-expanded", "false");
+  setDetailsToggleExpanded(false);
 
   // Registered before invoke so no early line from the backend's tailer is
   // missed.

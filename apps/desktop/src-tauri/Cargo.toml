@@ -48,6 +48,31 @@ tauri-plugin-process = "2"
 # "open this URL/path with whatever the OS already uses", not something
 # worth hand-rolling per platform.
 tauri-plugin-opener = "2"
+# Round 24: the magic-link custom URL scheme. tauri-plugin-deep-link
+# handles registering `localsync://` with the OS at bundle/install time
+# (NSIS registry keys on Windows, an Info.plist CFBundleURLTypes entry on
+# macOS, a .desktop file's MimeType on Linux) from the single config block
+# in tauri.conf.json - not hand-rolled per-OS code. On its own it only
+# covers macOS fully (the OS re-invokes the same running process and the
+# plugin emits an event); Windows and Linux instead spawn a brand-new
+# process with the URL as a CLI argument every time a link is clicked; that
+# new process's tauri-plugin-deep-link *does* parse and store that
+# argument, but a person clicking a second link expects it to reach the
+# app they already have open, not a second window - hence
+# tauri-plugin-single-instance's own "deep-link" feature (its README's own
+# explicit recommendation), which redirects that second process's
+# argument into the first, real one.
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Round 24: "Copy code"/"Copy link" in the Send flow. The official plugin,
+# not the raw browser navigator.clipboard API - Tauri v2's own capabilities/
+# ACL system (see capabilities/default.json) treats clipboard access as
+# something an app must explicitly opt into, which this plugin's own
+# permission model is built around (its default permission set is
+# deliberately empty; capabilities/default.json grants exactly
+# clipboard-manager:allow-write-text and nothing more, since writing is all
+# this app ever does with the clipboard).
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
