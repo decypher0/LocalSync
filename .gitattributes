@@ -1,0 +1,10 @@
+# Round 27: real risk on a Windows checkout otherwise - these are executed
+# directly via their own shebang line (dpkg runs .deb maintainer scripts
+# that way, not via an explicitly-invoked `bash script.sh`), so a CRLF
+# checkout would turn `#!/bin/sh` into `#!/bin/sh\r`, which the kernel
+# resolves as a nonexistent interpreter and refuses to run - silently
+# breaking package install/removal for anyone who built this project's
+# .deb from a Windows-checked-out clone with core.autocrlf enabled.
+# Forced to LF regardless of the checking-out machine's own git config.
+*.sh text eol=lf
+apps/desktop/src-tauri/linux/main.desktop text eol=lf
