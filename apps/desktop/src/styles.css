@@ -300,6 +300,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   letter-spacing: 0.05em;
   user-select: all;
 }
+.send-code-actions { margin-top: var(--space-2); }
 
 .progress-wrap { margin-top: var(--space-4); }
 .progress-track {
