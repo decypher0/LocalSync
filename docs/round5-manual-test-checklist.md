@@ -920,6 +920,8 @@ Multiple folders sharing one database is set up once, not N times. And
 every error, wherever it appears, says something a person could actually
 act on.
 
+---
+
 ## Round 20 addendum: layout, functional audit, flow reorder
 
 Round 20 fixes three real problems found by actually using the app: the
@@ -1162,6 +1164,89 @@ type, elevation — that's the same system on every screen instead of
 whatever felt right when that screen was originally built. Whether it
 actually *looks* good is a judgment call this sandbox is structurally
 unable to make; that call belongs to the developer, on a real screen.
+
+---
+
+## Round 23 addendum: Cloud drop (Google Drive) — needs a real OAuth Client ID and two real Google accounts
+
+This is the round with the widest gap between what's automated and what needs
+your own hands: nothing here can exercise a real Google OAuth consent screen,
+a real cross-account Drive permission grant, or (crucially) tell you which of
+the two documented `expirationTime` behaviors your own accounts actually
+produce. Everything that *could* be proven without those — PKCE against RFC
+7636's own known vector, a real end-to-end OAuth loopback flow against a
+simulated browser redirect, every Drive/token HTTP call against a real local
+mock server, the retention decision table, and the reject-path control
+protocol over real `ls_net` connections — already has 43 passing automated
+tests (41 in `ls-clouddrop`, 2 in the new `cloud_drop_protocol_test.rs`); this
+checklist is for the rest.
+
+### Before you start: get a real Client ID
+
+Follow `docs/google-drive-setup.md` start to finish first — a Google Cloud
+project, the Drive API enabled, an OAuth consent screen in "Testing" status
+with **two of your own Google accounts** added as test users (one to act as
+sender, one as receiver), and a Desktop-app-type OAuth Client ID. Set
+`GOOGLE_OAUTH_CLIENT_ID` to that value before launching either app instance.
+Without it, Settings → **Link Google account** fails immediately with a
+message pointing back at that doc — confirm that's what you see if you
+launch without setting it, as a sanity check that the failure path itself is
+honest before you set the real value.
+
+### What to check
+
+1. **Linking, for real.** With `GOOGLE_OAUTH_CLIENT_ID` set, click **Link
+   Google account** in Settings. Confirm your real default browser opens to
+   a real Google consent screen listing the scopes from
+   `docs/google-drive-setup.md` (with a "Google hasn't verified this app"
+   warning — expected while in Testing status; click **Continue** since
+   you're signed in as a test user). After approving, confirm the browser
+   tab shows a plain confirmation page and Settings now shows your real
+   linked email.
+2. **A full send/receive/accept cycle, two real accounts, ideally two real
+   machines.** On the sender: check the **Cloud drop** box on the Send
+   wizard's final step, pick a retention option, click **Send** — confirm a
+   room code appears and a real file lands in your Google Drive (check
+   drive.google.com yourself; look for a "LocalSync Cloud Drop" folder).
+   On the receiver (linked to your *second* test account): check **This is
+   a Cloud drop code**, paste the code, click **Receive** — confirm the
+   sender sees a real "Cloud drop access request" banner naming the
+   receiver's actual email. Click **Grant access** — confirm the receiver's
+   Receive tab proceeds straight into the normal diff-review screen
+   (Run/Reject exactly as any other transport; nothing auto-runs).
+3. **Reject, and confirm it independently — not just via the app.** Send
+   again, this time click **Decline** on the incoming request. Then check
+   **drive.google.com on the sender's account** (not the app) and confirm
+   the uploaded file's Share dialog shows no one else has access at all —
+   this independent, Drive-native confirmation is the actual point of this
+   round's whole access-grant design, and the one thing no automated test
+   in this sandbox could ever demonstrate.
+4. **Retention, for real.** Send with "Delete once downloaded" and confirm
+   (after the receiver downloads, then relaunching the sender app) the file
+   disappears from Drive. Separately, send with "Delete after 24 hours" (or
+   pick a near-future custom time to avoid an actual day's wait) and confirm
+   it's gone after that time passes and the sender app has been relaunched
+   at least once past it.
+5. **The `expirationTime` question itself, if you have access to a Google
+   Workspace account.** Grant access from a Workspace account with a
+   non-"delete after download" retention set, then check that permission's
+   real `expirationTime` field via the Drive API or a script — confirming
+   whether it was actually honored. This is a genuinely open, two-way
+   question this round's code was built to be correct either way for, not
+   one it could resolve itself: report back whichever way it goes.
+
+### What "success" looks like
+
+A developer with a linked Google account can send a project to a specific
+named colleague — not "anyone with the link" — who has to have their own
+account explicitly approved before they can download anything, and who
+lands in the exact same review-before-Run screen as any other transport.
+Declining leaves a real, independently-checkable trace of "no access
+granted" on Drive itself. And whichever retention option was chosen, the
+file is actually gone from Drive by the time it's supposed to be — checked
+on Drive directly, not just trusted from the app's own UI.
+
+---
 
 ## Round 24 addendum: magic link (custom URL scheme + static fallback page)
 

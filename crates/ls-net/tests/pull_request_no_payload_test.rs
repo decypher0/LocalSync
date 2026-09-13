@@ -84,20 +84,46 @@ fn garbage_or_unrecognized_messages_are_hard_errors_not_silently_accepted() {
 /// for if that ever changes: every `send_control(&..., &ControlMessage::` in
 /// `apps/desktop/src-tauri/src/commands.rs` should be sender-side.
 #[test]
-fn only_three_control_message_variants_exist_and_none_carry_arbitrary_bytes() {
-    // Exhaustive match - if a fourth variant is ever added, this fails to
+fn only_six_control_message_variants_exist_and_none_carry_arbitrary_bytes() {
+    // Exhaustive match - if a new variant is ever added, this fails to
     // compile until it's handled here too, forcing a conscious decision
-    // about whether it can carry a payload.
+    // about whether it can carry a payload. Round 23 added the three
+    // Cloud-drop variants: CloudAccessRequest carries only an email string
+    // (an identity announcement, same class as PullRequest carrying
+    // nothing at all) - never a file path, never bytes, never anything a
+    // receiver could use to push content back to the sender.
     let all = [
         ControlMessage::PullRequest,
         ControlMessage::PullResponse { accepted: true },
         ControlMessage::IncomingUpdate,
+        ControlMessage::CloudAccessRequest { google_email: "someone@example.com".to_string() },
+        ControlMessage::CloudAccessResponse { accepted: true, drive_file_id: Some("abc123".to_string()) },
+        ControlMessage::CloudDownloadConfirmed,
     ];
     for msg in all {
         match msg {
             ControlMessage::PullRequest => {}
             ControlMessage::PullResponse { accepted: _ } => {}
             ControlMessage::IncomingUpdate => {}
+            ControlMessage::CloudAccessRequest { google_email: _ } => {}
+            ControlMessage::CloudAccessResponse { accepted: _, drive_file_id: _ } => {}
+            ControlMessage::CloudDownloadConfirmed => {}
         }
     }
+}
+
+/// Mirrors `adversarial_extra_fields_on_a_pull_request_are_inert` above, for
+/// the new identity-announcement variant specifically: a hand-crafted
+/// message claiming extra fields (a fake file path, embedded bytes) still
+/// decodes to a value with nowhere to put them - `google_email` is the only
+/// field that exists, so that's the only thing that can ever be read back.
+#[test]
+fn adversarial_extra_fields_on_a_cloud_access_request_are_inert() {
+    let raw = r#"{"type":"cloud-access-request","google_email":"real@example.com","payload":"evil bytes","file_path":"/etc/passwd"}"#;
+    let decoded: ControlMessage = serde_json::from_str(raw).expect("expected this to still decode");
+    assert_eq!(
+        decoded,
+        ControlMessage::CloudAccessRequest { google_email: "real@example.com".to_string() },
+        "adversarial extra fields must be dropped, not smuggled through"
+    );
 }
