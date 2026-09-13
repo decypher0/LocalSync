@@ -31,9 +31,15 @@ pub struct RunningSession {
     /// Whether the database data volume already existed before this run (a
     /// cache hit on `db_seed_hash`) vs. a cold start that had to re-seed.
     pub db_cache_hit: bool,
-    /// Directory holding the unpacked snapshot + rewritten compose file.
-    /// Not part of the public contract data-wise, but `stop_session` needs
-    /// it as the cwd for `podman-compose down` to find the same project.
+    /// Directory actually holding `docker-compose.yml` (rewritten) - the
+    /// unpacked snapshot's own root for the older, pre-round-17 single-
+    /// folder path, or one level down (`<unpacked root>/<folder label>`)
+    /// for a round-17+ wizard send with exactly one folder, since
+    /// `create_snapshot_multi` nests every folder's files under its own
+    /// label unconditionally (see `run_snapshot`'s own comment on
+    /// `compose_root`). Not part of the public contract data-wise, but
+    /// `stop_session` needs it as the cwd for `podman-compose down` to find
+    /// the same project.
     compose_dir: PathBuf,
 }
 
@@ -81,10 +87,37 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
     let compose_dir = work_dir.join(subdir);
     unpack_payload(&verified.snapshot().payload, &compose_dir).await?;
 
-    let compose_path = compose_dir.join("docker-compose.yml");
-    let original_yaml = tokio::fs::read_to_string(&compose_path)
-        .await
-        .context("snapshot payload has no docker-compose.yml")?;
+    // Round 30: a real bug found in real cross-machine testing, root-caused
+    // by directly reproducing it rather than guessed at - a project sent
+    // through the Send wizard (`share_snapshot_wizard` ->
+    // `ls_snapshot::create_snapshot_multi`, the only Send path since round
+    // 20) fails here even when it has a perfectly real `docker-compose.yml`,
+    // because `bundle::merge_folder_payloads` nests *every* folder's files
+    // under its own `manifest.folders[i].name` label - unconditionally,
+    // with no special case for exactly one folder - while this function
+    // always looked for `docker-compose.yml` at the payload's own top
+    // level. `manifest.folders` is empty only for the older, pre-round-17
+    // `create_snapshot` single-folder path (see its own doc comment),
+    // which never nests anything and keeps working unchanged below. A
+    // genuinely multi-folder send (2+) has no single compose file to run
+    // at all by design - round 17's own doc comment on
+    // `create_snapshot_multi` is explicit that running several raw folders
+    // together was deliberately out of scope - so that case still falls
+    // through to the same "no docker-compose.yml" path as a genuinely
+    // uncontainerized project, just with a real, actionable message now
+    // instead of a bare internal-looking string.
+    let compose_root = match manifest.folders.as_slice() {
+        [only_folder] => compose_dir.join(&only_folder.name),
+        _ => compose_dir.clone(),
+    };
+
+    let compose_path = compose_root.join("docker-compose.yml");
+    let original_yaml = tokio::fs::read_to_string(&compose_path).await.context(
+        "This project doesn't have a docker-compose.yml, so LocalSync doesn't know how to build \
+         or run it yet. Add one to the project defining how to build and run it, then send again \
+         (auto-generating one from the project's own framework is a real, separate future \
+         capability - not something LocalSync does today; see docs/auto-containerization.md).",
+    )?;
 
     let database_services = compose::database_service_names(manifest);
     let db_volume = compose::db_volume_name(&manifest.db_seed_hash);
@@ -102,14 +135,24 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
     };
 
     let compose_project_name = compose_project_name(&manifest.project_name, &manifest.git_commit);
-    podman::compose_up(&compose_dir, &compose_project_name, log.as_ref()).await?;
+    // podman-compose resolves docker-compose.yml (and any relative `build:`
+    // context inside it) from its own current directory, not from an
+    // explicit -f flag - compose_root, not the unpacked payload's own root,
+    // is what must be passed here (and to compose_down, via
+    // RunningSession.compose_dir below) whenever a single folder's own
+    // files live nested one level down.
+    podman::compose_up(&compose_root, &compose_project_name, log.as_ref()).await?;
 
     Ok(RunningSession {
         project_name: manifest.project_name.clone(),
         compose_project_name,
         service_ports,
         db_cache_hit,
-        compose_dir,
+        // compose_root, not the unpacked payload's own root - stop_session
+        // must `cd` to the exact same directory compose_up just did, or
+        // podman-compose down would look for docker-compose.yml (and this
+        // run's own project state) in the wrong place.
+        compose_dir: compose_root,
     })
 }
 
