@@ -922,6 +922,251 @@ act on.
 
 ---
 
+## Round 20 addendum: layout, functional audit, flow reorder
+
+Round 20 fixes three real problems found by actually using the app: the
+whole UI was left-aligned with no centering or max-width, the "Refresh"
+button next to "Previously connected" did nothing when clicked, and Send
+started with folder selection instead of letting the developer choose a
+transfer mode first. This round is structural/functional, not a visual
+redesign (that's round 21). **This is a frontend-only round — no Rust
+files changed** — verified via `git diff main --stat -- '*.rs'
+Cargo.toml Cargo.lock` returning empty, and rounds 1–19's existing
+`cargo build --workspace` / test suites were re-run to confirm the
+baseline still holds. JS changes were verified via `node --check` (no
+syntax errors), a DOM-id cross-reference script (every `$("...")`/
+`getElementById("...")` call in `app.js` resolves to a real id in
+`index.html`, no duplicate ids), and an HTML tag-balance count — this
+sandbox has no way to actually render the app or simulate clicks, so
+none of this substitutes for a real click-through.
+
+**A real discrepancy found while starting this round**: the build prompt
+referenced a third transfer mode, "Cloud drop," from "round 19." A full
+search of the codebase and entire git history (all branches/tags) found
+no trace of either — neither exists. Raised directly; the developer
+chose to proceed with only the two transfer modes that actually exist
+(Local network, Remote relay) for this round's mode-selection step,
+deferring Cloud drop to its own future round if and when it's actually
+built. The wizard's first step therefore offers exactly two choices, not
+three.
+
+### What changed
+
+- **Centered, bounded layout** (goal 1): all body content now sits
+  inside a `.app-shell` container (max-width ~880px, centered, with
+  consistent side padding); previously full-bleed elements (`.topbar`,
+  `.settings-panel`) got compensating negative margins so they still
+  read as full-bleed *within* the shell rather than being visibly
+  inset. Applies to Send, Receive, and Settings alike since they all
+  share the same shell.
+- **Refresh button fixed** (goal 2): code review found this was *not* a
+  missing- or broken-handler bug — the click handler and its backend
+  command were both wired correctly and did re-fetch the roster. The
+  real problem is a UX feedback gap: refreshing to the same (often
+  empty) result looks identical to doing nothing. Fixed the same way
+  round 16 fixed the identical class of problem for update checks
+  (`runUpdateCheck(reportStatus)`): `refreshReceivers` now takes a
+  `reportStatus` flag, showing "Refreshing…" then a real count (or "No
+  receivers connected.") only when a person clicks the button — the
+  three existing silent/automatic call sites (after accepting a pull
+  request, on tab switch, after a successful send) are unchanged and
+  stay quiet.
+- **Full button audit** (goal 2): every `addEventListener` call in
+  `app.js` was reviewed against every interactive control in
+  `index.html`. The Refresh button above was the only genuinely broken
+  one found; everything else was already correctly wired.
+- **Transfer mode chosen first** (goal 3): the Send wizard's first step
+  is now an explicit Local network / Remote relay choice (with the
+  relay URL field appearing only when Remote relay is picked), backed
+  by the same `localStorage` keys Settings' own toggle already used, so
+  the two stay in sync without either depending on the other's DOM
+  elements. Folder selection and the full round-17/22 database wizard
+  proceed unchanged after this step, regardless of which mode was
+  picked; only the transport step at the very end differs.
+- **Guided pop-up wizard** (goal 4): folder selection through the full
+  database wizard now renders inside a modal overlay (dimmed backdrop,
+  `role="dialog" aria-modal="true"`, `max-height: 88vh` with internal
+  scroll so the variable-length per-folder DB sub-flow never overflows
+  the viewport) instead of flat inline page content. The header shows
+  "Step X of N: <phase>" progress — the per-folder DB sub-flow's several
+  fine-grained screens are grouped under one "Database setup" phase
+  since its real screen count varies by folder/branch taken, so a fake
+  precise step count isn't shown. A Cancel button and a Back button on
+  every step (including a new Back on the folder-selection step, back to
+  mode choice) let the developer leave or step back at any point. The
+  modal closes automatically once a send actually succeeds, so the room
+  code renders on the main Send tab exactly where it always has.
+- **A real gap found and fixed while integrating goal 4**: closing the
+  modal only on success meant a failed send (from `start_send_session`
+  or `share_snapshot_wizard`) left the modal open while the existing
+  error message was written only to `#send-error`, an element on the
+  main Send tab page — invisible behind the modal's backdrop at exactly
+  the moment it mattered. Added a dedicated `#wiz-send-error` element
+  inside the wizard's final step and the `catch` block now writes the
+  error to both elements unconditionally (whichever one is actually
+  visible depends on whether the modal has closed by that point; writing
+  to both is simpler than branching and costs nothing since the hidden
+  one is never seen).
+
+### What to check on real hardware
+
+1. **Layout, visually**: confirm the app actually looks centered and
+   bounded (not just structurally correct in the DOM) at a range of
+   window widths, including narrow ones — this sandbox has no display to
+   render against.
+2. **Every button, by clicking it**: this round's audit was done entirely
+   through code review (no working synthetic input exists in this
+   sandbox); do a real click-through of every button/toggle across Send,
+   Receive, and Settings and confirm each does what it should, not only
+   that the Refresh fix above works.
+3. **Refresh, specifically**: click Refresh with zero receivers connected
+   and confirm "No receivers connected." now appears (previously: visibly
+   nothing happened); click it again with receivers connected and confirm
+   the count updates.
+4. **Mode-first flow**: start a new send and confirm the very first
+   screen is the Local/Remote relay choice, before any folder picker
+   appears; confirm choosing Remote relay reveals the URL field and
+   blocks Next until it's filled in; confirm the choice persists (via
+   Settings' toggle) across restarts.
+5. **The modal wizard itself**: confirm it actually renders as a
+   dimmed overlay on top of the app (not inline page content), that the
+   step counter updates sensibly as you move through mode → folders →
+   database setup → ready, that Back/Cancel/Next all work at every step,
+   and that a long per-folder DB sub-flow (e.g. picking from a big table
+   list) scrolls inside the modal rather than overflowing the window.
+6. **The failed-send error, specifically**: trigger a real send failure
+   while the wizard modal is still open (e.g. an invalid relay URL that
+   passes client-side validation but fails at connect time) and confirm
+   the error is now visible inside the modal, not silently swallowed
+   behind it.
+
+### What "success" looks like
+
+The app looks and feels like one coherent, intentional piece of software
+rather than an unstyled left-aligned document with a few dead buttons.
+Every click does something visible, including a repeat click that finds
+nothing new. Starting a send asks "how" before it asks "what," and the
+whole folder-through-database-setup journey reads as one guided sequence
+in its own space — including when it fails partway through.
+
+## Round 21 addendum: iconography, theming, and modern visual design
+
+Round 21 is a genuine visual redesign, not new functionality — a lightweight
+icon system (real Lucide SVG source, vendored inline, not a CDN dependency
+this offline desktop app can't rely on), a real light/dark theme system with
+a persisted manual override, and a design-token pass (spacing, typography,
+radius, elevation) applied across every screen including every wizard step
+from rounds 17–20. **This sandbox has no display** — everything below is
+verified through code review, real WCAG contrast-ratio computation for the
+new color tokens, and the same DOM-id/tag-balance/syntax checks every prior
+UI round has used, never by actually looking at the app. Whether it actually
+looks good is explicitly the developer's own call — see "What to check on
+real hardware" below.
+
+### What changed
+
+- **Icon system** (goal 1): 28 icons, real Lucide SVG source (ISC-licensed,
+  https://lucide.dev, extracted via the published `lucide-static` npm
+  package — not hand-drawn or guessed), vendored as inline `<symbol>` defs
+  at the top of `index.html` rather than a cross-file sprite or CDN
+  script. Inline was a deliberate choice over a separate `icons.svg` file:
+  a same-document `<use href="#icon-x">` behaves identically across
+  WebView2 (Windows), WebKitGTK (Linux), and WKWebView (macOS), where a
+  cross-file `<use>` pointing at an external SVG is a known source of
+  inconsistent behavior across exactly that engine spread — and this is
+  an offline desktop app, so a CDN-hosted icon font was never on the
+  table. Every icon uses `stroke="currentColor"`, so it always matches
+  its surrounding text color with zero icon-specific color rules, in
+  either theme. Applied to every button across Send, Receive, Settings,
+  and all wizard steps, plus the peer-recognized/peer-new status banners
+  (previously a bare ✓/? text character) — kept as icon+label everywhere
+  except a small number of genuinely self-explanatory case (e.g. the
+  "These details are wrong — edit manually" link), per the round's own
+  instruction to prefer clarity over icon-only minimalism.
+- **Light and dark themes** (goal 2): every color in the stylesheet is
+  now a CSS custom property (verified: the only remaining literal hex
+  values in `styles.css` are the token definitions themselves, `#fff` for
+  fixed white badge/icon-circle text, and the run log's deliberately
+  theme-independent terminal colors — unchanged from before this round,
+  and called out in its own comment). A new Settings control offers three
+  real states — System / Light / Dark, not a single on/off toggle —
+  persisted to `localStorage` and applied synchronously by a small inline
+  script in `index.html`'s `<head>` (before `app.js` itself loads, at the
+  end of `<body>`) so an explicit override never flashes the OS's theme
+  for one frame first. The dark palette is not the light one inverted:
+  four colors (the accent/danger/added/modified tones, used as plain text
+  read directly against the page background — links, result/error
+  messages, diff insertion/deletion coloring) get their own dark-specific
+  values, each checked to really reach WCAG AA's 4.5:1 contrast ratio
+  against the real dark background by computing it, not eyeballing it;
+  the same four colors used as background fills under fixed white text
+  (badges, the peer-status icon circles) are deliberately left unchanged
+  between themes, since that usage already had known-good contrast in
+  both.
+- **A real design-token system** (goal 3): a spacing scale
+  (`--space-1`…`--space-7`, 4px-based), a typography scale (`--font-size-
+  xs`…`--font-size-xl`, `--weight-regular`…`--weight-bold`), radius
+  tokens, and elevation tokens (`--shadow-sm/md/lg`, themed separately —
+  dark mode's shadows are darker/more opaque, since a light-mode shadow
+  value reads as almost invisible against a dark background). Applied
+  throughout the entire stylesheet, not just new rules — every screen,
+  including every step of the rounds 17–20 wizard (transfer-mode choice,
+  folder selection, the full per-folder database sub-flow, the final
+  summary). A few real, previously-missing pieces of visual consistency
+  were also fixed along the way: `<select>` and `input[type=number]`/
+  `input[type=password]` elements had **no styling at all** before this
+  round (native browser appearance, inconsistent with the styled
+  `input[type=text]` fields right next to them) — now share the same
+  rule. A visible focus ring (`:focus-visible`, using the same
+  theme-aware `--focus-ring` token) was added for every interactive
+  element, since a real desktop app gets used with the keyboard and the
+  three WebViews' own default focus indicators don't look or behave the
+  same way. Hover states were added to every button variant and to the
+  wizard's table/schema list rows, all previously static.
+
+### What to check on real hardware
+
+1. **Icons, at a glance**: confirm the 28 icons actually render (not
+   broken `<use>` references — code-verified that every reference
+   resolves to a real symbol, but only a real render confirms the SVGs
+   themselves paint correctly) and that each one reads clearly at its
+   small on-screen size paired with its label.
+2. **Both themes, on every screen**: switch System → Light → Dark → System
+   again in Settings and confirm each actually applies immediately, with
+   no flash of the wrong theme on a fresh launch after setting an explicit
+   override. Check contrast specifically on: result/error text, the diff
+   insertion/deletion coloring, and links (`ports-list` addresses, the
+   "Show details" toggle) — these are the values this round tuned
+   specifically for dark-mode legibility and are worth a real look, not
+   just the badges/buttons that were left unchanged on purpose.
+3. **Every wizard step, in both themes**: step through the full send
+   wizard (mode → folders → needs-db → shared-db → the per-folder
+   database sub-flow → ready) in both Light and Dark, confirming spacing,
+   borders, and the modal's own elevation (shadow) all read as one
+   coherent design, not just the main Send/Receive tabs.
+4. **Hover and focus states**: confirm buttons, table/schema rows, and
+   tabs show a visible hover change, and that Tab-ing through the app
+   (keyboard only, no mouse) shows a clear focus ring on whatever's
+   focused at every step.
+5. **Overall visual quality** — genuinely a call only a person looking at
+   a real screen can make: does the icon set read as "modern and
+   intentional" rather than random or mismatched; is the spacing rhythm
+   actually comfortable; do both themes feel considered rather than one
+   being an afterthought. This round implemented a real, internally
+   consistent system — it does not, and cannot from this sandbox, verify
+   that the result is genuinely good-looking.
+
+### What "success" looks like
+
+The app has a real icon vocabulary, a genuine light/dark theme a person
+can pick and keep across restarts, and a visual language — spacing,
+type, elevation — that's the same system on every screen instead of
+whatever felt right when that screen was originally built. Whether it
+actually *looks* good is a judgment call this sandbox is structurally
+unable to make; that call belongs to the developer, on a real screen.
+
+---
+
 ## Round 23 addendum: Cloud drop (Google Drive) — needs a real OAuth Client ID and two real Google accounts
 
 This is the round with the widest gap between what's automated and what needs
@@ -1000,3 +1245,87 @@ Declining leaves a real, independently-checkable trace of "no access
 granted" on Drive itself. And whichever retention option was chosen, the
 file is actually gone from Drive by the time it's supposed to be — checked
 on Drive directly, not just trusted from the app's own UI.
+
+---
+
+## Round 24 addendum: magic link (custom URL scheme + static fallback page)
+
+Round 24 adds a real `https://` link on top of the existing room code: click it with LocalSync installed and it opens straight to a pre-filled Receive tab; click it without LocalSync installed and a static GitHub Pages site walks you through installing it, with your code ready to paste in afterward. **This is the round most dependent on real-hardware confirmation of any so far** — everything about whether a custom URL scheme actually reaches an installed app, or correctly falls back when it doesn't, is OS/browser behavior this sandbox cannot observe or simulate at all.
+
+### What was code-verified (not real-hardware — see below for that)
+
+- The Rust side builds cleanly with `tauri-plugin-deep-link`,
+  `tauri-plugin-single-instance` (with its `deep-link` feature), and
+  `tauri-plugin-clipboard-manager` all registered — confirmed via a real
+  `cargo build -p localsync-desktop`, and `cargo tree -p localsync-desktop`
+  was used to directly confirm the `deep-link` feature really pulled
+  `tauri-plugin-deep-link` in as a dependency of
+  `tauri-plugin-single-instance`, not just declared in Cargo.toml.
+- `capabilities/default.json` was updated with the exact permissions each
+  new plugin's own manifest requires (`deep-link:default`,
+  `clipboard-manager:allow-write-text`) — found by reading each plugin's
+  real `permissions/default.toml` from its downloaded crate source, not
+  guessed; a missing permission here would fail silently at runtime
+  (a rejected `invoke`), not at compile time, so this was checked
+  deliberately rather than assumed to be unnecessary.
+- The fallback page's real logic — `parseCode`, `detectOS`,
+  `pickInstallerAssets`, and the exact `localsync://...` URL it builds —
+  has 24 passing automated tests (`node --test
+  web/test-magic-link-logic.js`, Node's own built-in test runner, no new
+  dependency), covering real edge cases: Android's user agent containing
+  the substring "Linux" (and this not being misread as a Linux desktop
+  build to offer), a release with no build for a given OS, a missing/empty
+  code parameter, and characters in a code that need percent-encoding for
+  the URL to be valid.
+- `.github/workflows/pages.yml` was validated with `actionlint` (zero
+  findings, alongside every other workflow in this repo) and runs the same
+  test file as a real deploy gate.
+- The exact GitHub API field names used (`assets[].name`,
+  `assets[].browser_download_url`) were confirmed against a real
+  `GET /repos/.../releases/latest` response from a real public repo with
+  real release assets, not assumed from memory of the API's shape.
+
+### What to check on real hardware
+
+1. **Install the app, then click a real magic link** (generate one from
+   Send's new "Copy link" button, paste it into a browser on the same
+   machine): confirm it opens LocalSync directly, switches to the Receive
+   tab, and the code is already filled in — you should only need to click
+   Receive, never retype anything.
+2. **Click a second magic link while LocalSync is already running**
+   (Windows and Linux specifically — this is the exact case
+   `tauri-plugin-single-instance`'s `deep-link` feature exists for):
+   confirm it brings the *existing* window to the front with the new
+   code filled in, rather than opening a second LocalSync window/process.
+3. **Click a magic link with LocalSync *not* installed**: confirm the
+   browser lands on the static fallback page (once GitHub Pages is
+   actually enabled and deployed — see below), that it shows your real
+   code with a working copy button, and that it highlights the right
+   installer for the machine you're using (then confirm the *other*
+   OSes' downloads are still visible, just less prominent — a wrong OS
+   guess should never hide the real option).
+4. **Confirm the fallback page's own real download links work**: click
+   through to an actual installer from the page and confirm the URL
+   GitHub's API returned really downloads the file it claims to, for
+   whichever OS you're testing on.
+5. **The one-time GitHub Pages setup**: in this repo's Settings → Pages,
+   confirm "Source" is set to "GitHub Actions" (see this round's README
+   section for why this can't be automated), then confirm a push to
+   `web/` (or a manual `workflow_dispatch` run of "Deploy magic-link page
+   to GitHub Pages") actually publishes the page and that
+   `https://decypher0.github.io/LocalSync/?code=test` loads.
+6. **Copy code vs. Copy link**: after starting a send, confirm both new
+   buttons work, copy genuinely different things (the bare code vs. the
+   full `https://...?code=...` link), and that pasting each works where
+   you'd expect (the bare code into LocalSync's own Receive field, the
+   link into a browser or a chat message to someone else).
+
+### What "success" looks like
+
+Someone who already has LocalSync installed clicks a link and lands
+straight in a pre-filled Receive tab — no copy-pasting a code by hand.
+Someone who doesn't have it yet clicks the same kind of link, lands on a
+real page that tells them what to download for their machine and holds
+onto their code until they're ready to paste it in. Neither path needed
+a backend, a database, or a hardcoded download URL that would go stale
+the next time a release ships.
