@@ -1,0 +1,50 @@
+# Round 27: custom .desktop template (bundle.linux.deb.desktopTemplate in
+# tauri.conf.json) - Tauri's own bundled default (crates/tauri-bundler's
+# freedesktop/main.desktop) has neither line this file adds, and there is
+# no config-only way to add them; this is the documented workaround
+# (confirmed against a currently-open upstream bug, tauri-apps/tauri#16014,
+# which recommends exactly this custom-template approach).
+#
+# IMPORTANT for anyone editing this file: it is itself a Handlebars
+# template - do not describe real Handlebars syntax in a comment here
+# using literal double-brace mustaches. The bundler's own template engine
+# parses this whole file, comments included, before .desktop's "#" syntax
+# ever gets a say - a stray, unclosed mustache expression in a comment
+# breaks the build with a real, confirmed (not hypothetical) template
+# parse error, caught the hard way while building this exact fix.
+#
+# The Exec line below adds a trailing percent-u field code that the
+# bundler's own default template lacks. Per the Desktop Entry
+# Specification, a launcher only passes a clicked URL as an argument to
+# Exec when that field code is present (singular form for one URL, plural
+# for a list) - without it, a real click on a localsync:// link used to
+# launch this app with no arguments at all. That's the actual root cause
+# of round 27's Linux bug report ("opens to the default Send screen"
+# instead of Receive with the code pre-filled) - the app was never
+# missing the code, it was never given anything to look for one in. The
+# singular field code matches how this app is actually invoked - one
+# magic link, one URL - never a batch of them.
+#
+# The MimeType line below is hardcoded rather than left to the default
+# template's own optional variable for it, confirmed not to be populated
+# from this project's deep-link scheme config in tauri.conf.json (only
+# from an unrelated file-association feature this project doesn't use).
+# This is the actual OS-level registration a desktop environment/browser
+# reads to know this app is the handler for the scheme at all - see
+# postInstallScript below for the other required half (refreshing the
+# system's cached copy of it). Keep this in sync by hand with
+# tauri.conf.json's own scheme list if that scheme name ever changes -
+# there's no single source of truth between this template and a JSON
+# config file to enforce it automatically.
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}} %u
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+MimeType=x-scheme-handler/localsync;
