@@ -124,8 +124,8 @@ listen("pull-request", (evt) => {
   div.innerHTML = `
     <span>Pull request from <strong>${escapeHtml(peerId)}</strong></span>
     <span class="inline-row">
-      <button class="ghost-btn accept-btn" type="button">Accept</button>
-      <button class="ghost-btn decline-btn" type="button">Decline</button>
+      <button class="ghost-btn accept-btn" type="button"><svg class="icon"><use href="#icon-check"></use></svg> Accept</button>
+      <button class="ghost-btn decline-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Decline</button>
     </span>
     <p class="error"></p>
   `;
@@ -164,6 +164,46 @@ $("settings-toggle").addEventListener("click", () => {
   $("settings-panel").classList.toggle("hidden");
 });
 $("data-dir-display").value = "(read at launch; not editable here)";
+
+// ---------- theme: system default, with a persisted manual override ----------
+// Three real states, not a boolean: "system" (default) tracks
+// prefers-color-scheme live, for as long as the developer never overrides
+// it; "light"/"dark" are explicit, persisted choices that win regardless
+// of the OS setting. The actual color values for each theme live entirely
+// in styles.css's :root/[data-theme] blocks - this only ever decides which
+// one applies, never touches a color itself.
+const THEME_KEY = "localsync.theme";
+
+function applyTheme(choice) {
+  if (choice === "light" || choice === "dark") {
+    document.documentElement.dataset.theme = choice;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+function currentThemeChoice() {
+  const saved = localStorage.getItem(THEME_KEY);
+  return saved === "light" || saved === "dark" ? saved : "system";
+}
+
+// index.html's own inline bootstrap script already applied a saved
+// light/dark override before first paint (avoiding a flash of the wrong
+// theme) - this just brings the radios themselves in sync with it, and
+// re-applies for the "system" case too (a no-op today since the
+// bootstrap script only ever sets light/dark, but keeps this function the
+// single source of truth rather than splitting theme-application logic
+// across two files).
+const savedTheme = currentThemeChoice();
+$(`theme-${savedTheme}`).checked = true;
+applyTheme(savedTheme);
+
+["system", "light", "dark"].forEach((choice) => {
+  $(`theme-${choice}`).addEventListener("change", () => {
+    localStorage.setItem(THEME_KEY, choice);
+    applyTheme(choice);
+  });
+});
 
 // ---------- relay mode (persisted in localStorage — set once, survives restarts) ----------
 const MODE_KEY = "localsync.relayMode";
@@ -351,7 +391,9 @@ function renderWizardFolderList() {
     const removeBtn = document.createElement("button");
     removeBtn.className = "ghost-btn remove-folder-btn";
     removeBtn.type = "button";
-    removeBtn.textContent = "Remove";
+    // innerHTML is safe here: the icon markup is a fixed literal, nothing
+    // from f.path (already escaped above via escapeHtml) ever reaches it.
+    removeBtn.innerHTML = '<svg class="icon"><use href="#icon-x"></use></svg> Remove';
     removeBtn.addEventListener("click", () => {
       wizardFolders.splice(i, 1);
       renderWizardFolderList();
@@ -1041,7 +1083,7 @@ async function refreshReceivers(reportStatus) {
       li.innerHTML = `
         <span class="mono">${escapeHtml(r.peer_id)}</span>
         <span class="hint-inline">connected ${escapeHtml(r.connected_at)}</span>
-        <button class="ghost-btn push-btn" type="button" data-peer="${escapeHtml(r.peer_id)}">Push update</button>
+        <button class="ghost-btn push-btn" type="button" data-peer="${escapeHtml(r.peer_id)}"><svg class="icon"><use href="#icon-send"></use></svg> Push update</button>
         <span class="hint push-status"></span>
       `;
       ul.appendChild(li);
@@ -1275,13 +1317,23 @@ $("reject-btn").addEventListener("click", async () => {
 
 let unlistenRunProgress = null;
 
+// Round 21: the chevron direction itself communicates expanded/collapsed,
+// same as the label text always did - kept as innerHTML (fixed literals
+// only, nothing dynamic ever reaches this button) rather than duplicating
+// two full icon+label strings at every call site.
+function setDetailsToggleExpanded(expanded) {
+  $("run-details-toggle").innerHTML = expanded
+    ? '<svg class="icon"><use href="#icon-chevron-up"></use></svg> Hide details'
+    : '<svg class="icon"><use href="#icon-chevron-down"></use></svg> Show details';
+  $("run-details-toggle").setAttribute("aria-expanded", String(expanded));
+}
+
 // Collapsed by default — toggling only shows/hides the log already
 // accumulated in #run-log, doesn't (re)fetch anything.
 $("run-details-toggle").addEventListener("click", () => {
   const expanded = !$("run-log").classList.contains("hidden");
   $("run-log").classList.toggle("hidden");
-  $("run-details-toggle").textContent = expanded ? "Show details ▾" : "Hide details ▲";
-  $("run-details-toggle").setAttribute("aria-expanded", String(!expanded));
+  setDetailsToggleExpanded(!expanded);
 });
 
 $("run-btn").addEventListener("click", async () => {
@@ -1297,8 +1349,7 @@ $("run-btn").addEventListener("click", async () => {
   // shouldn't show last attempt's log lines glued onto this one.
   $("run-log").textContent = "";
   $("run-log").classList.add("hidden");
-  $("run-details-toggle").textContent = "Show details ▾";
-  $("run-details-toggle").setAttribute("aria-expanded", "false");
+  setDetailsToggleExpanded(false);
 
   // Registered before invoke so no early line from the backend's tailer is
   // missed.

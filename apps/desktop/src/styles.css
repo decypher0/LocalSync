@@ -1,29 +1,177 @@
+/* Round 21 goal 2/3: a real design-token system, not scattered hex values.
+   Light palette lives on bare :root; dark overrides are layered on twice -
+   once behind a prefers-color-scheme media query (the OS-preference
+   default) guarded so an explicit light override always wins, and once
+   under [data-theme="dark"] (an explicit manual override, set by
+   applyTheme() in app.js from the Settings toggle) so it wins in both
+   directions regardless of the OS setting. See applyTheme()'s own comment
+   in app.js for exactly how the three states (system/light/dark) resolve. */
 :root {
   color-scheme: light dark;
+
+  /* ---- Base surface/text colors ---- */
   --bg: #ffffff;
   --fg: #1a1d23;
+  --fg-secondary: #4b5262;
   --muted: #6b7280;
   --border: #d9dce1;
+  --border-strong: #c3c8d1;
   --card: #f5f6f8;
+  --card-hover: #eceef2;
+
+  /* ---- Semantic colors ---- */
+  /* Background/fill usage (badges, filled buttons, icon-circle bg) - kept
+     constant across themes since these already sit under fixed white text
+     on both. Text usage (a value read directly against --bg) gets its own
+     -text variant below, tuned per theme, since a color that reads fine as
+     a filled badge doesn't necessarily read fine as small text on --bg -
+     confirmed by actually computing WCAG contrast ratios for both roles,
+     not assumed from one check standing in for both. */
   --accent: #2b6cb0;
+  --accent-hover: #1f5488;
+  --accent-text: var(--accent);
   --danger: #b0392b;
+  --danger-text: var(--danger);
   --added: #1f7a3d;
+  --added-text: var(--added);
   --modified: #b0800a;
+  --modified-text: var(--modified);
   --deleted: #b0392b;
+  --focus-ring: rgba(43, 108, 176, 0.5);
+
+  /* ---- Spacing scale (4px base unit) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 28px;
+  --space-7: 40px;
+
+  /* ---- Typography scale ---- */
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.85rem;
+  --font-size-base: 0.95rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.1rem;
+  --font-size-xl: 1.3rem;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* ---- Radius + elevation ---- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-full: 999px;
+  --shadow-color: 220 20% 10%;
+  --shadow-sm: 0 1px 2px hsl(var(--shadow-color) / 0.06);
+  --shadow-md: 0 4px 12px hsl(var(--shadow-color) / 0.10);
+  --shadow-lg: 0 16px 48px hsl(var(--shadow-color) / 0.28);
+
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #16181d;
     --fg: #e8eaed;
+    --fg-secondary: #b7bcc7;
     --muted: #9aa1ac;
     --border: #33363d;
+    --border-strong: #454952;
     --card: #1f222a;
+    --card-hover: #262a33;
+    --accent-hover: #3b7bc4;
+    /* Same computation the badges/icon-circle backgrounds above rely on,
+       done again here: these four are re-tuned for *text read directly
+       against --bg*, not for the badge backgrounds (which keep the light
+       values unchanged in dark mode too, on purpose - see the comment
+       above). Each was checked against the real dark --bg (#16181d) at
+       >=4.5:1 (WCAG AA for normal text), not eyeballed. */
+    --accent-text: #6fa8dc;
+    --danger-text: #f85149;
+    --added-text: #3fb950;
+    --modified-text: #d29922;
+    --focus-ring: rgba(111, 168, 220, 0.55);
+    --shadow-color: 220 40% 2%;
+    --shadow-sm: 0 1px 2px hsl(var(--shadow-color) / 0.3);
+    --shadow-md: 0 4px 12px hsl(var(--shadow-color) / 0.4);
+    --shadow-lg: 0 16px 48px hsl(var(--shadow-color) / 0.55);
   }
+}
+:root[data-theme="dark"] {
+  --bg: #16181d;
+  --fg: #e8eaed;
+  --fg-secondary: #b7bcc7;
+  --muted: #9aa1ac;
+  --border: #33363d;
+  --border-strong: #454952;
+  --card: #1f222a;
+  --card-hover: #262a33;
+  --accent-hover: #3b7bc4;
+  --accent-text: #6fa8dc;
+  --danger-text: #f85149;
+  --added-text: #3fb950;
+  --modified-text: #d29922;
+  --focus-ring: rgba(111, 168, 220, 0.55);
+  --shadow-color: 220 40% 2%;
+  --shadow-sm: 0 1px 2px hsl(var(--shadow-color) / 0.3);
+  --shadow-md: 0 4px 12px hsl(var(--shadow-color) / 0.4);
+  --shadow-lg: 0 16px 48px hsl(var(--shadow-color) / 0.55);
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: var(--font-size-base);
+}
+h1, h2, h3 { font-weight: var(--weight-semibold); letter-spacing: -0.01em; }
+h2 { font-size: var(--font-size-xl); margin: 0 0 var(--space-3); }
+h3 { font-size: var(--font-size-lg); margin: 0 0 var(--space-2); }
+
+/* Round 21 goal 3: one visible focus treatment for every interactive
+   element, keyboard or mouse - a real desktop app (unlike a lot of
+   ad-hoc web UI) gets used with the keyboard a lot, and the browser's
+   own default focus outline doesn't reliably show up the same way across
+   WebView2/WebKitGTK/WKWebView. Uses --focus-ring (already tuned per
+   theme) rather than a hardcoded color. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+input[type="text"]:focus-visible,
+input[type="number"]:focus-visible,
+input[type="password"]:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* Round 21 goal 1: every icon in the app is a <use> reference into the
+   inline <symbol> sprite at the top of index.html - sized off the
+   surrounding text (1em) so it scales with whatever button/label it sits
+   in, and colored via currentColor so it always matches the surrounding
+   text color (including on hover/disabled states, and in both themes)
+   without any icon-specific color rule anywhere. */
+.icon {
+  width: 1em;
+  height: 1em;
+  flex-shrink: 0;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -0.125em;
+}
+.icon-lg { width: 1.3em; height: 1.3em; }
 
 /* Round 20 goal 1: one centered, bounded shell for the whole app, instead
    of every top-level element (header, tabs nav, tab content) individually
@@ -33,13 +181,13 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .app-shell {
   max-width: 880px;
   margin: 0 auto;
-  padding: 0 20px;
+  padding: 0 var(--space-5);
 }
 .app-shell .topbar,
 .app-shell .settings-panel {
-  margin: 0 -20px;
-  padding-left: 20px;
-  padding-right: 20px;
+  margin: 0 calc(var(--space-5) * -1);
+  padding-left: var(--space-5);
+  padding-right: var(--space-5);
 }
 .app-shell .tabs { padding-left: 0; padding-right: 0; }
 .app-shell .tab-panel { padding-left: 0; padding-right: 0; max-width: none; }
@@ -48,136 +196,169 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
+  padding: var(--space-3) var(--space-5);
   border-bottom: 1px solid var(--border);
 }
-.topbar h1 { font-size: 1.1rem; margin: 0; }
+.topbar h1 { font-size: var(--font-size-lg); margin: 0; }
 
 .settings-panel {
-  padding: 12px 20px;
+  padding: var(--space-3) var(--space-5);
   border-bottom: 1px solid var(--border);
   background: var(--card);
   display: flex;
-  gap: 24px;
+  gap: var(--space-6);
   flex-wrap: wrap;
 }
 .settings-panel.hidden { display: none; }
 
-.tabs { display: flex; gap: 4px; padding: 12px 20px 0; }
+.tabs { display: flex; gap: var(--space-1); padding: var(--space-3) var(--space-5) 0; }
 .tab-btn {
-  padding: 8px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
   border: 1px solid var(--border);
   border-bottom: none;
   background: transparent;
   color: var(--fg);
   cursor: pointer;
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: background-color 0.12s, color 0.12s;
 }
-.tab-btn.active { background: var(--card); font-weight: 600; }
+.tab-btn:hover { background: var(--card-hover); }
+.tab-btn.active { background: var(--card); font-weight: var(--weight-semibold); }
 
-.tab-panel { display: none; padding: 20px; max-width: 720px; }
+.tab-panel { display: none; padding: var(--space-5); max-width: 720px; }
 .tab-panel.active { display: block; }
 .hidden { display: none !important; }
 
-label { display: block; margin: 14px 0 4px; font-size: 0.85rem; color: var(--muted); }
-input[type="text"] {
+label { display: block; margin: var(--space-4) 0 var(--space-1); font-size: var(--font-size-sm); color: var(--fg-secondary); }
+input[type="text"],
+input[type="number"],
+input[type="password"],
+select {
   width: 100%;
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--fg);
-  font-size: 0.95rem;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  transition: border-color 0.12s;
 }
-.inline-row { display: flex; gap: 8px; }
+input[type="text"]:hover,
+input[type="number"]:hover,
+input[type="password"]:hover,
+select:hover { border-color: var(--border-strong); }
+.inline-row { display: flex; align-items: center; gap: var(--space-2); }
 .inline-row input[type="text"] { flex: 1; }
-.mode-title { display: block; margin: 14px 0 4px; font-size: 0.85rem; color: var(--muted); }
-.radio-label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 0.9rem; color: var(--fg); }
+.mode-title { display: block; margin: var(--space-4) 0 var(--space-1); font-size: var(--font-size-sm); color: var(--fg-secondary); font-weight: var(--weight-medium); }
+.radio-label { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--font-size-base); color: var(--fg); }
 .radio-label input { width: auto; }
 
-button { font-size: 0.9rem; cursor: pointer; border-radius: 6px; }
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.12s, border-color 0.12s, opacity 0.12s, transform 0.05s;
+}
+button:active:not(:disabled) { transform: translateY(1px); }
 .primary-btn, .danger-btn {
-  margin-top: 16px;
-  padding: 10px 18px;
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-5);
   border: none;
   color: white;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 .primary-btn { background: var(--accent); }
+.primary-btn:hover:not(:disabled) { background: var(--accent-hover); }
 .danger-btn { background: var(--danger); }
+.danger-btn:hover:not(:disabled) { filter: brightness(0.9); }
 .ghost-btn {
-  padding: 6px 12px;
+  padding: var(--space-2) var(--space-3);
   background: transparent;
   border: 1px solid var(--border);
   color: var(--fg);
 }
+.ghost-btn:hover:not(:disabled) { background: var(--card-hover); border-color: var(--border-strong); }
 button:disabled { opacity: 0.5; cursor: default; }
 
-.room-code-wrap { margin-top: 16px; }
+.room-code-wrap { margin-top: var(--space-4); }
 .room-code-display {
   display: block;
-  margin-top: 6px;
-  padding: 10px 14px;
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 1.1rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-lg);
   letter-spacing: 0.05em;
   user-select: all;
 }
 
-.progress-wrap { margin-top: 16px; }
+.progress-wrap { margin-top: var(--space-4); }
 .progress-track {
   height: 8px;
   background: var(--card);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 .progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.15s; }
-.hint { font-size: 0.8rem; color: var(--muted); margin: 6px 0 0; }
+.hint { font-size: var(--font-size-xs); color: var(--muted); margin: var(--space-2) 0 0; }
 
-.result { color: var(--added); font-weight: 600; }
-.error { color: var(--deleted); font-weight: 600; white-space: pre-wrap; }
+.result { color: var(--added-text); font-weight: var(--weight-semibold); }
+.error { color: var(--danger-text); font-weight: var(--weight-semibold); white-space: pre-wrap; }
 .warn {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
   background: var(--card);
   border-left: 3px solid var(--accent);
-  padding: 10px 14px;
-  font-size: 0.88rem;
-  color: var(--muted);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--font-size-sm);
+  color: var(--fg-secondary);
 }
+.warn .icon { margin-top: 0.15em; }
 
 /* ---- Round 16: update-available banner (top-level, any tab) ---- */
 .update-banner {
-  margin: 0 20px 12px;
-  padding: 10px 14px;
-  border-radius: 6px;
+  margin: 0 var(--space-5) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
   background: var(--card);
   border-left: 3px solid var(--accent);
+  box-shadow: var(--shadow-sm);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .update-banner #update-progress-wrap,
 .update-banner #update-error {
   flex-basis: 100%;
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
 }
 
 .peer-banner {
-  margin-top: 12px;
-  padding: 8px 12px;
-  border-radius: 6px;
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
   background: var(--card);
   border-left: 3px solid var(--accent);
-  font-size: 0.88rem;
+  font-size: var(--font-size-sm);
 }
 /* Round 12: the review screen's first two possible states, made visually
    distinct at a glance - a known sender (calm, green) vs one you've never
    seen before (a genuine "look before you review" prompt, amber) - neither
    one changes what's required below (diff review, then Run or Reject). */
-.peer-banner-recognized { border-left-color: var(--added); display: flex; align-items: center; gap: 8px; }
+.peer-banner-recognized { border-left-color: var(--added); display: flex; align-items: center; gap: var(--space-2); }
 .peer-banner-new { border-left-color: var(--modified); }
 .peer-banner-icon {
   display: inline-flex;
@@ -185,110 +366,112 @@ button:disabled { opacity: 0.5; cursor: default; }
   justify-content: center;
   width: 18px;
   height: 18px;
-  border-radius: 50%;
-  font-size: 0.75rem;
-  font-weight: 700;
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-bold);
   flex-shrink: 0;
 }
 .peer-banner-recognized .peer-banner-icon { background: var(--added); color: #fff; }
-.peer-banner-new .peer-banner-icon { background: var(--modified); color: #fff; margin-right: 4px; }
-.hint-inline { color: var(--muted); font-size: 0.82rem; margin-left: 4px; }
-.hint-inline.error-inline { color: var(--danger); font-weight: 600; }
-#send-code-expiry { margin: 6px 0 0; }
-.peer-remember-row { margin-top: 8px; }
+.peer-banner-new .peer-banner-icon { background: var(--modified); color: #fff; margin-right: var(--space-1); }
+.peer-banner-icon .icon { width: 11px; height: 11px; stroke-width: 3; }
+.hint-inline { color: var(--muted); font-size: var(--font-size-xs); margin-left: var(--space-1); }
+.hint-inline.error-inline { color: var(--danger-text); font-weight: var(--weight-semibold); }
+#send-code-expiry { margin: var(--space-2) 0 0; }
+.peer-remember-row { margin-top: var(--space-2); }
 .peer-remember-row input[type="text"] { width: auto; flex: 1; }
-.reject-btn { margin-top: 16px; color: var(--danger); border-color: var(--danger); }
+.reject-btn { margin-top: var(--space-4); color: var(--danger-text); border-color: var(--danger-text); }
 
-.ask-update-row { margin: 12px 0 0; align-items: center; }
+.ask-update-row { margin: var(--space-3) 0 0; align-items: center; }
 
 /* ---- Round 11: connected-receivers roster + pull-request banners ---- */
 .receivers-header { justify-content: space-between; align-items: center; }
-#receivers-list li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#receivers-list li { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .push-status { margin: 0; }
 
-.pull-requests { padding: 0 20px; }
+.pull-requests { padding: 0 var(--space-5); }
 .pull-requests .peer-banner {
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .pull-requests .peer-banner .error { margin: 0; flex-basis: 100%; }
 
 .manifest-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-top: 12px;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-top: var(--space-3);
   background: var(--card);
 }
-.manifest-row { display: flex; justify-content: space-between; padding: 4px 0; gap: 12px; }
+.manifest-row { display: flex; justify-content: space-between; padding: var(--space-1) 0; gap: var(--space-3); }
 .manifest-row .k { color: var(--muted); }
 .manifest-row .v { text-align: right; }
-.mono { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: var(--font-size-sm); }
 
-.diff-totals { margin: 4px 0 10px; }
-.diff-totals .file-count { font-weight: 600; font-size: 1.05rem; }
-.diff-totals .ins-del { font-weight: 400; font-size: 0.85rem; color: var(--muted); margin-left: 10px; }
+.diff-totals { margin: var(--space-1) 0 var(--space-3); }
+.diff-totals .file-count { font-weight: var(--weight-semibold); font-size: 1.05rem; }
+.diff-totals .ins-del { font-weight: var(--weight-regular); font-size: var(--font-size-sm); color: var(--muted); margin-left: var(--space-3); }
 
-.diff-groups { display: flex; flex-direction: column; gap: 8px; }
-.diff-group { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.diff-groups { display: flex; flex-direction: column; gap: var(--space-2); }
+.diff-group { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .diff-group summary {
   cursor: pointer;
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-3);
   background: var(--card);
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.9rem;
+  font-size: var(--font-size-base);
 }
-.diff-group-count { color: var(--muted); font-family: system-ui, sans-serif; font-size: 0.8rem; }
+.diff-group summary:hover { background: var(--card-hover); }
+.diff-group-count { color: var(--muted); font-family: system-ui, sans-serif; font-size: var(--font-size-xs); }
 .diff-group .diff-table { margin-top: 0; border-top: 1px solid var(--border); }
 
-.diff-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.9rem; }
+.diff-table { width: 100%; border-collapse: collapse; margin-top: var(--space-2); font-size: var(--font-size-base); }
 .diff-table th {
   text-align: left;
   border-bottom: 1px solid var(--border);
-  padding: 6px 8px;
+  padding: var(--space-2);
   color: var(--muted);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
-.diff-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
-.diff-table td.path { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
-.diff-table td.ins { color: var(--added); }
-.diff-table td.del { color: var(--deleted); }
+.diff-table td { padding: var(--space-2); border-bottom: 1px solid var(--border); }
+.diff-table td.path { font-family: ui-monospace, Consolas, monospace; font-size: var(--font-size-sm); }
+.diff-table td.ins { color: var(--added-text); }
+.diff-table td.del { color: var(--danger-text); }
 
 .badge {
   display: inline-block;
-  padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
   color: white;
 }
 .badge.added { background: var(--added); }
 .badge.modified { background: var(--modified); }
 .badge.deleted { background: var(--deleted); }
 
-.ports-list { list-style: none; padding: 0; margin: 8px 0; }
+.ports-list { list-style: none; padding: 0; margin: var(--space-2) 0; }
 .ports-list li {
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  margin-bottom: 6px;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-2);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.9rem;
+  font-size: var(--font-size-base);
 }
-.ports-list a { color: var(--accent); }
+.ports-list a { color: var(--accent-text); }
 
-.cache-hit { color: var(--added); font-weight: 600; }
-.cache-cold { color: var(--modified); font-weight: 600; }
+.cache-hit { color: var(--added-text); font-weight: var(--weight-semibold); }
+.cache-cold { color: var(--modified-text); font-weight: var(--weight-semibold); }
 
 /* ---- Run flow: collapsed-by-default progress + opt-in details ---- */
-.run-status { display: flex; align-items: center; gap: 8px; }
+.run-status { display: flex; align-items: center; gap: var(--space-2); }
 .spinner {
   width: 14px;
   height: 14px;
@@ -301,28 +484,31 @@ button:disabled { opacity: 0.5; cursor: default; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .link-btn {
-  display: block;
-  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
   padding: 2px 0;
   background: transparent;
   border: none;
-  color: var(--accent);
-  font-size: 0.8rem;
+  color: var(--accent-text);
+  font-size: var(--font-size-xs);
   cursor: pointer;
 }
+.link-btn:hover { text-decoration: underline; }
 
 /* Real terminal styling on purpose (dark, monospace) regardless of the
    app's own light/dark theme - this is streaming raw provisioning-log
    output, it should read like a console, not like the rest of the UI. */
 .run-log {
-  margin-top: 6px;
+  margin-top: var(--space-2);
   max-height: 160px;
   overflow-y: auto;
   background: #14161a;
   color: #d8dee9;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
   font-family: ui-monospace, Consolas, monospace;
   font-size: 0.78rem;
   line-height: 1.4;
@@ -334,20 +520,20 @@ button:disabled { opacity: 0.5; cursor: default; }
    at a time (app.js toggles `.hidden`); each step reuses existing card/list/
    button styles rather than inventing new ones, so it reads as part of the
    same app, not a bolted-on dialog. */
-.wizard { margin-top: 8px; }
-.wizard-step h3 { margin: 0 0 6px; font-size: 1rem; }
-.wizard-step { padding-bottom: 4px; }
+.wizard { margin-top: var(--space-2); }
+.wizard-step h3 { margin: 0 0 var(--space-2); font-size: var(--font-size-md); }
+.wizard-step { padding-bottom: var(--space-1); }
 .wizard-step .primary-btn,
-.wizard-step .ghost-btn { margin-top: 8px; margin-right: 8px; }
+.wizard-step .ghost-btn { margin-top: var(--space-2); margin-right: var(--space-2); }
 #wiz-folder-list li,
 #wiz-tables-list li {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-3);
 }
 #wiz-folder-list .remove-folder-btn { flex-shrink: 0; }
-#wiz-db-folder-progress { margin: -4px 0 10px; }
+#wiz-db-folder-progress { margin: -4px 0 var(--space-3); }
 
 /* Round 22 goal 5: the live table/collection selection list - a real
    checkbox-driven card list instead of a plain <ul>, with a toolbar for
@@ -358,45 +544,49 @@ button:disabled { opacity: 0.5; cursor: default; }
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
-.db-table-toolbar .hint { flex: 1 1 auto; margin: 4px 0; }
+.db-table-toolbar .hint { flex: 1 1 auto; margin: var(--space-1) 0; }
 .db-table-toolbar .inline-row { flex-shrink: 0; }
-.db-table-list { list-style: none; padding: 0; margin: 4px 0 8px; max-height: 320px; overflow-y: auto; }
+.db-table-list { list-style: none; padding: 0; margin: var(--space-1) 0 var(--space-2); max-height: 320px; overflow-y: auto; }
 .db-table-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 7px 12px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  margin-bottom: 5px;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-1);
   background: var(--card);
+  transition: background-color 0.12s, border-color 0.12s;
 }
-.db-table-row label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; color: var(--fg); min-width: 0; }
+.db-table-row:hover { background: var(--card-hover); border-color: var(--border-strong); }
+.db-table-row label { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--font-size-base); color: var(--fg); min-width: 0; }
 .db-table-name { overflow-wrap: anywhere; }
 
 /* Round 22 goal 3: the real schema/database list, radio-select (only one
    schema applies at a time) - same card-row treatment as the table list
    above, so both real-data-browsing steps read consistently. */
-#wiz-schemas-list { list-style: none; padding: 0; margin: 4px 0 8px; max-height: 260px; overflow-y: auto; }
+#wiz-schemas-list { list-style: none; padding: 0; margin: var(--space-1) 0 var(--space-2); max-height: 260px; overflow-y: auto; }
 #wiz-schemas-list li {
-  padding: 7px 12px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  margin-bottom: 5px;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-1);
   background: var(--card);
+  transition: background-color 0.12s, border-color 0.12s;
 }
-#wiz-schemas-list label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; color: var(--fg); }
+#wiz-schemas-list li:hover { background: var(--card-hover); border-color: var(--border-strong); }
+#wiz-schemas-list label { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--font-size-base); color: var(--fg); }
 
 /* Round 22 goal 2: an error placed directly under one specific field
    (the Database input, in both the manual-entry and supplied-dump forms)
    reads differently from the form-level error below it - tighter spacing,
    no leading margin, so it's unambiguous which field it's about. */
 #wiz-manual-database-error,
-#wiz-dump-database-error { margin: 2px 0 10px; }
+#wiz-dump-database-error { margin: 2px 0 var(--space-3); }
 
 /* Round 20 goal 4: the send wizard as a real modal overlay - a dimmed
    backdrop covering the whole viewport (so nothing behind it, including
@@ -413,31 +603,38 @@ button:disabled { opacity: 0.5; cursor: default; }
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: var(--space-6);
   z-index: 1000;
 }
 .wizard-modal {
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   width: 100%;
   max-width: 640px;
   max-height: 88vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-lg);
 }
 .wizard-modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 20px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.wizard-progress { font-weight: 600; font-size: 0.85rem; color: var(--muted); }
-.wizard-modal-body { padding: 20px; overflow-y: auto; }
+.wizard-progress { font-weight: var(--weight-semibold); font-size: var(--font-size-sm); color: var(--muted); }
+.wizard-modal-body { padding: var(--space-5); overflow-y: auto; }
 .wizard-modal-body .wizard-step:first-child h3,
 .wizard-modal-body .wizard-step h3:first-child { margin-top: 0; }
+
+/* Round 21 goal 3: subtle elevation on the two other "raised" surfaces in
+   the app (the manifest summary card, and the always-visible settings
+   panel) - a hairline border alone reads flat; a soft shadow is what
+   actually separates a surface from the page behind it at a glance. */
+.manifest-card { box-shadow: var(--shadow-sm); }
+.settings-panel { box-shadow: var(--shadow-sm); }
