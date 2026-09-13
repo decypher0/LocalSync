@@ -44,6 +44,11 @@
       "endpoints": [
         "https://github.com/decypher0/LocalSync/releases/latest/download/latest.json"
       ]
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["localsync"]
+      }
     }
   }
 }
