@@ -1519,3 +1519,120 @@ build is enough for the magic-link page and (once the signing secret
 exists) the in-app updater to both find real data, every single run, not
 just the lucky first time someone tags a release.
 
+---
+
+## Round 27 addendum: magic-link on real Windows and real Linux
+
+Real testing on real hardware found two distinct bugs the same round's
+own investigation confirmed have two distinct root causes - not one fix.
+Both are genuinely platform-behavioral, so both still need a real
+click-through on real hardware to fully confirm; what's below is exactly
+what this sandbox could and couldn't check on its own.
+
+### What changed, and what's already confirmed without real hardware
+
+- **Windows (false "not installed")**: the install-detection heuristic
+  (`visibilitychange`/`blur` within a fixed timeout) is confirmed, via
+  real research into how every implementation of this technique works
+  across browsers, to have no fully reliable signal on any of them - this
+  was never fixable by picking the "right" timeout number alone. Fixed
+  two ways: the timeout itself moved from 1750ms to 2500ms (the most
+  commonly referenced reference implementation for this exact technique
+  defaults to 2000ms and documents raising it for a slower-starting app),
+  and - the real fix - the page now keeps listening after the fallback UI
+  renders and corrects its own message the moment a late success signal
+  arrives, rather than leaving a confidently-wrong "doesn't seem to be
+  installed" on screen next to an app that's visibly already open. The
+  initial fallback message itself was also softened to acknowledge it can
+  still be wrong at that exact moment, not assert a negative outright.
+  `web/test-magic-link-logic.js`'s 24 existing tests (all pure-function,
+  untouched by this change) still pass; this specific fix lives in
+  browser/timer orchestration code this project's own test split has
+  never covered with automation - see "What to check" below.
+- **Linux (deep link doesn't reach the app at all)**: root-caused to a
+  real, confirmed, currently-open upstream Tauri bug
+  (`tauri-apps/tauri#16014`) - the bundler's default `.desktop` template's
+  `Exec=` line has no `%u`/`%U` field code, so per the Desktop Entry
+  Specification itself, a launcher invokes the app with *no arguments at
+  all* when a link is clicked, regardless of whether the URL scheme is
+  otherwise correctly registered. A custom `.desktop` template
+  (`apps/desktop/src-tauri/linux/main.desktop`, wired via
+  `bundle.linux.deb.desktopTemplate`) adds `%u` and a hardcoded
+  `MimeType=x-scheme-handler/localsync;` line (confirmed the default
+  template's own `mime_type` template variable isn't populated from this
+  project's deep-link scheme config - only from an unrelated
+  file-association feature this project doesn't use). New
+  `postInstallScript`/`postRemoveScript` entries run
+  `update-desktop-database` after install/removal, so the OS's cached
+  MIME index actually picks up the change immediately rather than waiting
+  on an unrelated future trigger (another package install, a reboot, ...).
+  All three new files were validated for real in this sandbox, not just
+  reviewed: a real `.deb` was actually built in this project's own WSL2
+  environment (`npm run tauri build -- --bundles deb`) - which itself
+  caught a real bug before this round shipped it (the header comment
+  originally described the default template's own Handlebars syntax
+  using literal double-brace mustaches, which the bundler's template
+  engine tried to parse as real template code and failed on; fixed by
+  rewording the comment, confirmed by a second successful build). The
+  built `.deb`'s contents were then extracted (`dpkg-deb -e`/`-x`) and
+  inspected directly: the rendered `.desktop` file shows the real
+  `Exec=localsync-desktop %u` and `MimeType=x-scheme-handler/localsync;`
+  lines exactly as intended, and both `postinst`/`postrm` scripts are
+  present with real `rwxr-xr-x` executable permissions and clean LF-only
+  line endings (`file` reports plain "POSIX shell script, ASCII text
+  executable" - no CRLF flag). The `.gitattributes` addition this round
+  is what makes that last part true: a CRLF-corrupted shebang line
+  silently breaks a maintainer script's execution on Linux, and this was
+  confirmed to be a real risk on this project's own Windows-checked-out
+  clone before the fix (git flagged the exact line-ending conversion on
+  first `git add`), not a hypothetical one. Not run in this sandbox (no
+  passwordless `sudo` available to install it): `desktop-file-validate`
+  itself, for an independent, spec-conformance-focused second opinion
+  beyond a successful real build and manual inspection - worth running
+  once on a real machine (`desktop-file-validate LocalSync.desktop` after
+  extracting it) alongside the real-hardware checks below.
+
+### What to check on real hardware
+
+1. **Windows, the actual contradiction**: click a real magic link with
+   LocalSync already installed. Confirm the browser tab's message never
+   ends up asserting "doesn't seem to be installed" while the app is
+   simultaneously visibly open on screen - if the app opens slower than
+   2500ms, confirm the page instead shows "Looks like LocalSync just
+   opened" once it catches up, rather than staying wrong indefinitely.
+2. **Windows, genuinely not installed**: click a magic link on a machine
+   that has never had LocalSync, and confirm the softened message
+   ("If LocalSync just opened, you're all set — otherwise...") still
+   reads clearly and the real download options still render below it.
+3. **Linux, the actual deep link**: install the `.deb` on a real Linux
+   desktop (GNOME and KDE both worth trying, if you have access to both -
+   MIME/URL-scheme handling is desktop-environment-specific in practice
+   even though the underlying mechanism is a shared freedesktop.org
+   standard), then click a real magic link. Confirm LocalSync actually
+   launches (or focuses, if already running - see round 24's
+   single-instance handling) with the Receive tab pre-filled with the
+   real code, not the default Send screen.
+4. **Linux, the registration itself, independently of clicking a link**:
+   after installing the `.deb`, run `xdg-mime query default
+   x-scheme-handler/localsync` (or check a browser's own "always open
+   these types of links" settings) and confirm LocalSync is listed as the
+   real, registered handler - this is the direct, independent
+   confirmation that installation itself (not just a lucky click) did the
+   right thing.
+5. **Linux, uninstall**: remove the `.deb` and confirm
+   `xdg-mime query default x-scheme-handler/localsync` no longer points
+   at LocalSync (or reports nothing) - proving `postRemoveScript` actually
+   ran and the stale registration didn't linger.
+
+### What "success" looks like
+
+On Windows, the fallback page never contradicts what the person is
+actually looking at - it's either right the first time, or corrects
+itself the moment it learns better, and never confidently claims "not
+installed" when the app is open. On Linux, clicking a magic link does
+exactly what it already does on Windows and macOS: launches or focuses
+the app with the real code already in the Receive tab, no manual copy-paste
+required - and installing/removing the package is what actually turns
+that capability on and off, not a step someone has to discover and run
+by hand.
+
