@@ -19,13 +19,28 @@
 //!   confirms the real exported dump's bytes and hash made it into the
 //!   manifest and payload intact.
 //!
+//! - `a_single_folder_wizard_send_can_actually_be_run` (round 30): a real
+//!   bug found in real cross-machine testing - a project sent through this
+//!   exact wizard path failed on Run with "snapshot payload has no
+//!   docker-compose.yml" even though it genuinely had one, because
+//!   `ls_snapshot::create_snapshot_multi` nests every folder's files under
+//!   its own label unconditionally (even for exactly one folder), while
+//!   `ls_containers::run_snapshot` only ever looked at the payload's own
+//!   top level. Neither `pipeline_test.rs` nor `pipeline_node_test.rs` (the
+//!   only tests that call `run_snapshot` at all) go through this wizard
+//!   path - they use the older, single-folder `create_snapshot`, which
+//!   never nests anything - so nothing ever caught this. This test drives
+//!   the exact real path a click-through does: share_snapshot_wizard ->
+//!   receive_snapshot -> run_snapshot -> stop_session, with one folder and
+//!   a real, minimal docker-compose.yml.
+//!
 //! `ls-dbsource`'s own `live_mysql_test.rs` already proves the export
 //! mechanics are byte-for-byte correct (round-trip reimport) — this file's
 //! job is proving the *wizard's command layer* wires that correctly into a
 //! real snapshot, not re-proving export correctness itself.
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -376,4 +391,134 @@ async fn full_wizard_flow_against_a_real_local_mysql_instance() {
         .get("db-dumps/inventory-service/inventory_db.sql")
         .expect("payload should contain the packaged dump at the manifest's own dump_file path");
     assert_eq!(payload_dump, &dump_bytes_on_disk);
+}
+
+fn podman_stack_available() -> bool {
+    let ok = |bin: &str| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    ok("podman") && ok("podman-compose")
+}
+
+/// Round 30 regression test - see this file's own module doc comment for
+/// the full root cause. Before the fix, this failed at the `run_snapshot`
+/// step with exactly the error reported from real cross-machine testing:
+/// "snapshot payload has no docker-compose.yml", despite the sent project
+/// genuinely having one right here in its own git-tracked files.
+#[tokio::test]
+async fn a_single_folder_wizard_send_can_actually_be_run() {
+    if !podman_stack_available() {
+        eprintln!("podman/podman-compose not on PATH — skipping a_single_folder_wizard_send_can_actually_be_run");
+        return;
+    }
+
+    let _home = isolate_sender_home();
+    let base = tempfile::tempdir().unwrap();
+    // busybox's own tiny httpd, not a real app image: this test's whole
+    // point is proving docker-compose.yml itself survives the wizard's
+    // packaging and is where podman-compose can actually find it - not
+    // re-proving a slow real build, which pipeline_test.rs/
+    // pipeline_node_test.rs already do for the older, non-wizard send
+    // path. nginx:alpine was tried first and rejected for a real reason,
+    // not a style preference: run_snapshot's own ls_security::
+    // default_policy() forces `read_only: true` with only `/tmp` mounted
+    // writable (compose::apply_policy), and nginx's default startup needs
+    // to mkdir under /var/cache/nginx - it exits immediately with "mkdir()
+    // ... failed (30: Read-only file system)" under that exact policy,
+    // confirmed directly by reproducing it with plain podman-compose
+    // outside this test entirely. Pointing busybox's own httpd at /tmp
+    // (the one path this policy already keeps writable) sidesteps that
+    // rather than fighting it - a real, pre-existing, separate policy/
+    // image-compatibility question (should apply_policy mount more than
+    // just /tmp?) that's out of this round's own scope to fix.
+    let compose_yaml = r#"
+services:
+  web:
+    image: docker.io/library/busybox:latest
+    command: ["httpd", "-f", "-p", "80", "-h", "/tmp"]
+    ports:
+      - "18080:80"
+"#;
+    let project = make_git_folder(base.path(), "single-service", &[("docker-compose.yml", compose_yaml)]);
+
+    let (url, _server) = signaling_url(8129).await;
+    let room = format!("wizard-single-folder-run-{}", std::process::id());
+
+    let sender_app = tauri::test::mock_app();
+    sender_app.manage(AppState::default());
+    let sender_handle = sender_app.handle().clone();
+
+    let receiver_app = tauri::test::mock_app();
+    receiver_app.manage(AppState::default());
+    let receiver_handle = receiver_app.handle().clone();
+
+    let folders = vec![commands::FolderPlanDto { path: project.display().to_string(), dump: None }];
+
+    let sender_room = room.clone();
+    let sender_url = url.clone();
+    let sender_task = tokio::spawn(async move {
+        let state = sender_handle.state::<AppState>();
+        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url).await
+    });
+    let receiver_room = room.clone();
+    let receiver_url = url.clone();
+    let receive_handle = receiver_handle.clone();
+    let receiver_task = tokio::spawn(async move {
+        let state = receive_handle.state::<AppState>();
+        commands::receive_snapshot(receive_handle.clone(), state, receiver_room, receiver_url).await
+    });
+
+    let snapshot_id = sender_task.await.unwrap().expect("share_snapshot_wizard should succeed");
+    let info = receiver_task.await.unwrap().expect("receive_snapshot should succeed");
+    assert_eq!(info.snapshot_id, snapshot_id);
+    // A single-folder wizard send still records the folder breakdown -
+    // this is exactly the `manifest.folders` entry run_snapshot now has to
+    // account for.
+    assert_eq!(info.manifest.folders.len(), 1);
+    assert_eq!(info.manifest.folders[0].name, "single-service");
+
+    // ---- The actual regression: this used to fail here with "snapshot
+    // payload has no docker-compose.yml". ----
+    let work_dir = tempfile::tempdir().unwrap();
+    let run_state = receiver_app.state::<AppState>();
+    let run_info = commands::run_snapshot(
+        receiver_handle.clone(),
+        run_state,
+        info.snapshot_id.clone(),
+        work_dir.path().display().to_string(),
+    )
+    .await
+    .expect("run_snapshot should bring up a single-folder wizard send's real docker-compose.yml");
+
+    assert!(
+        run_info.service_ports.iter().any(|(svc, ports)| svc == "web" && ports.contains("18080")),
+        "expected the web service's published port in {:?}",
+        run_info.service_ports
+    );
+
+    // Not just "no error" - the container is actually up and accepting
+    // connections, same real-reachability bar pipeline_test.rs holds itself
+    // to for the non-wizard send path.
+    let reachable = {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut ok = false;
+        while Instant::now() < deadline {
+            if TcpStream::connect("127.0.0.1:18080").is_ok() {
+                ok = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        ok
+    };
+
+    let stop_state = receiver_app.state::<AppState>();
+    let stop_result = commands::stop_session(stop_state, run_info.session_id.clone()).await;
+    assert!(stop_result.is_ok(), "stop_session should tear the project down: {stop_result:?}");
+
+    assert!(reachable, "busybox httpd on port 18080 never accepted a TCP connection within the timeout");
 }
