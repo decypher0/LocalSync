@@ -1046,3 +1046,119 @@ Every click does something visible, including a repeat click that finds
 nothing new. Starting a send asks "how" before it asks "what," and the
 whole folder-through-database-setup journey reads as one guided sequence
 in its own space — including when it fails partway through.
+
+## Round 21 addendum: iconography, theming, and modern visual design
+
+Round 21 is a genuine visual redesign, not new functionality — a lightweight
+icon system (real Lucide SVG source, vendored inline, not a CDN dependency
+this offline desktop app can't rely on), a real light/dark theme system with
+a persisted manual override, and a design-token pass (spacing, typography,
+radius, elevation) applied across every screen including every wizard step
+from rounds 17–20. **This sandbox has no display** — everything below is
+verified through code review, real WCAG contrast-ratio computation for the
+new color tokens, and the same DOM-id/tag-balance/syntax checks every prior
+UI round has used, never by actually looking at the app. Whether it actually
+looks good is explicitly the developer's own call — see "What to check on
+real hardware" below.
+
+### What changed
+
+- **Icon system** (goal 1): 28 icons, real Lucide SVG source (ISC-licensed,
+  https://lucide.dev, extracted via the published `lucide-static` npm
+  package — not hand-drawn or guessed), vendored as inline `<symbol>` defs
+  at the top of `index.html` rather than a cross-file sprite or CDN
+  script. Inline was a deliberate choice over a separate `icons.svg` file:
+  a same-document `<use href="#icon-x">` behaves identically across
+  WebView2 (Windows), WebKitGTK (Linux), and WKWebView (macOS), where a
+  cross-file `<use>` pointing at an external SVG is a known source of
+  inconsistent behavior across exactly that engine spread — and this is
+  an offline desktop app, so a CDN-hosted icon font was never on the
+  table. Every icon uses `stroke="currentColor"`, so it always matches
+  its surrounding text color with zero icon-specific color rules, in
+  either theme. Applied to every button across Send, Receive, Settings,
+  and all wizard steps, plus the peer-recognized/peer-new status banners
+  (previously a bare ✓/? text character) — kept as icon+label everywhere
+  except a small number of genuinely self-explanatory case (e.g. the
+  "These details are wrong — edit manually" link), per the round's own
+  instruction to prefer clarity over icon-only minimalism.
+- **Light and dark themes** (goal 2): every color in the stylesheet is
+  now a CSS custom property (verified: the only remaining literal hex
+  values in `styles.css` are the token definitions themselves, `#fff` for
+  fixed white badge/icon-circle text, and the run log's deliberately
+  theme-independent terminal colors — unchanged from before this round,
+  and called out in its own comment). A new Settings control offers three
+  real states — System / Light / Dark, not a single on/off toggle —
+  persisted to `localStorage` and applied synchronously by a small inline
+  script in `index.html`'s `<head>` (before `app.js` itself loads, at the
+  end of `<body>`) so an explicit override never flashes the OS's theme
+  for one frame first. The dark palette is not the light one inverted:
+  four colors (the accent/danger/added/modified tones, used as plain text
+  read directly against the page background — links, result/error
+  messages, diff insertion/deletion coloring) get their own dark-specific
+  values, each checked to really reach WCAG AA's 4.5:1 contrast ratio
+  against the real dark background by computing it, not eyeballing it;
+  the same four colors used as background fills under fixed white text
+  (badges, the peer-status icon circles) are deliberately left unchanged
+  between themes, since that usage already had known-good contrast in
+  both.
+- **A real design-token system** (goal 3): a spacing scale
+  (`--space-1`…`--space-7`, 4px-based), a typography scale (`--font-size-
+  xs`…`--font-size-xl`, `--weight-regular`…`--weight-bold`), radius
+  tokens, and elevation tokens (`--shadow-sm/md/lg`, themed separately —
+  dark mode's shadows are darker/more opaque, since a light-mode shadow
+  value reads as almost invisible against a dark background). Applied
+  throughout the entire stylesheet, not just new rules — every screen,
+  including every step of the rounds 17–20 wizard (transfer-mode choice,
+  folder selection, the full per-folder database sub-flow, the final
+  summary). A few real, previously-missing pieces of visual consistency
+  were also fixed along the way: `<select>` and `input[type=number]`/
+  `input[type=password]` elements had **no styling at all** before this
+  round (native browser appearance, inconsistent with the styled
+  `input[type=text]` fields right next to them) — now share the same
+  rule. A visible focus ring (`:focus-visible`, using the same
+  theme-aware `--focus-ring` token) was added for every interactive
+  element, since a real desktop app gets used with the keyboard and the
+  three WebViews' own default focus indicators don't look or behave the
+  same way. Hover states were added to every button variant and to the
+  wizard's table/schema list rows, all previously static.
+
+### What to check on real hardware
+
+1. **Icons, at a glance**: confirm the 28 icons actually render (not
+   broken `<use>` references — code-verified that every reference
+   resolves to a real symbol, but only a real render confirms the SVGs
+   themselves paint correctly) and that each one reads clearly at its
+   small on-screen size paired with its label.
+2. **Both themes, on every screen**: switch System → Light → Dark → System
+   again in Settings and confirm each actually applies immediately, with
+   no flash of the wrong theme on a fresh launch after setting an explicit
+   override. Check contrast specifically on: result/error text, the diff
+   insertion/deletion coloring, and links (`ports-list` addresses, the
+   "Show details" toggle) — these are the values this round tuned
+   specifically for dark-mode legibility and are worth a real look, not
+   just the badges/buttons that were left unchanged on purpose.
+3. **Every wizard step, in both themes**: step through the full send
+   wizard (mode → folders → needs-db → shared-db → the per-folder
+   database sub-flow → ready) in both Light and Dark, confirming spacing,
+   borders, and the modal's own elevation (shadow) all read as one
+   coherent design, not just the main Send/Receive tabs.
+4. **Hover and focus states**: confirm buttons, table/schema rows, and
+   tabs show a visible hover change, and that Tab-ing through the app
+   (keyboard only, no mouse) shows a clear focus ring on whatever's
+   focused at every step.
+5. **Overall visual quality** — genuinely a call only a person looking at
+   a real screen can make: does the icon set read as "modern and
+   intentional" rather than random or mismatched; is the spacing rhythm
+   actually comfortable; do both themes feel considered rather than one
+   being an afterthought. This round implemented a real, internally
+   consistent system — it does not, and cannot from this sandbox, verify
+   that the result is genuinely good-looking.
+
+### What "success" looks like
+
+The app has a real icon vocabulary, a genuine light/dark theme a person
+can pick and keep across restarts, and a visual language — spacing,
+type, elevation — that's the same system on every screen instead of
+whatever felt right when that screen was originally built. Whether it
+actually *looks* good is a judgment call this sandbox is structurally
+unable to make; that call belongs to the developer, on a real screen.
