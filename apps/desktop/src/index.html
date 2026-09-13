@@ -706,6 +706,11 @@
   </section>
   </div>
 
+  <!-- Round 25: plain data-shaping logic pulled out specifically so it's
+       testable from Node (see that file's own comment) - loaded before
+       app.js, which calls its one exported function directly as a global,
+       same as every other script here (no bundler, no modules). -->
+  <script src="wizard-payload.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
