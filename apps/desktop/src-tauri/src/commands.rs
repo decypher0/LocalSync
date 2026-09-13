@@ -1088,10 +1088,12 @@ fn cloud_drop_config() -> Result<ls_clouddrop::oauth::OAuthConfig, String> {
 }
 
 /// Opens the system browser to Google's real consent screen and blocks until
-/// the user finishes (or cancels) sign-in. Requires `GOOGLE_OAUTH_CLIENT_ID`
-/// to be set — see `docs/google-drive-setup.md`; without it this fails
-/// immediately with a message pointing there, rather than trying to build a
-/// request Google would just reject.
+/// the user finishes (or cancels) sign-in. Requires both
+/// `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` to be set (round
+/// 31: Google's real token endpoint rejects this app's exchange without the
+/// secret, despite PKCE - see `docs/google-drive-setup.md`) — without either
+/// one this fails immediately with a message pointing there, rather than
+/// trying to build a request Google would just reject.
 #[tauri::command]
 pub async fn link_google_account<R: tauri::Runtime>(app: AppHandle<R>) -> Result<LinkedAccountInfo, String> {
     let config = cloud_drop_config()?;
