@@ -12,6 +12,7 @@ const { listen } = window.__TAURI__.event;
 const { open } = window.__TAURI__.dialog;
 const { check: checkForUpdate } = window.__TAURI__.updater;
 const { relaunch } = window.__TAURI__.process;
+const { writeText: writeClipboardText } = window.__TAURI__.clipboardManager;
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,6 +28,44 @@ listen("firewall-warning", (evt) => {
   $("firewall-banner").textContent = evt.payload;
   $("firewall-banner").classList.remove("hidden");
 });
+
+// ---------- round 24: magic-link deep-link handoff (localsync://receive?code=...) ----------
+// Only ever pre-fills the Receive tab's own code input and switches to it -
+// reuses the exact existing code-entry path rather than a parallel one, and
+// never itself calls receive_snapshot. Accepting a P2P connection always
+// still needs the same explicit Receive click a person typing the code by
+// hand would make.
+function handleDeepLinkUrls(urls) {
+  if (!urls) return;
+  for (const raw of urls) {
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      continue; // not a parseable URL at all - ignore rather than throw
+    }
+    const code = url.searchParams.get("code");
+    if (!code) continue;
+    switchToTab("receive");
+    $("receive-room-code").value = code;
+    $("receive-error").textContent = "";
+    break; // only one link is ever meaningful per launch/event
+  }
+}
+
+// Two separate entry points, matching how the plugin itself splits this:
+// getCurrent() covers "this process was just launched by clicking a link"
+// (a fresh Windows/Linux process's own CLI argument, or macOS's equivalent -
+// both already parsed into plugin state by the time this JS runs); onOpenUrl
+// covers "a link was clicked again while this process is already running"
+// (macOS's native re-open event, or a second Windows/Linux process
+// redirected here by tauri-plugin-single-instance's "deep-link" feature -
+// see main.rs for why that plugin exists at all).
+window.__TAURI__.deepLink
+  .getCurrent()
+  .then((urls) => handleDeepLinkUrls(urls))
+  .catch((err) => console.error("deep-link getCurrent failed:", err));
+window.__TAURI__.deepLink.onOpenUrl((urls) => handleDeepLinkUrls(urls));
 
 // ---------- round 16: auto-update (checking is silent; installing is never) ----------
 // pendingUpdate holds the real Update object check() returned - only
@@ -284,16 +323,20 @@ $("wiz-mode-next-btn").addEventListener("click", () => {
 });
 
 // ---------- tabs ----------
+// Extracted so round 24's deep-link handler can switch to Receive the same
+// way a real click does, rather than duplicating this in two places.
+function switchToTab(name) {
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+  document.querySelector(`.tab-btn[data-tab="${name}"]`).classList.add("active");
+  $(`tab-${name}`).classList.add("active");
+  // Show "Previously connected" the moment someone looks at the Send tab,
+  // not only after they've just sent something or clicked Refresh by hand.
+  if (name === "send") refreshReceivers();
+}
+
 document.querySelectorAll(".tab-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
-    $(`tab-${btn.dataset.tab}`).classList.add("active");
-    // Show "Previously connected" the moment someone looks at the Send tab,
-    // not only after they've just sent something or clicked Refresh by hand.
-    if (btn.dataset.tab === "send") refreshReceivers();
-  });
+  btn.addEventListener("click", () => switchToTab(btn.dataset.tab));
 });
 
 // ---------- send: round 17/22 database-source wizard ----------
@@ -925,6 +968,22 @@ $("wiz-ready-back-btn").addEventListener("click", () => {
 
 let unlistenSendProgress = null;
 let codeExpiryInterval = null;
+// Round 24: the room code from the send session currently on screen - set
+// once, right after start_send_session returns, and read by both the
+// "Copy code" and "Copy link" buttons below. Not persisted anywhere; a new
+// send session (or the wizard resetting) simply overwrites it.
+let currentRoomCode = null;
+
+// Round 24: where the magic-link fallback page (web/) is actually hosted -
+// see .github/workflows/pages.yml and the README's "Magic link" section
+// for how it gets there and what one-time manual repo setting this URL
+// depends on (GitHub Pages' project-page URL shape, derived from the repo
+// owner/name, not something this app can discover at runtime).
+const MAGIC_LINK_BASE_URL = "https://decypher0.github.io/LocalSync/";
+
+function buildMagicLink(roomCode) {
+  return `${MAGIC_LINK_BASE_URL}?code=${encodeURIComponent(roomCode)}`;
+}
 
 // Visible countdown instead of a silent background timer (round 12) - the
 // room code is only good until the sender's connect_as_sender call (started
@@ -956,6 +1015,27 @@ function stopCodeExpiryCountdown() {
   clearInterval(codeExpiryInterval);
   $("send-code-expiry").textContent = "";
 }
+
+// Round 24: distinct from each other on purpose - a teammate who already
+// has LocalSync installed only needs the bare code (unchanged behavior,
+// just given a real button instead of relying on the code display's own
+// user-select:all); someone who doesn't has nothing useful to do with a
+// bare code until they've installed the app, which is exactly what the
+// magic link's fallback page (web/) walks them through.
+async function copyToClipboard(text, statusIfOk) {
+  try {
+    await writeClipboardText(text);
+    $("copy-status").textContent = statusIfOk;
+  } catch (err) {
+    $("copy-status").textContent = `Couldn't copy automatically (${err}) — select the code above and copy it manually.`;
+  }
+}
+$("copy-code-btn").addEventListener("click", () => {
+  if (currentRoomCode) copyToClipboard(currentRoomCode, "Code copied.");
+});
+$("copy-link-btn").addEventListener("click", () => {
+  if (currentRoomCode) copyToClipboard(buildMagicLink(currentRoomCode), "Link copied.");
+});
 
 // Resets all wizard state, for the next send after this one finishes (or
 // after a failure/cancel the developer wants to redo from scratch). Doesn't
@@ -1009,7 +1089,9 @@ $("send-btn").addEventListener("click", async () => {
     // to show - close it now so that code/the live progress below render
     // on the main Send tab page, exactly where they always have.
     closeSendWizard();
+    currentRoomCode = info.room_code;
     $("send-room-code-display").textContent = info.room_code;
+    $("copy-status").textContent = "";
     $("send-code-wrap").classList.remove("hidden");
     startCodeExpiryCountdown(info.code_expires_in_seconds);
 
