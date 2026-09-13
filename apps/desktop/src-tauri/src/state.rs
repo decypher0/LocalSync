@@ -20,6 +20,19 @@ pub struct ConnectedReceiver {
     pub project_path: String,
 }
 
+/// Sender-side (round 23): one Cloud drop upload whose signaling connection
+/// is being kept open so a receiver can send a `CloudAccessRequest` on it.
+/// Keyed by `peer_id` (the room id it was hosted under), same convention as
+/// [`ConnectedReceiver`] - this is a parallel roster, not a replacement,
+/// since a Cloud-drop send never opens a bulk-transfer data channel at all
+/// (the payload already left over HTTP to Drive; this connection only ever
+/// carries `ControlMessage`s).
+pub struct CloudDropUpload {
+    pub conn: Arc<ls_net::DataChannelConn>,
+    pub file_id: String,
+    pub retention: ls_clouddrop::retention::Retention,
+}
+
 /// App-wide state, held by Tauri and looked up by the ids handed back to the
 /// frontend from `receive_snapshot` / `run_snapshot`.
 ///
@@ -45,4 +58,14 @@ pub struct AppState {
     /// pull request. A receiver only ever tracks one at a time in this
     /// round's scope - receiving from a new sender replaces it.
     pub outgoing_conn: Mutex<Option<Arc<ls_net::DataChannelConn>>>,
+    /// Sender-side (round 23), keyed by `peer_id`. See [`CloudDropUpload`].
+    pub cloud_drop_uploads: Mutex<HashMap<String, CloudDropUpload>>,
+    /// Sender-side (round 23): a `CloudAccessRequest`'s `google_email`,
+    /// stashed here between `listen_for_cloud_access_requests` surfacing the
+    /// `cloud-access-request` event and the frontend's
+    /// `respond_to_cloud_access_request` call - the email has to come from
+    /// *somewhere* on accept (it's what `grant_reader_access` targets), and
+    /// the control message that carried it is long gone by then. Keyed by
+    /// `peer_id`, removed the moment it's responded to.
+    pub cloud_access_requests: Mutex<HashMap<String, String>>,
 }

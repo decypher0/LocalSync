@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wsl -d Ubuntu -- bash -lc \"cd '/mnt/c/Users/Sakha Global/Desktop/Projects/LocalSync' && cargo run --example make_snapshot -p ls-snapshot -- /tmp/ls-scratch/sample-project /tmp/ls-scratch/preload-snapshot.json\")",
+      "Bash(wsl -d Ubuntu -- bash -lc 'python3 -c \" *)",
+      "Bash(wsl -d Ubuntu -- bash -lc \"cd '/mnt/c/Users/Sakha Global/Desktop/Projects/LocalSync' && cargo build -p localsync-desktop 2>&1 | tail -100\")",
+      "Bash(wsl -d Ubuntu -- bash -lc \"cd '/mnt/c/Users/Sakha Global/Desktop/Projects/LocalSync' && cargo test -p localsync-desktop --test run_retry_test --no-run 2>&1 | tail -100\")",
+      "Bash(wsl -d Ubuntu -- bash -lc \"node --version\")",
+      "Bash(node \"C:\\\\Users\\\\Sakha Global\\\\Desktop\\\\Projects\\\\LocalSync\\\\evidence\\\\scratch-grouping-check.mjs\")"
+    ]
+  }
+}

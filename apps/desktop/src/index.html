@@ -69,6 +69,20 @@
         <span id="check-updates-status" class="hint-inline"></span>
       </span>
     </div>
+    <!-- ---- Round 23: Cloud drop (Google Drive) needs a linked Google
+         account before it can be used on either tab - link once here,
+         reused by both Send and Receive. Needs a real Google OAuth Client
+         ID configured by whoever built this app; see
+         docs/google-drive-setup.md if this errors. ---- -->
+    <div>
+      <span class="mode-title">Google account (for Cloud drop)</span>
+      <span class="inline-row">
+        <button id="link-google-btn" class="ghost-btn" type="button">Link Google account</button>
+        <button id="unlink-google-btn" class="ghost-btn hidden" type="button">Unlink</button>
+        <span id="google-account-status" class="hint-inline">Not linked.</span>
+      </span>
+      <p id="google-account-error" class="error"></p>
+    </div>
   </section>
 
   <nav class="tabs">
@@ -275,6 +289,43 @@
       <div id="wiz-step-ready" class="wizard-step hidden">
         <h3>Ready to send</h3>
         <ul id="wiz-ready-summary" class="manifest-card"></ul>
+
+        <!-- ---- Round 23: Cloud drop is orthogonal to the Local/Remote
+             signaling choice in Settings, not a replacement for it - that
+             choice still decides how this app and the receiver find each
+             other for the (tiny) identity-request/response handshake below;
+             this only decides whether the actual snapshot bytes travel
+             peer-to-peer or via the sender's own Google Drive. Only a
+             single folder is sent this way if multiple were selected (same
+             documented boundary `push_update`/pull-requests already have -
+             see commands::start_cloud_drop_session's doc comment). ---- -->
+        <label class="radio-label">
+          <input type="checkbox" id="cloud-drop-toggle" />
+          Cloud drop (upload to your Google Drive instead of a direct transfer — lets the
+          receiver download whenever they're ready, and only after you approve their account)
+        </label>
+        <div id="cloud-drop-options" class="hidden">
+          <span class="hint">
+            Needs a linked Google account (Settings → Google account) on both this device and
+            the receiver's.
+          </span>
+          <span class="mode-title">Retention</span>
+          <span class="inline-row">
+            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-after-download" value="after_download" checked /> Delete once downloaded</label>
+            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-24h" value="24h" /> Delete after 24 hours</label>
+            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-custom" value="custom" /> Delete at a specific time</label>
+          </span>
+          <label id="retention-custom-wrap" class="hidden">
+            Delete at
+            <input id="retention-custom-datetime" type="datetime-local" />
+          </label>
+          <p class="hint">
+            This is always enforced by LocalSync itself, not just Drive's native sharing
+            expiry — see docs/google-drive-setup.md for why (personal Google accounts don't
+            honor Drive's own expiration field).
+          </p>
+        </div>
+
         <button id="wiz-ready-back-btn" class="ghost-btn" type="button">Back</button>
         <button id="send-btn" class="primary-btn" type="button">Send</button>
       </div>
@@ -302,6 +353,15 @@
         Room code (paste the code the sender gave you)
         <input id="receive-room-code" type="text" placeholder="e.g. 0007Y2N5wKp2mQ" />
       </label>
+      <label class="radio-label">
+        <input type="checkbox" id="cloud-drop-receive-toggle" />
+        This is a Cloud drop code (the sender uploaded to Google Drive)
+      </label>
+      <p id="cloud-drop-receive-hint" class="hint hidden">
+        Needs a linked Google account (Settings → Google account). Clicking Receive sends the
+        sender your linked email and waits for them to approve access — nothing downloads
+        until they do.
+      </p>
       <button id="receive-btn" class="primary-btn" type="button">Receive</button>
 
       <div id="receive-progress-wrap" class="progress-wrap hidden">
