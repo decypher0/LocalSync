@@ -146,22 +146,44 @@ pub async fn start_send_session(mode: String, relay_url: Option<String>) -> Resu
 /// Decodes a room code pasted by the user into the `room_id`/`signaling_url`
 /// pair the existing, unmodified `receive_snapshot` needs.
 ///
-/// `mode == "local"` (unchanged): `code` is the packed LAN-IP/port/room-id
-/// string `ls_net::decode_room_code` unpacks. `mode == "remote"`: `code` IS
-/// the room id (see `start_send_session`) - paired with the locally
-/// configured `relay_url`.
+/// Round 25 fix: no longer takes a caller-supplied `mode` at all - the two
+/// modes' codes are unambiguous by shape alone, so asking the receiver to
+/// separately pick one (previously read from Settings' own relay-mode
+/// toggle, meant for the *sender* side) was both redundant and actively
+/// wrong whenever that toggle didn't happen to match whatever mode the
+/// sender actually used for a given code. Per round 10's own design intent
+/// ("both apps already have the same relay_url configured locally, the id
+/// alone is the whole paste-able code" - see `start_send_session`'s doc
+/// comment), the code itself is what should decide this, not a separate
+/// receiver choice:
+///
+/// - A local-mode code is always exactly 14 base62 characters (`ls_net`'s
+///   private `ROOM_CODE_DIGITS`; the packed LAN-IP/port/room-id string
+///   `ls_net::decode_room_code` unpacks) - tried first.
+/// - A remote-mode code is always the bare, 4-character id
+///   `generate_room_id()` produces (see `start_send_session`) - paired
+///   with the locally configured `relay_url`, since a bare id genuinely
+///   carries no address of its own to derive one from.
+///
+/// The two shapes never collide, so trying local first and falling back to
+/// remote is a real detection, not a guess: a local-mode code always
+/// parses as one, and only something that isn't shaped like one ever
+/// reaches the remote branch below.
 #[tauri::command]
-pub fn decode_room_code(mode: String, code: String, relay_url: Option<String>) -> Result<DecodedRoomCode, String> {
-    if mode == "remote" {
-        let signaling_url = relay_url
-            .filter(|u| !u.trim().is_empty())
-            .ok_or("relay_url is required in remote mode")?;
-        return Ok(DecodedRoomCode { room_id: code, signaling_url });
+pub fn decode_room_code(code: String, relay_url: Option<String>) -> Result<DecodedRoomCode, String> {
+    if let Ok((addr, room_id)) = ls_net::decode_room_code(&code) {
+        let signaling_url = format!("ws://{}:{}", addr.ip(), addr.port());
+        return Ok(DecodedRoomCode { room_id, signaling_url });
     }
 
-    let (addr, room_id) = ls_net::decode_room_code(&code).map_err(|e| e.to_string())?;
-    let signaling_url = format!("ws://{}:{}", addr.ip(), addr.port());
-    Ok(DecodedRoomCode { room_id, signaling_url })
+    // Not shaped like a local-mode code - the only other real possibility
+    // is a remote-mode bare room id, which does need a separately-known
+    // relay_url (that's inherent to a bare id carrying no address of its
+    // own, not a mode the receiver had to pick).
+    let signaling_url = relay_url
+        .filter(|u| !u.trim().is_empty())
+        .ok_or("This doesn't look like a local-network code, so it needs a relay URL - enter the one the sender is using (Settings, or ask them).")?;
+    Ok(DecodedRoomCode { room_id: code, signaling_url })
 }
 
 /// Bundles `project_path` into a signed snapshot and sends it to whoever
@@ -1331,7 +1353,8 @@ pub struct CloudDropReceiveOutcome {
 }
 
 /// Receiver side: decodes `code` (via the existing, unmodified
-/// `decode_room_code`), connects to the sender's control channel, announces
+/// `decode_room_code` - round 25: no longer takes a `mode` either, see its
+/// own doc comment), connects to the sender's control channel, announces
 /// this receiver's own linked Google account, and waits for the sender's
 /// Accept/Reject. On accept, downloads straight from Drive and runs the
 /// result through the same review/consent/Run pipeline every other
@@ -1339,7 +1362,6 @@ pub struct CloudDropReceiveOutcome {
 #[tauri::command]
 pub async fn request_cloud_drop_access(
     state: State<'_, AppState>,
-    mode: String,
     code: String,
     relay_url: Option<String>,
 ) -> Result<CloudDropReceiveOutcome, String> {
@@ -1349,7 +1371,7 @@ pub async fn request_cloud_drop_access(
         .ok_or("not linked to a Google account yet - link one in Settings first")?;
     let access_token = ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map_err(|e| e.to_string())?;
 
-    let decoded = decode_room_code(mode, code, relay_url)?;
+    let decoded = decode_room_code(code, relay_url)?;
     log::info!("request_cloud_drop_access: connecting for room={}", decoded.room_id);
     let conn = ls_net::connect_as_receiver(&decoded.signaling_url, &decoded.room_id)
         .await
