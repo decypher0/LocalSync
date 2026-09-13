@@ -1,505 +1,110 @@
 # LocalSync
 
-Send your local project, as it exists right now, straight to a teammate's machine — no cloud, no tunnel to your dev server. They see a diff, review it, and click Run before anything executes, sandboxed in read-only Podman containers with a small seeded dataset. Nothing about the receiving machine syncs back to you.
+**Share a running local project — code, containers, and database — with a teammate in minutes, without deploying anywhere.**
 
-## Download & Install
+[![Release](https://img.shields.io/github/v/release/decypher0/LocalSync?include_prereleases&label=release)](https://github.com/decypher0/LocalSync/releases)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#-download--install)
+[![License](https://img.shields.io/badge/license-TBD-lightgrey)](#-license)
+[![Build](https://github.com/decypher0/LocalSync/actions/workflows/release.yml/badge.svg)](https://github.com/decypher0/LocalSync/actions)
 
-**[Get the latest build from the Releases page →](https://github.com/decypher0/LocalSync/releases/latest)**
+LocalSync lets a developer package their current local project — source, containers, and database state — and hand it directly to a teammate's machine, where it runs in an isolated, read-only sandbox. No shared staging server, no tunnel to your live dev process, no waiting for a deploy pipeline.
 
-Pick the file for your operating system, download it, and follow the steps below. You don't need to install any programming tools, and you don't need to clone this repository — just the one file.
-
-These are early, unsigned builds — LocalSync is under active development, not a finished product yet, and the pipeline that produces these builds is still new (round 15). That's why each OS's steps below include what to click past (Windows SmartScreen, macOS Gatekeeper) — expected, not a sign anything's wrong. If something doesn't work, that's useful to know — see the bottom of this README for how this project tracks what's actually been verified versus not.
-
-### Windows
-
-1. Download the `.exe` file (it's an installer, e.g. `LocalSync_..._x64-setup.exe`).
-2. Double-click it to run the installer.
-3. Windows will likely show a blue "Windows protected your PC" screen (SmartScreen) — this is expected for an app that isn't code-signed yet, not a sign anything is wrong. Click **More info**, then **Run anyway**.
-4. Follow the installer's prompts. LocalSync also asks Windows Firewall for permission automatically during install (needed for the peer-to-peer connection between you and whoever you're sharing with) — this is expected, not a separate thing to configure.
-
-### macOS
-
-1. Download the `.dmg` file (e.g. `LocalSync_..._aarch64.dmg` for Apple Silicon Macs, `..._x64.dmg` for Intel Macs — if you're not sure which you have, click the Apple menu → About This Mac and check "Chip"/"Processor").
-2. Double-click the `.dmg` to open it, then drag the LocalSync icon into the **Applications** folder shortcut it shows you.
-3. **Do not** double-click LocalSync in Applications the first time — macOS's Gatekeeper will refuse to open an unsigned app that way, with a message saying it's "damaged" or "can't be opened" (misleading wording — it's not actually damaged, just unsigned). Instead: open **Applications**, **right-click** (or Control-click) LocalSync, choose **Open**, then click **Open** again in the dialog that appears. This one-time step tells macOS you trust this specific app; after that, opening it normally works.
-
-### Linux
-
-Two options — pick whichever fits how you normally install software:
-
-- **`.deb` file** (Debian, Ubuntu, and derivatives): double-click it to open it in your software installer, or from a terminal: `sudo apt install ./LocalSync_*.deb`.
-- **AppImage** (works on most distros, no installation step): download it, make it executable (`chmod +x LocalSync_*.AppImage`), then double-click it or run it from a terminal. If it doesn't launch and complains about `libfuse.so.2`/FUSE, your distro is one of the newer ones that doesn't ship that by default — install it once (`sudo apt install libfuse2` on Ubuntu 22.04+, or the equivalent for your distro) and try again.
-
-Linux doesn't have an equivalent unsigned-app warning to click through — both formats above just run.
-
-### What to expect the first time
-
-LocalSync is two-sided: one person **Sends** a project, another **Receives** it, reviews a diff, and clicks **Run** to actually start it in sandboxed containers. The first time *anyone* clicks **Run** on a machine, LocalSync checks whether [Podman](https://podman.io) (the sandboxing engine it uses) is installed and working — on Windows and macOS, it will try to install and start it automatically if not (this can take **several minutes** the first time, since it's setting up a small virtual machine; it's not stuck, just genuinely slow the first time). After that first setup, later runs are fast.
-
-Nothing runs automatically just because you received something — you always see a diff first and have to click Run yourself.
+**[Download](#-download--install) · [How it works](#-how-it-works) · [Features](#-features) · [Getting started](#-getting-started) · [Build from source](#-build-from-source) · [Contributing](#-contributing)**
 
 ---
 
-## For developers and contributors
+## 🧩 The problem
 
-Everything below this point is for people building LocalSync from source, working on its code, or wanting to understand how it's built — not needed just to use the app (see **Download & Install**, above).
+- **Testing a UI against a real backend API usually means waiting** — for a deploy, a shared staging environment, or someone else's schedule.
+- **Tunneling tools (ngrok and similar) share your live dev process directly** — the moment you touch your code, whoever's testing feels it too, and there's no isolation between "what I'm actively changing" and "what I'm showing someone."
+- **Tunnels alone don't solve the database problem.** A real application — especially a multi-tenant one, or one spanning several services and databases — often needs its actual seed data (default tenants, roles, parent records) just to boot. No developer can safely guess which rows are "needed" and which aren't, and a project's data can genuinely run into gigabytes.
+- **Not everyone has a server to route through**, and self-hosting a relay isn't something every small team or solo developer wants to maintain.
+- **Setting all of this up shouldn't require a terminal.** A GUI-first workflow, with sane defaults, matters as much as the underlying transport.
 
-This is an MVP validating one path end-to-end: **Linux ⇄ Linux**, one flow (share → review → run) — plus Windows/macOS Podman provisioning (round 5) so the receiver side isn't Linux-only, and a second reference stack (round 6, below) proving the pipeline isn't secretly specific to the first one. A sender can now target multiple simultaneous receivers, push updates, and receive pull requests (round 11, below) — still always one-way and always consent-gated per receiver, never a shared live session. Code-signing/notarization, an auto-updater, and access revocation were out of scope through round 15; round 16 (below) added a real, working auto-updater plus conditional code-signing infrastructure that stays inactive until real paid certificate credentials are added.
+## ✅ Features
 
-## How it fits together
+- **Snapshot-based sharing, not a live tunnel.** Your project is diffed (`.gitignore`-aware), signed, and packaged as a point-in-time snapshot — editing your code afterward never affects what the receiver is running.
+- **A real consent gate, enforced at the type level.** Nothing runs on the receiver's machine until they've reviewed the incoming diff and explicitly clicked Run — this isn't just a UI convention, it's structurally impossible to bypass in the code.
+- **Read-only, sandboxed execution via containers**, using Podman — no dependency ever gets installed to the receiver's actual OS.
+- **Cross-platform**, natively — Windows, macOS, and Linux, from one codebase.
+- **Three ways to connect**, chosen per send:
+  - **Local network** — zero setup, for teammates on the same Wi-Fi/LAN.
+  - **Remote relay** — point at any self-hosted relay for cross-network use without a central server this project runs for you.
+  - **Cloud drop** — share via your own Google Drive; the sender stays in full control of who's been granted access, using Drive's own real sharing permissions, not a public link.
+- **A guided database wizard**, not a black box. Auto-detects connection details from your project's own config (e.g. Spring Boot's `application.yml`), lets you browse the real live schema before deciding what to include, supports MySQL/PostgreSQL/MongoDB, and handles projects with multiple databases across multiple folders.
+- **Fast on repeat sends.** Dependency layers, container images, and database dumps are all cached — a second send of a mostly-unchanged project is dramatically faster than the first.
+- **Multi-person sessions.** A sender can have several people connected at once, push an update to one specific person, and receivers can request a fresh copy without waiting to be pushed to.
+- **Magic links.** Share a real `https://` link — it opens straight into the app if it's installed, or walks a new teammate through installing it if it's not.
+- **A real update path and modern UI** — auto-update, light/dark themes, and a guided step-by-step flow for sharing and receiving.
 
-```
-crates/
-  ls-snapshot/    sender: git-aware diff + bundle + manifest + ed25519 signing
-  ls-net/         WebRTC data-channel transport (dumb pipe — moves bytes only)
-  ls-security/    receiver: signature verification, diff summary, sandbox policy
-  ls-containers/  receiver: podman-compose orchestration, cache-aware DB volume
-apps/
-  signaling-server/  minimal WebSocket relay for WebRTC offer/answer/ICE only —
-                      never sees project code or app traffic
-  desktop/            Tauri app wiring the four crates together + the UI
-sample-project/       Spring Boot + MySQL reference app used by the demo
-sample-project-node/  Express + PostgreSQL reference app — proves the pipeline
-                       generalizes beyond the first stack (round 6)
-```
+## 🖥️ How it works
 
-The trust chain is enforced at the type level, not just by convention: `ls_containers::run_snapshot` only ever accepts a `VerifiedSnapshot`, which only `ls_security::verify` can construct. Nothing runs until a signature check has passed and — in the app — until a human has seen the diff and clicked Run.
+1. **Send** — pick a project folder (or several), choose how to connect, and optionally walk through the database wizard if your project needs one.
+2. LocalSync diffs, signs, and packages a snapshot — your live code is never touched or exposed directly.
+3. **Receive** — the other person gets a room code or magic link, reviews exactly what's changed, and clicks Run.
+4. Containers spin up locally on their machine — app and database included — read-only and disposable.
 
-### NAT traversal: STUN first, TURN as a real fallback
+## 📥 Download & Install
 
-Connections try direct P2P (via STUN) first. When that's genuinely unreachable — a strict/symmetric NAT, or a firewall that blocks direct traffic entirely — they fall back to relaying through a TURN server, never the other way around. This isn't assumed: `DataChannelConn::connection_path()` reports whether an established connection actually went `Direct` or `Relayed`, by reading the WebRTC stats for the nominated candidate pair, so the claim is checkable in logs and tests, not just believed.
+Grab the latest build from the **[Releases page](https://github.com/decypher0/LocalSync/releases)**.
 
-TURN is off by default (STUN-only, matching earlier behavior) and turns on only when all three of `LOCALSYNC_TURN_URL`, `LOCALSYNC_TURN_USERNAME`, `LOCALSYNC_TURN_CREDENTIAL` are set in the process environment. For interactive use, `scripts/start-turn.sh` runs a local [coturn](https://github.com/coturn/coturn) instance as a Podman container (no `apt install` needed) and prints the env vars to export.
+> Builds are currently unsigned while the project doesn't yet have a paid code-signing certificate. Your OS will warn you the first time — this is expected, not a sign of a compromised download.
 
-**Proof it actually rescues a blocked connection, not just that it's configured**: `cargo test -p ls-net --test nat_fallback` builds two peer containers on a shared Podman network, each locked down with an in-container `iptables` default-deny (via `--cap-add=NET_ADMIN`, which needs no host root) that blocks everything except the TURN server's control port and the signaling server — a genuine network boundary, not a same-box shortcut. Direct connection is impossible; the test asserts both peers report `PATH=Relayed` and that the transferred bytes match byte-for-byte, at a payload size (20,000 bytes) matching a real snapshot's actual scale, not an artificially small one. See the test file's module doc comment for three narrower designs that were tried and rejected along the way, each ruled out by a real experiment rather than assumed. `cargo test -p ls-net --test turn_configured_still_prefers_direct` is the complementary same-LAN proof: TURN configured *and* reachable still doesn't get used when direct works.
+**Windows:** run the `.exe` installer. If SmartScreen shows *"Windows protected your PC,"* click **More info → Run anyway**.
 
-### The transport used to stall above ~4KB — fixed, not worked around
+**macOS:** open the `.dmg`. Since it's unsigned, Gatekeeper will block a normal double-click — right-click the app → **Open**, and confirm in the dialog that appears.
 
-Early NAT-fallback testing only used a 4096-byte payload because larger transfers between two separate OS processes (not same-process tasks) reproducibly stalled forever. Root-caused with `RUST_LOG=webrtc_sctp=trace` against real two-process transfers: `webrtc-sctp`'s outbound queue is unbounded and never applies backpressure on its own, so `send_payload`'s original tight per-chunk loop could hand hundreds of KB to the SCTP layer in microseconds — a burst that provoked real UDP packet loss. Separately, `dc.send()` completing (or even the local `buffered_amount` reaching zero) only proves "handed to the local queue", not "the peer has it" — testing showed even a sender's own last-chunk acknowledgment wasn't reliable proof for tail traffic. Both are fixed in `crates/ls-net/src/lib.rs`: real flow control (`send_payload` waits for `buffered_amount()` to drop below a ceiling before queuing more) plus an explicit completion ack from the receiver that the sender waits to see before returning. This was our bug, not an upstream limitation — no chunking workaround was needed. `crates/ls-net/tests/nat_peer_process_stress.rs` proves it: two real OS processes, 10 consecutive runs at 3,000,000 bytes (well past a real snapshot's ~18.5KB), byte-exact every time.
+**Linux:** install the `.deb` (`sudo dpkg -i LocalSync_*.deb`) or run the AppImage directly (`chmod +x LocalSync_*.AppImage && ./LocalSync_*.AppImage`).
 
-Caching is intentionally not custom-built: Podman's own image-layer cache handles "second build is fast" for free, and the MySQL data volume is named deterministically from a hash of the seed data, so a second snapshot of an unchanged project reuses it instead of reseeding. First run of the sample project cold: ~5 minutes. Same project resent unchanged: ~20 seconds.
+## 🚀 Getting started
 
-## Prerequisites (Linux, or WSL2 Ubuntu on Windows)
+1. Open LocalSync on both machines.
+2. On the sender's side, click **Send**, choose a connectivity mode, and pick a project folder.
+3. If your project uses a database, the wizard will walk you through it — auto-detecting connection details where it can, and letting you browse real tables before deciding what to include.
+4. Share the generated code or magic link with your teammate.
+5. On the receiver's side, click **Receive**, enter the code (or just click the link), review the diff, and click **Run**.
 
-```
-sudo apt update
-sudo apt install -y build-essential curl wget file pkg-config \
-    libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-    librsvg2-dev libssl-dev libxdo-dev \
-    podman podman-compose uidmap slirp4netns
-```
-(this is also `scripts/setup-linux-deps.sh` — run it yourself, it needs your `sudo` password interactively)
+## 🛠️ Build from source
 
-Plus a Rust toolchain (`https://rustup.rs`) and Node 18+ for the signaling server.
+**Prerequisites:**
+- [Rust](https://rustup.rs) (stable toolchain)
+- [Node.js](https://nodejs.org) (current LTS)
+- [Podman](https://podman.io)
+- Platform build tools: Visual Studio Build Tools (Windows, MSVC toolchain), Xcode Command Line Tools (macOS), or your distro's GTK/WebKit dev packages (Linux — see `scripts/setup-linux-deps.sh`)
 
-If you're on Windows: install WSL2 (`wsl --install`), run the above inside your Ubuntu distro, and give WSL2 more than its ~7.6GB default memory cap if you're compiling and running containers at the same time — see `.wslconfig` in your Windows user profile (`memory=12GB` was enough here; the Maven+MySQL+container load under the default cap caused real timing flakiness).
-
-## Running the tests
-
-```
-cargo test --workspace                              # all four crates
-cargo test -p localsync-desktop -- --nocapture       # full pipeline against sample-project
-```
-
-The pipeline test does the real thing: bundles `sample-project/`, signs it, round-trips it through JSON exactly as the wire format does, verifies it, reads the diff, brings it up under Podman, confirms `GET /health` responds, tears it down, then resends the *same unchanged* project and asserts the DB volume was reused (`db_cache_hit == true`).
-
-## Running the demo yourself
-
-Two instances of the app on one machine stand in for sender + receiver — no second physical machine needed.
-
-```
-scripts/demo.sh
+```bash
+git clone https://github.com/decypher0/LocalSync.git
+cd LocalSync/apps/desktop
+npm install
+npm run tauri build
 ```
 
-This starts the signaling server and two app instances (each with its own `LOCALSYNC_DATA_DIR` so they don't collide). Then, by hand:
+Run the test suite:
 
-1. **Sender window** → Send tab → project folder: the absolute path to `sample-project/` in this repo → generate a room code → Send.
-2. **Receiver window** → Receive tab → paste the same room code → Receive.
-3. Review the diff (every file shows as "added" for a first send) → Run.
-4. The session panel shows the service ports and whether the DB volume was a cache hit. Hit the app's port: `curl http://localhost:8080/api/notes` should return the seeded notes.
-5. Repeat steps 1–4 without changing `sample-project/` — the second run should show a cache hit and come up noticeably faster.
-
-### Jumping straight to the review screen
-
-The diff-review/consent screen normally only appears after a live P2P receive. To check it looks right on a real display without going through Send/Receive first:
-
-```
-scripts/demo-review-screen.sh
+```bash
+cargo test --workspace
 ```
 
-This bundles `sample-project/` into a real signed snapshot, then launches the app with `LOCALSYNC_PRELOAD_SNAPSHOT` pointing at it — on startup the app runs that snapshot through the exact same verify+diff path a real receive does (see `apps/desktop/src-tauri/src/main.rs`) and emits it straight to the review screen. It's the same `renderReview()` code path a real receive uses, not a mockup, and Run still works normally from there if you want to go further than just looking.
+Two sample projects (`sample-project/`, a Spring Boot + MySQL app, and `sample-project-node/`, an Express + PostgreSQL app) are included for trying out the full send/receive flow locally without needing a real project on hand.
 
-## Real two-machine, real-UI evidence
+### Optional: enabling Cloud drop and code-signing
 
-`evidence/round4-two-machine/` has the write-up and screenshots of a full share → receive → review → run pass through the *actual* Tauri UI (not the preload shortcut) between two independent WSL2 instances — click-driven via `xdotool`, screenshotted via `scrot` through WSLg. Read that directory's `README.md` first: it's upfront that these two instances share a kernel/VM (Windows Home has no Hyper-V, so true separate hardware wasn't available), and it documents a WSLg display issue that blocked the final "running" screenshot specifically — the functional result is captured instead as real `curl` output against the containers the UI flow actually started (`GET /health` → `200 {"status":"UP"}`, `GET /api/notes` → the real seeded rows), cross-checked against the same commit hash shown in the review screenshot.
+- Cloud drop (Google Drive) mode needs a Google OAuth Client ID you register yourself — see [`docs/google-drive-setup.md`](docs/google-drive-setup.md).
+- Producing signed, warning-free installers needs a real code-signing certificate (Windows) and Apple Developer Program enrollment (macOS) — see [`docs/code-signing.md`](docs/code-signing.md).
 
-## Windows / macOS Podman provisioning (round 5)
+Neither is required to build or use the app — both are optional, and everything works without them beyond the warnings described above.
 
-The receiver side no longer requires Linux: `ls_containers::run_snapshot` now calls `ensure_podman_ready()` as its first step (`crates/ls-containers/src/provisioning.rs`), which on Windows/macOS actually provisions Podman — installing it (`winget`/`brew`) and initializing/starting its VM (`podman machine init`/`start`, WSL2-backed on Windows, QEMU/AppleHV-backed on macOS) — rather than just checking it's already there, the way the Linux path (unchanged) still does.
+## 🔒 Security model
 
-**This environment cannot prove this the way rounds 1–4 proved the Linux path**: no macOS access exists anywhere in this build pipeline at all, and while a real Windows host *was* available for this round (unlike WSL2, which only ever produces Linux binaries), fully proving multi-machine behavior is explicitly out of this round's budget — see the definition-of-done note below and `docs/round5-manual-test-checklist.md`.
+- Every snapshot is signed; the receiver's app verifies the signature before anything can run.
+- Execution is read-only and sandboxed per snapshot — nothing installs to the receiver's host system.
+- The trust model is strictly one-way: a sender shares with a receiver, never the other way around. Pull requests and multi-receiver sessions are signaling only — no code or file changes can flow back to the sender.
+- Cloud drop mode uses Google Drive's own real, per-account sharing permissions — not a public "anyone with the link" file — so the sender always knows exactly who has access.
 
-- **Windows** (`crates/ls-containers/src/provisioning/windows_impl.rs`): implemented *and verified for real* on a Windows 11 Home machine — every command in it was actually run during development, including a full clean provisioning pass (`cargo test -p ls-containers windows_provisioning_end_to_end -- --ignored`). Real bugs it had to work around, not hypothetical: a freshly-`winget`/`pip`-installed binary isn't visible on `PATH` until refreshed from the registry; `wsl.exe`'s captured output is BOM-prefixed UTF-16LE, not UTF-8; the Windows Podman installer doesn't bundle `podman-compose` (installed via `pip` instead); `podman machine start` can report success while WSL2's own session plumbing is still wedged from a prior unclean shutdown (one bounded `wsl --shutdown` + restart retry fixes it). WSL2/Hyper-V-disabled failure text is matched against Microsoft's documented error code where possible; anything else surfaces its raw error rather than a guessed diagnosis.
-- **macOS** (`crates/ls-containers/src/provisioning/macos_impl.rs`): **written but entirely unverified** — the file says so at the top. No Mac hardware, VM, or SDK exists in this environment, so `#[cfg(target_os = "macos")]` code here has never once been compiled, let alone run. Written by close analogy to the Windows path and by cross-referencing Podman's and Homebrew's real documentation. First real test happens on a developer's own Mac.
+## 🤝 Contributing
 
-**Structured logging**: every provisioning step — not just the final result — is appended to `provisioning.log` under the OS's standard app-data directory (`%APPDATA%\localsync\logs\` on Windows, `~/Library/Application Support/localsync/logs/` on macOS, `~/.local/share/localsync/logs/` on Linux), with the OS/version detected, the exact command run, and its real exit code/output. See `docs/round5-manual-test-checklist.md` for exactly what to copy back if something breaks.
+Issues and pull requests are welcome. If you're picking this up for the first time, `docs/` has setup guides for the pieces that need external credentials (Google Drive, code-signing), and `docs/round5-manual-test-checklist.md` has the accumulated manual-testing notes for the parts that need a real screen to verify.
 
-**Builds**: an unsigned Windows installer was produced and confirmed on disk this round (`LocalSync_0.1.0_x64-setup.exe`, NSIS, ~7.25MB) — SmartScreen will warn since it's unsigned, that's expected. A `.dmg` cannot be produced here (Tauri's macOS bundling only works when built on macOS); `docs/macos-build.md` has the steps for a developer to produce one on their own Mac. Update path: no auto-updater — Tauri's NSIS bundler already replaces a prior install of the same product in place, so bumping `version` in `apps/desktop/src-tauri/tauri.conf.json` and rebuilding is the whole process.
+## 📄 License
 
-## A second stack, to prove the pipeline generalizes (round 6)
-
-Everything through round 5 was only ever proven against one stack (Spring Boot + MySQL) — leaving open whether the snapshot/manifest format and container orchestration actually generalize, or just happen to work because of accidental Spring-Boot/MySQL-specific assumptions. `sample-project-node/` (Express + PostgreSQL, same structural shape as `sample-project/` — `app/` build context, `db-seed/` at the root, its own standalone `docker-compose.yml`) answers that.
-
-**`ls-snapshot`'s dependency-hash/diff logic needed zero changes.** Its lockfile detection was already a priority-tier fallback (`pom.xml` → `build.gradle*` → `package-lock.json`) searched across each compose service's own build-context subdirectory, built that way from round 1 — `crates/ls-snapshot/src/hash.rs`'s `falls_back_to_package_lock_json_in_a_service_build_dir` test proves `app/package-lock.json` hashes correctly through the exact same, unmodified function Maven projects use.
-
-**`ls-containers` had one real, confirmed hardcoded assumption**: `mysql_service_names` detected the database service by checking for the literal string `"mysql"` in its image — for `sample-project-node`'s `postgres` service, that matched nothing, which would have silently disabled the deterministic cache-volume mechanism entirely for any non-MySQL database. Fixed by generalizing to `database_service_names`, matching against a small explicit keyword list (`mysql`, `mariadb`, `postgres`, `postgresql`) instead of one hardcoded engine — not a second parallel function bolted on next to the first. Nothing else in `ls-containers` (image canonicalization, build-context rewriting, volume pinning) turned out to be MySQL-specific; those already operated on YAML structure generically.
-
-**Cache-reuse proof, same style as round 1, now for both stacks:**
-
-| Stack | Cold run | Cached run |
-|---|---|---|
-| Spring Boot + MySQL (`sample-project`, unmodified, re-verified after the fix) | 342.6s | 14.0s |
-| Express + PostgreSQL (`sample-project-node`) | 107.3s | 14.9s |
-
-`apps/desktop/src-tauri/tests/pipeline_node_test.rs` is the new Postgres proof, mirroring `pipeline_test.rs`'s exact structure (create → verify → diff → run → stop → resend the same unchanged snapshot → run again, asserting `db_cache_hit == true` the second time). `pipeline_test.rs` itself was not touched and still passes.
-
-`crates/ls-net`, `crates/ls-security`, and TURN/signaling/consent-gate code were untouched this round by design (`git diff --stat -- crates/ls-net crates/ls-security` is empty) — that code was under active manual two-machine testing outside this session while this round's work happened.
-
-## Real bugs found in real testing, fixed (round 7)
-
-A real manual two-machine test (Windows 11 + Kali Linux, real WiFi, real UI) surfaced a genuine bug: the Linux sender stalled indefinitely at the bundling step and never produced a WebRTC offer, so the Windows receiver correctly timed out having received nothing. Root-caused and fixed:
-
-- **`git_bytes`** (every git subprocess `create_snapshot` shells out to, in `crates/ls-snapshot/src/bundle.rs`) left stdin inherited from the parent — a GUI process with no terminal — and had no timeout at all, so any blocking git invocation would hang the whole Send flow forever with zero feedback. Now: stdin explicitly closed, `--no-pager` passed defensively, and a real 30s timeout per call, with stdout/stderr drained concurrently rather than after (draining only after `wait()` returns would deadlock the same way on a large `git archive` output exceeding the OS pipe buffer — the same class of bug, caught before it shipped). The exact hang couldn't be reproduced on our own test hardware, so this is a genuine, verified hardening pass against the most likely cause, not a confirmed-exact repro — the new logging below is what closes that gap if it recurs.
-- **`send.log`**, same location convention as round 5's `provisioning.log`, now covers the whole Send flow end to end (bundling/each git command/signing/signaling connect/offer/ICE gathering/transfer) via the standard `log` crate facade — see `docs/round5-manual-test-checklist.md`'s round 7 addendum for exactly what to copy back.
-- **STUN was already fine** — confirmed the default (`stun.l.google.com:19302`, unconditional since round 1) is not test-harness-specific and wasn't the cause.
-- **A native folder picker** on the Send tab, via Tauri's dialog plugin — no more typing an absolute path from memory.
-
-Proven with a new test exercising the real Tauri command layer (`tauri::test::mock_app()` calling `commands::share_snapshot`/`receive_snapshot` directly — not the lower-level crate functions `pipeline_test.rs` already covered), run against **both** sample projects to confirm the fix isn't coupled to one stack: `apps/desktop/src-tauri/tests/send_flow_test.rs`. `pipeline_test.rs` and `pipeline_node_test.rs` were not touched and both still pass — independently re-verified, cache-reuse timings intact (MySQL: 313.1s → 18.3s; Postgres: 88.7s → 17.5s).
-
-## Embedded signaling, a real Linux picker fix, gitignore-aware bundling, firewall automation (round 8)
-
-Driven by friction from the first genuinely successful two-machine test: it worked, but only after manually starting `apps/signaling-server` on both ends and typing its LAN address by hand, the Linux Browse button did nothing, and neither firewall was configured for anyone reading this cold.
-
-- **No more separate signaling process.** `crates/ls-net/src/discovery.rs` adds `host_ephemeral_relay()` (binds `0.0.0.0:0`, replicates `apps/signaling-server/index.js`'s pairing/relay/queue/disconnect protocol byte-for-byte so `signaling.rs`'s existing client works against it unmodified), `detect_lan_ip()` (the classic UDP-`connect()`-to-a-public-address trick — a routing-table lookup, no real traffic sent), and `encode_room_code`/`decode_room_code` (`IP + port + room id` packed into a fixed-width 14-character base62 string). Two new, purely-additive Tauri commands (`start_send_session`, `decode_room_code`) derive the values the *existing, unmodified* `share_snapshot`/`receive_snapshot` commands already take — every instance is symmetric now, any app can send or receive with zero setup difference. The old "Signaling server URL" field moved to Settings as an optional override, not the normal path. Proven same-box end-to-end, including a real payload transfer through nothing but a room code: `crates/ls-net/tests/embedded_relay_test.rs`.
-- **The Linux "Browse…" picker's actual root cause**, found by reading the exact pinned `rfd`/`tauri-plugin-dialog` source rather than guessing: the default `gtk3` backend drives the file picker through a second, privately-spawned GTK thread (`GtkGlobalThread`, calling `gtk_init_check`/`gtk_main_iteration` on its own thread) independent of the GTK main loop Tauri's own webview already owns on the real main thread — the same class of bug Tauri has open issues about (`tauri-apps/tauri#11312`, "GTK may only be used from the main thread"). Fixed by switching `apps/desktop/src-tauri/Cargo.toml` to the `xdg-portal` feature instead of `gtk3`: the picker now goes out-of-process, over D-Bus, to the `xdg-desktop-portal` service — there's no second in-process GTK loop for this bug to occur in. Confirmed via the dependency graph (`ashpd`/`zbus` now compiled in place of the private-GTK-thread code path) and a clean full-workspace rebuild; a live interactive click-through confirmation was not obtainable in this round's sandbox (no real desktop environment, and the same WSLg display issues `evidence/round4-two-machine/README.md` already documents) — see `docs/round5-manual-test-checklist.md`'s round 8 addendum for what to confirm on real hardware.
-- **Gitignore-aware bundling.** `crates/ls-snapshot` already relied on `git`'s own tracking to skip properly-ignored files by construction; the gap was a project that *accidentally committed* `node_modules`/`.git`/`target`/`build`/etc. without a `.gitignore` at all. A small denylist (`NOISE_DIR_NAMES` in `bundle.rs`) now filters those out at every point they could otherwise leak into a snapshot — the git-archive tar stream, the diff-stat totals, and the review diff itself. Proven against a real accidental-commit scenario: a genuine `npm install` inside a fresh copy of `sample-project-node/`, force-committed with no `.gitignore`, confirmed to produce a snapshot with zero `node_modules` entries anywhere.
-- **Windows Firewall rule is automatic now.** An NSIS install hook (`apps/desktop/src-tauri/windows/hooks.nsh`, wired in via `tauri.conf.json`'s `bundle.windows.nsis.installerHooks`) runs `netsh advfirewall firewall add rule` for the installed binary at install time, using the elevation the installer already requires — and removes the rule again on uninstall. Fire-and-forget: a `netsh` failure doesn't abort the install, it just means the original manual-workaround friction returns.
-- **Linux `ufw` gets a real warning instead of a silent hang.** `main.rs` checks `ufw status` at startup (`.ok()?` if `ufw` isn't installed at all — not an error) and, if active, both logs and shows a startup banner explaining the dynamic port may need to be allowed through.
-
-All of rounds 1–7's existing tests were re-run unmodified and still pass: `pipeline_test.rs`, `pipeline_node_test.rs`, `preload_test.rs`, `send_flow_test.rs` (both stacks), the full `ls-net` suite (`transfer`, `nat_fallback`, `nat_peer_process_stress`, `turn_configured_still_prefers_direct`, plus the new `embedded_relay_test`), `ls-snapshot` (12/12, including the new accidental-commit case), `ls-security`, and `ls-containers`.
-
-## Run-flow retry, live provisioning details, a grouped diff view (round 9)
-
-Deliberately scoped away from round 8's embedded-signaling/dialog/installer/gitignore work, which was still being retested by hand on real hardware — this round works one layer up, in the Run-flow UX and a real robustness bug.
-
-- **A failed Run no longer discards the held snapshot.** The bug: `commands::run_snapshot` removed the verified snapshot from `AppState` *before* attempting the run, so any failure — even a purely environment one like Podman not being on `PATH` — left it gone, forcing a fresh Send/Receive just to retry after fixing the environment. Fixed: the snapshot is only taken out for the duration of the attempt and put back if `ls_containers::run_snapshot` fails. Nothing reachable from `run_snapshot` is a signature/verification failure (that already happened earlier, in `receive_snapshot`) — so every failure here is legitimately retry-able by construction, no recoverable-vs-unrecoverable classification needed in code. Proven with a real failure→retry→success cycle against actual Podman: `apps/desktop/src-tauri/tests/run_retry_test.rs`.
-- **Run shows a collapsed spinner by default**, with an opt-in "Show details ▾" toggle revealing a small scrollable terminal-style view streaming the real container-provisioning output live. Reuses round 5's existing `provisioning.log` rather than inventing a new stream: `commands.rs` tails that file from the offset it was at when Run started (a plain poll loop, no new dependency) and emits each new line as a `run-progress` Tauri event; the frontend listens before invoking, clears the log fresh on every attempt, and tears the listener down when the attempt ends. Proven end to end against a real, non-mocked provisioning run: `apps/desktop/src-tauri/tests/run_progress_test.rs`.
-- **The diff-review screen groups files by directory** (native `<details>`/`<summary>`, no custom JS toggle needed) with a prominent "N files changed" count, instead of one flat table — small diffs (≤12 files) start fully open, large directories within a bigger diff (>5 files) start collapsed. Presentation-only: `ls_security::diff_summary`'s computation is untouched, this is purely how `app.js`'s `renderReview` renders the same `diff.entries` it always has.
-
-All of rounds 1–8's existing tests re-run unmodified and still pass, and `git diff --stat` confirms none of round 8's actively-retested files (`ls-net/src/discovery.rs`, the dialog-plugin feature flags, the NSIS installer hooks, `ls-snapshot`'s noise-filtering) were touched this round.
-
-## Remote relay mode and known-peer pairing (round 10)
-
-Round 8's embedded relay (above) only helps on the same LAN — `encode_room_code` packs the sender's LAN IP into the room code, which isn't routable from anywhere else. For real cross-network sharing, Settings now has a **Connection mode** toggle: **Local network** (default, round 8's behavior, unchanged) or **Remote relay**, which points both apps at one persistent, separately-hosted relay instead of an ephemeral per-session one.
-
-To self-host a relay (a cheap VPS, a home server with the port forwarded — anything reachable at a stable address by both peers):
-
-```
-PORT=9090 node apps/signaling-server/index.js
-```
-
-Open that port on whatever's hosting it, then put `ws://<that address>:9090` into **Settings → Remote relay URL** on both apps — entered once, it's saved (`localStorage`) and survives restarts. In this mode the room code is just the bare room id (no IP-encoding needed, since both apps already point at the same relay); `share_snapshot`/`receive_snapshot` themselves are unmodified — only `start_send_session`/`decode_room_code` now take a `mode`/`relay_url` and skip hosting an embedded relay when `mode == "remote"`. NAT/TURN fallback (above) works identically either way, since it only depends on `signaling_url`, not on who's hosting it.
-
-Proven end-to-end, same-box, without requiring Node in this environment: `apps/desktop/src-tauri/tests/remote_relay_mode_test.rs` uses a real `ls_net::host_ephemeral_relay()` instance as the stand-in "already-running remote relay" (legitimate — it speaks the identical protocol `apps/signaling-server` does), drives a real payload through `start_send_session("remote", ...)` → `decode_room_code("remote", ...)` → `share_snapshot`/`receive_snapshot`, and separately confirms `mode == "local"` still produces the old 14-char encoded room code unchanged. `turn_configured_still_prefers_direct` and `nat_fallback` (both untouched) were re-run and still pass.
-
-**Known-peer pairing**: every snapshot is already signed with the sender's persistent ed25519 identity (`~/.localsync/identity.key`, since round 1) — this round adds a small receiver-local record (`crates/ls-security/src/peers.rs`, `{OS data dir}/localsync/known_peers.json`) of pubkeys the receiver has chosen to name, the same idea as SSH's `known_hosts`. A returning sender's review screen now shows "Recognized peer: `<name>`" instead of nothing; a first-time sender shows "New sender" with a "Remember as…" field. This is a receiver-local label only — the sender never sees or transmits a name, and nothing about the signed wire format changed.
-
-**The non-negotiable part**: recognizing a peer must never shortcut the diff-review-then-Run consent gate from round 1. It doesn't — `commands::receive_snapshot` (via the extracted `finalize_received_snapshot`) looks a pubkey up in the known-peers store only *after* `ls_security::verify` has already unconditionally succeeded, purely to annotate what the review screen displays; it never influences whether the snapshot is held, and holding a snapshot in `AppState.verified` is exactly as far as recognition goes — running it still requires the same separate, explicit Run click as always. A new **Reject** button (calling `commands::reject_snapshot`) gives an explicit connection-level "no" that discards a held snapshot without ever running it, for either a recognized or unrecognized sender. Proven with a test built specifically to catch a regression that would blur these two gates: `apps/desktop/src-tauri/tests/known_peer_test.rs` pre-populates a known peer, runs a real signed snapshot through the real command-layer logic, and asserts the snapshot is still sitting unhandled in `AppState.verified` and that `AppState.sessions` is empty — i.e. `run_snapshot` was never implicitly invoked, recognized peer or not.
-
-## Multiple receivers, targeted push, pull requests (round 11)
-
-The trust model stays exactly what it's been since round 1 — one-way, sender → receiver, read-only, consent-gated per receiver — but a sender no longer has to burn a connection after one send. Every successful `share_snapshot` now keeps its connection open instead of dropping it, tracked in the sender's `AppState.connected_receivers` roster; a receiver's connection likewise stays open in its own `AppState.outgoing_conn`.
-
-**Two data channels, not one.** Reusing the existing bulk-transfer channel for the new session-level signaling (targeted push, pull requests) would have meant two different readers — the always-listening control-message loop and `send_payload`/`receive_payload`'s own DONE_ACK wait — racing to read from the *same* single-consumer queue, a real deadlock/misinterpretation risk once traced through. Instead `crates/ls-net/src/lib.rs` now opens a second, dedicated WebRTC data channel ("control") alongside the original ("data") one per connection, each with its own independent message queue. `send_payload`/`receive_payload` are completely unchanged — this was purely additive. `ls_net::send_control`/`recv_control` carry a small `ControlMessage` enum (`PullRequest`, `PullResponse`, `IncomingUpdate`) on the new channel.
-
-- **Multiple concurrent receivers**: the Send tab shows every connected receiver at once (`list_connected_receivers`) — nothing new to set up, this is automatic once you've sent to more than one person.
-- **Targeted push** (`push_update`): re-bundles the *current* project state (same `ls_snapshot::create_snapshot` pipeline `share_snapshot`'s initial send already used, called fresh — never anything cached) and sends it to *one specific* connected receiver. No other connected receiver sees it.
-- **Pull requests**: a receiver can ask "anything new?" (`send_pull_request`) — a `ControlMessage::PullRequest` with, deliberately, no fields at all to put data into. The sender sees a real Accept/Decline prompt (`respond_to_pull_request`); accepting runs the exact same bundle-and-push pipeline as a targeted push (no shortcut), declining does nothing further — no forced push, no reply even sent for a decline.
-- **A pushed/pulled update is never auto-run.** It arrives on the receiver's control-channel listener, goes through `finalize_received_snapshot` — the identical function a fresh `receive_snapshot` uses — and is held in `AppState.verified` exactly like any other receive, surfaced to the UI as a `snapshot-updated` event that hands straight to the existing, unmodified `renderReview`. Same diff screen, same Run/Reject buttons, every time.
-
-**Proof that the one-way model actually holds, not just that it's intended to**: `crates/ls-net/tests/pull_request_no_payload_test.rs` — `ControlMessage::PullRequest` is a unit variant, so there is no field anywhere in the type for a receiver to put file bytes, a project path, or anything else into. The test goes further than trusting that by construction: it round-trips several hand-crafted, adversarial JSON messages claiming to be a pull request but carrying extra keys (`payload`, `file_contents`, `target_path`, even a `__proto__` pollution attempt) through real `serde_json` decoding, and confirms every one collapses to the same payload-less value — the extra data has nowhere to land, it isn't smuggled through as some untyped side channel. `apps/desktop/src-tauri/tests/multi_receiver_session_test.rs` proves the rest end to end, same-box, over a real `ls_net::host_ephemeral_relay()` instance (no Node needed — see round 10's note on why that's a legitimate stand-in): two independent receivers connect to one sender, a push targeted at receiver 1 reaches only receiver 1 (a real negative assertion — the test waits and confirms receiver 2 gets nothing), receiver 2's pull request is seen and accepted by the sender, and `AppState.sessions` stays empty on every side throughout — proving nothing here ever auto-runs anything, mirroring round 10's consent-gate test for peer recognition.
-
-Full regression sweep, all passing unmodified: every round 1–10 test, plus the two new files above. The dual-channel connection-establishment change in `ls-net` was re-verified against every existing connection test (`transfer`, `nat_fallback`, `nat_peer_process_stress`, `turn_configured_still_prefers_direct`, `embedded_relay_test`, `remote_relay_mode_test`) before anything was built on top of it.
-
-## Fixing a premature timeout, reaching peer pairing from the UI, hardening Linux setup (round 12)
-
-Three real problems from the first real test of rounds 9–11.
-
-**The room code was timing out during the human handoff it exists for.** Root cause: `connect_as_sender` is called immediately on clicking Send, before a human has copied the code anywhere — its 30-second `CONNECT_TIMEOUT` was already running while they were still pasting it into a chat app for a teammate to paste back. Fixed by bumping `ls_net::CONNECT_TIMEOUT` (now `pub`) to 5 minutes and exposing it to the UI via `start_send_session`'s new `code_expires_in_seconds` field, so the countdown shown next to the room code can never drift out of sync with the real backend value — a visible timer instead of a silent one, per the explicit ask.
-
-**Peer pairing existed in the backend but nowhere in the UI.** Investigating the requested "Send tab shows previously-connected peers from round 10's pairing store" surfaced a real architecture mismatch worth stating plainly: round 10's `KnownPeers` store is receiver-side only — it lets a receiver recognize a *returning sender's* signing key, and receivers have no persistent identity of their own for a sender to recognize back. The only thing that can genuinely support "reconnect without a fresh room code" is round 11's `connected_receivers` roster (a live connection still open from earlier in the session). Built the Send tab's "Previously connected" section on that real mechanism, labelled accurately ("still connected this session", not a persisted history) rather than mislabeling it as round 10 integration — and gave round 10's actual identity recognition more visual prominence where it already lived, at the very top of the receiver's review screen, above the diff. Peer-pairing scope was checked and confirmed *correctly* global (one `known_peers.json`, no per-project dimension) — a sender's identity is per-machine, not per-project, so this is the right design, not a bug to fix. Proven with `apps/desktop/src-tauri/tests/reconnect_consent_gate_test.rs`, composing round 10 and round 11's own proofs into the one path this round actually built a UI entry point for (remember a peer, then push to them over a reused connection) — neither of which either prior round's own test exercised together: the pushed update still shows as recognized, and still only ever gets *held*, never run.
-
-**`scripts/setup-linux-deps.sh` hardened against a real `podman-compose` install failure.** The script already listed `podman-compose` in its apt install line (contrary to this round's initial premise) and the main provisioning error path already pointed at the script — but real-world testing hit apt not resolving the package at all (it's only in some distros'/releases' repos). Verified directly on this project's own Ubuntu 24.04 box: a naive `pip3 install --user` fallback genuinely fails here too, with PEP 668's "externally-managed-environment" error — confirmed by actually running it, not assumed. `pipx install podman-compose` (the tool PEP 668's own error message recommends for exactly this case) was verified to work and produce a runnable binary. The one remaining bare error message (an already-rare fallback path, reached only when the OS data directory can't be determined at all) now also points at the script.
-
-Full regression sweep, all passing unmodified: every round 1–11 test.
-
-## No more flashing console windows, a details panel with something to actually show (round 13)
-
-Two real problems from the first fully-working Run on both real machines. This round could not visually confirm either fix — there's no real display in the environment that built it — everything below is real at the code/process level (verified by actually compiling and running things), with the remaining visual confirmation deferred to `docs/round5-manual-test-checklist.md`, same division of labor as every round since 5.
-
-**Every subprocess spawn in this codebase now goes through a small `CREATE_NO_WINDOW`-setting helper on Windows** — `podman`, `podman-compose`, `git`, `winget`, `wsl.exe`, `reg.exe`, audited rather than assumed to be one call site. `crates/ls-containers/src/podman.rs` and `crates/ls-containers/src/provisioning/windows_impl.rs` (the actual Windows provisioning path from round 5) and `crates/ls-snapshot/src/bundle.rs`'s `git_bytes` (runs on every Send, including from a Windows sender) all needed it. `windows_impl.rs` is `#[cfg(target_os = "windows")]`-gated — WSL2 can't even compile it — so it was built for real on a native Windows host as part of this round, not just diffed and assumed correct.
-
-**Root cause of the Linux "Show details" panel showing almost nothing**: round 9's live-tailer only ever watched `ensure_podman_ready()`'s own preflight-check logging, which on Linux is a handful of near-instant lines — then total silence for the rest of a real Run, because the actual slow part (`podman-compose up` pulling/building images) was never logged anywhere at all. Fixed by having `podman-compose`'s real stdout/stderr stream into the same log file live, line by line, as it runs (`podman::run_streaming`, reading both pipes concurrently for the same reason `git_bytes` already does — a large pull/build's output can exceed the OS pipe buffer) — the exact file the existing tailer already watches, so the UI side needed no changes at all once the actual data source was fixed. A second, independent bug found while investigating: the details panel was being hidden the instant a Run finished, *including on failure* — exactly the moment its now-real content would matter most. Fixed to only auto-hide on success (where the screen has already moved on to the running-session view) and stay visible after a failure.
-
-Proven: `crates/ls-containers/src/podman.rs`'s own unit tests spawn a real subprocess and confirm both stdout and stderr are captured live into a real log file (fast, no Podman needed); `apps/desktop/src-tauri/tests/run_progress_test.rs` was strengthened to assert real `podman-compose` output (not just the preflight check) appears among the streamed events during an actual `run_snapshot` call against real Podman — this is the literal data source the "Show details" panel reads from, proven populated end to end through the real command layer.
-
-Full regression sweep, all passing unmodified: every round 1–12 test.
-
-## macOS CI verification (round 14)
-
-Round 5 wrote macOS Podman provisioning "by careful analogy" — cross-referencing Homebrew's and Podman's real docs, never once compiled or run, since `#[cfg(target_os = "macos")]` excludes `crates/ls-containers/src/provisioning/macos_impl.rs` from every environment this project had access to. No environment here has ever had macOS access, and that hasn't changed. What has changed: `.github/workflows/macos.yml` uses GitHub Actions' real macOS runners (free, including for private repos, against a monthly minutes quota) to get genuine evidence on real Apple hardware instead.
-
-**Manual trigger only** (`workflow_dispatch`), deliberately not on every push — GitHub bills macOS runner minutes at 10x the Linux rate against that quota, so this only runs when someone deliberately wants a fresh macOS verification pass. Run it from the repo's Actions tab, or `gh workflow run macos.yml`.
-
-**Two independent jobs, on purpose:**
-
-1. **`build-and-test`** — the part expected to just work, since nothing here depends on anything macOS-specific being pre-provisioned (Xcode CLT, Homebrew, and a recent Rust all ship on GitHub's macOS runner image already): `cargo test --workspace` (every crate, real macOS, pass/fail captured and uploaded as a log artifact regardless of outcome — a test failure here must never be allowed to silently cancel the build below it, they're two separate questions), then the exact `.dmg` build command `docs/macos-build.md` already documents for a human doing this by hand (`npm run tauri build -- --bundles dmg`), with the resulting `.dmg` uploaded as a downloadable workflow artifact either way.
-2. **`podman-provisioning-investigation`** — the genuinely open question this round exists to answer, kept as its own job rather than more steps bolted onto the one above: whether Podman machine provisioning can work at all inside a GitHub-hosted macOS runner. GitHub's macOS runners are themselves virtualized, and Podman's machine feature needs to boot a *nested* VM (Apple's Virtualization.framework, or QEMU as fallback) — nested virtualization on shared/virtualized CI infrastructure is a real, widely-documented restriction for tools like this, not a hypothetical this project is inventing. The workflow gathers `sysctl kern.hv_support` first (the single most relevant diagnostic for *why* whatever happens, happens), then genuinely attempts `brew install podman` → `podman machine init` → `podman machine start` → `podman info` → an actual `podman run --rm hello-world`, with every step's real output captured regardless of where it stops. This job's own pass/fail in the Actions UI reflects the real outcome on purpose (it fails loudly if provisioning didn't fully work) — a CI limitation here would be a real, reportable finding, not a code bug to paper over, and the workflow is written not to blur that distinction either way.
-
-**Validated as much as is honestly possible without the run itself**: the workflow YAML was checked with `actionlint` (including its `shellcheck` integration against every embedded script) — zero findings. A local cross-compile-check to `aarch64-apple-darwin` got as far as real Objective-C compilation (`objc2-exception-helper`, a real transitive dependency of the GUI stack) before hitting the expected wall — no real macOS SDK/Clang toolchain exists to cross-compile against from Linux, exactly what `docs/macos-build.md` already says about why this has always needed a real Mac (or, now, real macOS CI). That's genuine, additional confidence about dependency resolution and most of the pure-Rust compile graph — not proof the final link/bundle step succeeds, which only the real runner can provide.
-
-**What this round does not solve, stated plainly**: a green `build-and-test` job means the workspace compiles and its headless tests pass on real macOS, and produces a real, downloadable `.dmg` — a genuine, meaningful upgrade from "should work by analogy" to "actually happened once." It does not mean a person has looked at the app's UI on a Mac, does not exercise Gatekeeper's unsigned-app warning flow end to end, and — if the second job reports blocked — does not mean Podman provisioning works for a real user either, only that it's unverified in a different way than before (blocked-in-this-specific-CI-environment, rather than never-attempted-at-all). None of this is "macOS done" in the sense rounds 1–13 mean it for Linux/Windows; real, human, real-hardware verification is still the standard for that, tracked the same way as every other platform-specific item in `docs/round5-manual-test-checklist.md`.
-
-This round adds one new file and touches no application code — rounds 1–13's full test suite was re-run in this environment and passes unmodified.
-
-## On-demand release pipeline (round 15)
-
-`.github/workflows/release.yml`: one trigger (a manual "Run workflow" click, or pushing a `v*` tag — both supported, neither forced), three real installers, one GitHub Release with all of them attached a few minutes later. See the **Download & Install** section at the very top of this README for what a non-technical end user actually does with what this produces.
-
-**Windows and Linux got their first-ever CI build in this round** (round 14 only ever covered macOS) — `build-windows` and `build-linux` are new jobs, `build-macos` reuses round 14's own build steps rather than duplicating them: they were extracted into `.github/actions/build-macos-dmg`, a composite action both `macos.yml` and `release.yml` call, so "how the .dmg gets built" lives in exactly one place.
-
-Two real build-quirks accounted for before they could bite a release, not after:
-
-- **The Windows build is pinned to `--bundles nsis`, deliberately never `"all"`** (`tauri.conf.json`'s own default). `"all"` would also attempt a WiX-based `.msi`, which needs Tauri's bundler to download the ~40MB WiX toolset on first use — a well-documented source of CI flakiness/timeouts for pipelines like this one. Restricting the target avoids the question entirely rather than adding retry logic around an output format nobody's asked for: NSIS (with round 8's firewall-rule install hook) is what's actually been built and proven reliable here since round 5.
-- **The Linux build runs on `ubuntu-22.04`, not `ubuntu-latest`** (24.04 as of this writing). Building against a newer glibc raises the *minimum* glibc version the resulting binary needs at runtime; an AppImage bundles its other dependencies but not glibc itself, so a binary built on 24.04 would refuse to run on a 22.04-or-older target with a real `GLIBC_2.3x not found` error. 22.04 is also Tauri v2's own documented minimum baseline (the oldest Ubuntu LTS whose repos carry `libwebkit2gtk-4.1`) — building on the oldest supported base is what keeps the installer runnable on the widest range of real machines, the actual point of shipping something downloadable to people who won't `cargo build` it themselves.
-
-Release creation itself uses `softprops/action-gh-release` — the actively-maintained standard for this (`actions/create-release`, GitHub's original own action, is archived) — pinned to its `v2` major tag rather than the `v3` released only days before this was written, for a pipeline meant to be trustworthy on day one rather than an early adopter of a version bump. A manual run without a tag gets a real, non-colliding release name (`local-<date>-<short-sha>`) instead of a fixed name that would silently overwrite a previous manual release's assets on the next run, and is marked a pre-release on the Releases page so it's never confused with a real tagged version.
-
-**Verified as much as is honestly possible without triggering it**: both workflow files pass `actionlint` with `shellcheck` integration against every embedded script, zero findings. The composite-action extraction was re-validated the same way, plus a manual schema check (`actionlint` itself doesn't parse `action.yml` composite-action files, only workflow files) confirming its structure matches GitHub's documented composite-action schema. As of this writing the workflow has been written and committed but not yet triggered — someone has to click "Run workflow" (or push a tag) before a real Release, with real attached installers, exists to point at. This round touches no application code; rounds 1–14's tests were re-run in this environment and pass unmodified (one pre-existing, unrelated environment issue from round 14's own regression check — a segfaulting `pasta` binary in this specific sandbox — is unchanged and still not a code regression).
-
-## Real auto-update, and code-signing infrastructure (round 16)
-
-Two genuinely different halves — one fully working now, one that can't produce anything real without credentials only the developer can obtain.
-
-### Part A: auto-update — fully wired, verified as far as this environment allows
-
-`tauri-plugin-updater` (+ `tauri-plugin-process` for its `relaunch()`) is now registered alongside `tauri-plugin-dialog`; `tauri.conf.json` has a real, freshly-generated updater keypair (`bundle.createUpdaterArtifacts: true`, `plugins.updater.pubkey`/`endpoints` pointing at `latest.json` on this repo's GitHub Releases). The private key never touched this repository — generated locally, handed to the developer directly, added only as GitHub Actions secrets (`TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD`).
-
-The Send/Receive tabs' own "review before you run" gate has a real precedent this follows: checking for an update never downloads or installs anything by itself — a banner appears (on launch, quietly, or via a new **Check for updates** button in Settings) and only `downloadAndInstall()`, called from an explicit **Install update** click, actually fetches or applies anything.
-
-**A real, non-obvious bug found and fixed along the way, not assumed away**: a completely clean local build (no cached binary reused across configs) produced a working AppImage and a real, valid updater signature, but also a genuine `Warn Failed to add bundler type to the binary: __TAURI_BUNDLE_TYPE variable not found... Updater plugin may not be able to update this package` — a real cross-package version-skew bug (the Rust `tauri` crate had resolved to 2.11.5 while `@tauri-apps/cli` on npm was still at its own latest, 2.11.4). Pinning both to the exact same `2.11.4` made a from-scratch rebuild produce the warning-free, correctly-tagged binary — verified by actually reproducing the failure, not by reading about it.
-
-**Also verified directly, because the assumption looked wrong at first**: `window.__TAURI__.dialog`/`.updater`/`.process` don't appear in `Object.keys(window.__TAURI__)` (only the core API does) — they're real, non-enumerable properties, confirmed present and correctly typed by actually running the app and reading `window.__TAURI__` back from a live window, not by trusting the enumerable-keys list. A misread of that same list, before checking properly, would have wrongly suggested the whole frontend script crashes on load — it doesn't, on this or the existing round-7/8 dialog integration either.
-
-**The manifest-generation script itself** (`release.yml`'s `release` job, run after all three platform builds) was proven against real data: the actual `.AppImage.sig` this round's local Linux build produced, assembled by the exact script `release.yml` runs, into a correctly-structured `latest.json` — plus the deliberate skip path (any platform's signature missing → skip `latest.json` for that run, release the installers anyway, log why) proven with the same script and a deliberately incomplete input set.
-
-**What only real hardware can confirm**: the actual update-and-restart click-through — banner appears, click Install, real download progress, real relaunch onto the new version. Deferred to `docs/round5-manual-test-checklist.md` like every other UI-dependent claim in this project. Only one macOS architecture is covered (`darwin-aarch64` — `build-macos` runs on Apple Silicon runners with no explicit `--target`, so there's no Intel binary to publish a URL for); an Intel Mac won't see updates offered until a second macOS build leg is added.
-
-### Part B: code-signing — infrastructure only, nothing is actually signed yet
-
-**No code-signing credential exists anywhere this project has touched.** `release.yml` has real, conditional signing steps for both Windows (`WINDOWS_CERTIFICATE`/`_PASSWORD` secrets → cert import → real thumbprint passed to `tauri build` via a `--config` override, RFC 7396 JSON merge patch, so the checked-in config never needs a real-or-placeholder thumbprint) and macOS (`APPLE_CERTIFICATE`/`_PASSWORD`/`APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` → ephemeral-keychain import → environment variables `tauri build`'s own signing/notarization logic reads directly) — both fully conditional, both logging plainly ("No ... secret configured - shipping unsigned build") and building exactly as before when the secrets are absent. `docs/code-signing.md` documents exactly what to obtain (a real CA-issued Windows certificate — noting traditional exportable `.pfx` files are increasingly not what CAs issue since June 2023, Azure Trusted Signing being the modern alternative not yet wired up here; Apple Developer Program enrollment, a Developer ID Application certificate, an app-specific password) and exactly which GitHub secret names to add, plus how to verify a real signature afterward (`codesign`/`spctl`, not just trusting the workflow log).
-
-**No self-signed certificate was implemented as a stand-in, deliberately** — it wouldn't remove OS warnings for anyone but the machine that made it, and would misrepresent what's actually been achieved.
-
-Every installer this pipeline has ever produced, including this round's, remains unsigned. That doesn't change until real secrets are added and a real run happens.
-
-This round touches no other application code beyond what's described above; rounds 1–15's tests were re-run in this environment. `run_retry_test`'s full multi-container compose lifecycle hit the same pre-existing, sandbox-specific segfaulting-`pasta` issue round 15 already documented (confirmed non-regression: the simpler single-container `ls-containers` podman test, and every non-container-orchestration test, pass cleanly) — not something this round's changes touch or caused.
-
-## A guided database-source wizard for Send (round 17)
-
-The developer's real case doesn't look like "one project with a
-`docker-compose.yml`" — it looks like several independent, raw framework
-projects (e.g. three separate Spring Boot folders), each pointing at its
-own real local MySQL, with no containerization set up at all. Round 17
-builds the Send-side experience for exactly that: a real, multi-step
-wizard, not a single dialog, that discovers what's there and shows it to
-the developer before asking them to decide anything.
-
-**The flow**: select one or more project folders → answer "does this
-need database access?" once → for each folder independently, try to
-auto-detect its connection details (Spring Boot's
-`application.properties`/`.yml`, parsing the JDBC URL for host/port/
-database) → if detected, ask whether the developer already has a dump
-file (if so, just use it) or wants to connect and export (if so, show
-the real live table list with row-count estimates and let them pick
-before exporting the full, non-sampled content) → if detection fails,
-collect connection details manually and feed into the exact same
-subsequent flow → a final summary before the real Send.
-
-**What's real here**: `crates/ls-dbsource` is a new crate doing real
-work — Spring config parsing (8 passing unit tests, no live DB needed),
-and a real MySQL/MariaDB client (the `mysql` crate) for connecting,
-listing tables via `information_schema`, and exporting full table
-content as `CREATE`/`INSERT` SQL, with binary columns going through
-`X'...'` hex literals for exact, encoding-safe round-tripping. Proven
-with a real, disposable local MariaDB instance: connect, list, export,
-then **replay the generated dump into a second empty database and
-assert the reimported content matches byte-for-byte** — including a
-string with an embedded quote and backslash, a real NULL, and a
-VARBINARY column's exact bytes. `crates/ls-snapshot` gained
-`create_snapshot_multi`, bundling any number of folders (each fully
-tested, existing `bundle_project` logic, just re-homed under a
-`<folder>/` prefix in the combined tar so independent projects never
-collide on path) plus any database dumps into one signed `Snapshot`,
-with `Manifest.folders`/`Manifest.database_dumps` as new, purely
-additive fields (`#[serde(default)]` — an old manifest deserializes
-fine without them, old code reading a new manifest ignores them). The
-whole thing is proven end to end through the real Tauri command layer
-in `apps/desktop/src-tauri/tests/wizard_send_flow_test.rs`: one test
-bundles two folders with no database at all, another runs the *complete*
-wizard sequence — real auto-detection against a real
-`application.properties`, real `test_db_connection`/`list_db_tables`/
-`export_db_tables` commands, real packaging, a real send and receive —
-and confirms the manifest and the received payload both carry the exact
-dump bytes, correctly hashed and correctly placed.
-
-**A real bug found and fixed along the way**: `ls_security::diff_summary`
-originally hard-errored for any snapshot without a single top-level
-`diff_stat.json` — which is exactly what a multi-folder snapshot
-produces (each folder ships its own, nested). Left unfixed, receiving
-*any* multi-folder snapshot would have failed outright before a human
-ever saw a review screen, making this round's own feature unusable
-end to end. Fixed additively (single-folder snapshots behave exactly as
-before; a multi-folder snapshot's diff is the real merge of every
-folder's own `diff_stat.json`, each entry prefixed by its folder), and
-proven by the same end-to-end test above actually succeeding rather than
-erroring at that exact point.
-
-**A second real bug, unrelated to the wizard itself but found while
-working in this same area**: round 16's own auto-update banner used the
-DOM id `update-banner`, which silently collided with an older, unrelated
-Receive-tab element of the same id (round 11's "a new update just
-arrived from the sender" push notification) — `document.getElementById`
-was quietly resolving to whichever one came first in the document for
-both features. Fixed by renaming round 16's banner to `app-update-banner`.
-
-**A genuine sandbox-specific finding, not a code bug**, in the same
-spirit as the pasta-segfault and podman-storage-path issues documented
-elsewhere in this README: this development sandbox's `mariadbd` binary
-runs under an AppArmor profile that denies *any* process — including
-its own direct parent — from delivering it a signal at all (confirmed
-via `dmesg`'s kernel audit log). A disposable test server's ordinary
-`Child::kill()` cleanup call fails silently there, and the matching
-`wait()` then hangs forever waiting for a process nothing can signal.
-Both live-database test files stop their disposable server with a real
-SQL `SHUTDOWN` instead — not a signal, so not subject to that mediation
-— which is both the correct fix and one that works identically on real
-hardware without this specific confinement.
-
-**Explicitly out of scope, on purpose**: making the *receiver* able to
-actually build and run several raw, non-containerized folders together
-— that needs auto-generated containerization and rewriting each app's
-datasource config to point at a containerized hostname instead of
-`localhost`, which is real, substantial, and deliberately deferred to a
-future round. This round's job ends at producing a correctly packaged,
-correctly reviewable snapshot; compression, resumable transfer, and
-incremental dump sync are similarly deferred, on top of what this round
-produces. The wizard's own visual click-through (does the multi-step UI
-actually render and step through correctly) is deferred to
-`docs/round5-manual-test-checklist.md` like every other UI claim in this
-project — everything above it is proven through real, automated,
-non-UI tests.
-
-## Multi-engine databases, a real connection bug, quieter installs (round 18)
-
-The first real click-through of round 17's wizard surfaced three genuine problems: the Engine field was a disabled MySQL-only text box, `Test connection & continue` failed against what looked like correct credentials, and the Windows installer itself flashed a visible console window.
-
-**Multi-engine support is now real, not decorative.** The Engine dropdown offers MySQL/MariaDB, PostgreSQL, and MongoDB, each backed by genuinely different, genuinely working tooling: PostgreSQL through the real `postgres` crate (connect/list) and the real `pg_dump` binary (export); MongoDB through the real `mongodb` driver (connect/list) and the real `mongodump`/`mongorestore` binaries (export/future restore) — MongoDB's dump is a tarred directory of `mongodump`'s own BSON output, not SQL, and the manifest now records which engine produced each dump (`DatabaseDumpEntry.engine`, additive and backward-compatible: an old manifest without it defaults to "mysql", which is simply correct since that's all round 17 could ever have produced). All three are proven with real, disposable local database servers in this sandbox — a real MariaDB, a real PostgreSQL 18, a real MongoDB 7 — each one connected to, queried, exported from, and round-tripped through a real restore, with the restored data asserted to match the original exactly (including a quoted/escaped string, a real NULL, a JSONB value, and MongoDB's own BSON types).
-
-**The connection-test failure was root-caused by reproducing it for real, not guessed at.** A screenshot showed `failed to connect to root@localhost:3306/xusom` on both Windows and Linux. Reproducing it against a real local MariaDB in this sandbox found the actual mechanism: this sandbox's `localhost` resolves only to the IPv6 loopback (`::1`), while the server listened on the IPv4 loopback only — so the very first TCP connect was refused before any authentication ever happened. This is a different bug than the other classic "MySQL treats localhost specially" gotcha this round was asked to check (the `mysql` crate's own socket-upgrade behavior, which turned out to already have a safe built-in fallback, confirmed by reading its source) — real investigation distinguished the two rather than assuming either. Windows ships the identical `::1 localhost` default, which is exactly why the same generic error showed up on both platforms despite it being a DNS/OS resolution issue, not a credentials one. Fixed for all three engines by substituting the unambiguous `127.0.0.1` for a literal "localhost" before ever connecting. A second, compounding bug was found alongside it: the command layer converted every database error with `.to_string()`, which for an `anyhow::Error` shows only the outermost "failed to connect" wrapper and silently drops the real reason — now uses the full error chain instead, verified directly against real connection-refused, wrong-password, and unknown-database failures on all three engines.
-
-**The installer's terminal flashing** came from round 8's Windows Firewall install hook running `netsh.exe` via plain NSIS `ExecWait`, which visibly flashes a console window during setup — switched to `nsExec::ExecToLog` (NSIS's own bundled plugin), which runs it hidden. This is the one round-18 fix this sandbox cannot observe directly (it's a Windows-visual behavior); it's fixed with confidence from the NSIS mechanics themselves, but still needs a real install on real Windows hardware to watch and confirm — see `docs/round5-manual-test-checklist.md`'s round 18 addendum for exactly what to check.
-
-## Fixing the wizard's flow order, error clarity, and multi-folder handling (round 22)
-
-Real use of round 17/18's database wizard against genuine local MySQL setups (one machine with no server at all, one with a real server but a schema-name mismatch) surfaced problems in the *implementation* not matching round 17's own original design, not new features. This round is fixes, not new capability.
-
-**The dump-file question now genuinely comes first.** Round 17 always meant "do you already have a dump file?" to be asked before any live connection — but manual entry (the path taken whenever auto-detection fails) tested the connection immediately on submission, before that question was ever reachable. A developer who already had a dump for a folder with no detectable config was forced to fill in and successfully test full connection details just to say so. Fixed: the question is now asked for every folder, detected or not, immediately after (free, local, no-network) auto-detection; a live connection is only ever attempted on the "no, I need to fetch live data" path.
-
-**Real schema browsing, not a trusted guess.** After a successful connection, the wizard now queries and shows the real list of databases on the server (a new `list_db_schemas` command, and each engine's own `list_databases` — proven against real MariaDB/PostgreSQL/MongoDB instances in this sandbox) and the developer picks the correct one, instead of a typed-in or auto-detected name being assumed correct. This also fixed a real chicken-and-egg problem it would otherwise have created: connecting used to require the database name to already be right, which would have made it impossible to ever reach a screen that lets you discover and fix a wrong one. Manual entry's connection test now uses this same schema-listing call instead of a database-pinned test, so a typo'd database name no longer blocks progress.
-
-**Error messages are clearer and land in the right place.** A missing `pg_dump`/`mongodump` binary now names itself and points at `scripts/setup-linux-deps.sh` (now updated to cover both) instead of a bare OS error. Connection failures get a short, human summary in front of the full technical chain round 18's own fix already preserves — real click-through found that chain, while not swallowed, still surfaced raw driver internals verbatim (the `mysql` crate's own error enum name, `DriverError { ... }`, reads to a glance like "the driver is missing"; MongoDB's raw error is a sprawling internal topology dump; `tokio-postgres`'s own `Display` for a real auth failure is just the bare string "db error", with the actual reason one level down in its error source — all three confirmed directly, not assumed). And a database/schema-not-found error during manual entry now shows right under the Database field, not folded into a generic trailing message.
-
-**Multi-folder sends can share one database setup.** Selecting more than one folder now asks once whether they share a database; if yes, auto-detection runs across all of them up front, and if it finds genuinely different setups, automatically falls back to per-folder entry (with a clear note) rather than guessing at partial sharing.
-
-**The table/collection selection screen is a real list now**, not plain text: checkboxes, Select all/none, and each row's approximate count.
-
-**The dump-file picker filters by the engine already chosen** — `.sql` for MySQL/PostgreSQL, `.gz`/`.tar`/`.archive` for MongoDB (matching this project's own round-18 mongodump export, which tars a directory dump into one file) — with the engine now always known (via detection, manual entry, or an inline picker) before the file dialog ever opens.
-
-**A real, separate bug found while integrating this round, unrelated to any of the seven goals above**: the final Send step was rebuilding each folder's dump payload for the IPC call without its `engine` field — a field `DumpPlanDto` has required since round 18. Every database-attached send would have failed at the IPC boundary. Round 18's own tests never caught this because they call the Tauri command directly, bypassing the exact bit of JS that had the bug.
-
-## Layout, a real functional audit, and a mode-first Send flow (round 20)
-
-Real use of the app surfaced three concrete UI problems: the whole interface rendered flush left with no centering or max-width, the "Refresh" button next to "Previously connected" did nothing when clicked, and Send started with folder selection even though the app has real transfer modes to choose between first. This round is structure and function — a separate round (21) covers visual redesign (icons, theming).
-
-**A discrepancy surfaced immediately: this round's own prompt referenced a third transfer mode, "Cloud drop," from "round 19."** A full search of the codebase and entire git history found neither — they don't exist. Raised directly rather than guessed at; the developer chose to proceed with only the two modes that actually exist (Local network, Remote relay), deferring Cloud drop to its own future round. (That work landed independently, in parallel, as round 23 below.)
-
-**The app is now centered with a real max-width**, via a single `.app-shell` wrapper (~880px, centered, consistent padding) applied across Send, Receive, and Settings alike, with compensating styles so previously full-bleed elements (the top bar, the settings panel) still read as full-bleed within it rather than visibly inset.
-
-**The Refresh button was never actually broken** — code review found the click handler and its backend command were both wired correctly and did re-fetch the roster. The real problem, confirmed by tracing the code rather than assuming: refreshing to an unchanged (often empty) result gives no visible signal, which is indistinguishable from doing nothing. Fixed the same way round 16 fixed the identical problem for update checks — an explicit status message shown only on a real button click, not on the three existing silent/automatic refreshes elsewhere in the app. Every other interactive control in `app.js` was audited against `index.html` and found correctly wired.
-
-**Send now asks "how" before "what."** The wizard's first step is an explicit Local network / Remote relay choice, backed by the same persisted setting Settings' own toggle uses, before folder selection or any part of the round 17/22 database wizard begins. Only the transport step at the very end of the flow differs based on this choice.
-
-**The whole folder-through-database-wizard sequence is now a real guided pop-up**, not flat inline page content: a dimmed modal overlay with `role="dialog"`, a "Step X of N: <phase>" progress header (the per-folder database sub-flow's variable-length screens are grouped under one "Database setup" phase rather than faking a precise count), Back on every step, and a Cancel that exits the whole flow. The modal closes automatically once a send actually succeeds, so the room code still renders on the main Send tab exactly where it always has.
-
-**A real gap found and fixed while integrating this**: closing the modal only on success meant a failed send left it open while the existing error text was written only to an element on the page behind the modal's backdrop — invisible at exactly the moment it mattered. Added a dedicated error element inside the wizard's final step; the failure handler now writes to both unconditionally, so the message is visible whichever one the user can actually see.
-
-This round is frontend-only — no Rust files changed, confirmed via `git diff --stat -- '*.rs' Cargo.toml Cargo.lock` against `main` returning empty — so rounds 1–19's existing `cargo build`/test suites were re-run only to reconfirm the baseline, not because this round could plausibly have broken them. JS changes were verified via `node --check`, a DOM-id cross-reference (every element the JS looks up actually exists, no duplicates), and HTML tag-balance counting — this sandbox cannot render the app or simulate real clicks, so whether the layout actually looks centered, whether every button behaves correctly end-to-end, and whether the modal genuinely looks and feels like one coherent guided flow all need the developer's own real-hardware pass — see `docs/round5-manual-test-checklist.md`'s round 20 addendum for exactly what to check.
-
-## Iconography, theming, and a real design-token system (round 21)
-
-Round 21 is a genuine visual redesign, not new functionality: a lightweight icon system, real light/dark theming, and a design-token pass (spacing, typography, radius, elevation) applied consistently across every screen, including every step of rounds 17–20's wizard. Unlike most rounds, success here is judged by how the app looks, and this sandbox has no display — everything below is code-verified (real WCAG contrast math, DOM-id/tag-balance/syntax checks), never actually seen rendered.
-
-**28 icons, real Lucide SVG source, vendored inline rather than a CDN dependency.** Extracted from the published `lucide-static` npm package (ISC-licensed, https://lucide.dev) as inline `<symbol>` defs at the top of `index.html`, referenced via same-document `<use href="#icon-x">` — not a separate sprite file or CDN script. That was a deliberate choice: a cross-file `<use>` pointing at an external SVG is a known source of inconsistent behavior across the exact spread of WebView engines this app runs on (WebView2, WebKitGTK, WKWebView), and a CDN-hosted icon set was never viable for an offline desktop app anyway. Every icon uses `stroke="currentColor"`, so it always matches its surrounding text color — including across theme switches — with zero icon-specific color rules anywhere. Applied across every button on Send, Receive, and Settings, and to the peer-recognized/peer-new status banners (previously a bare ✓/? character), paired with a label everywhere except a couple of already-self-explanatory cases, per the round's own instruction to favor clarity over icon-only minimalism.
-
-**A real three-state theme system, not a single toggle.** Every color in `styles.css` is now a CSS custom property — the only literal hex values left are the token definitions themselves, `#fff` for fixed-white badge/icon text, and the run log's deliberately theme-independent terminal colors (unchanged, already called out in its own comment before this round). Settings offers System / Light / Dark; the choice persists to `localStorage` and is applied by a small inline script in `index.html`'s `<head>` — before `app.js` itself, loaded at the end of `<body>`, ever runs — so an explicit override never flashes the OS's theme for a frame on launch. The dark palette isn't the light one inverted: the four semantic colors (accent/danger/added/modified), when used as plain text read directly against the page background (links, result/error messages, diff coloring), get their own dark-tuned values — each checked to actually clear WCAG AA's 4.5:1 contrast ratio against the real dark background by computing it, not guessing. The same four colors, when used as background fills under fixed white text (badges, status-icon circles), are deliberately left unchanged between themes, since that usage already had good contrast in both — two different roles for the same color, each verified on its own terms rather than one check standing in for both.
-
-**A real design-token system, applied everywhere, not just in new code.** A spacing scale, a typography scale, radius tokens, and theme-aware elevation tokens (dark mode's shadows are more opaque — a light-mode shadow value is nearly invisible against a dark background) now back the entire stylesheet, including every step of the rounds 17–20 wizard. Fixed two real, previously-missing pieces of consistency found along the way: `<select>` and `input[type=number]`/`input[type=password]` had no styling at all before this round (bare browser appearance next to fully-styled `input[type=text]` fields beside them); and no interactive element had a visible focus ring, a real gap for keyboard use across three WebViews with three different (or absent) default focus indicators. Hover states were added to every button variant and the wizard's list rows, previously all static.
-
-## Cloud drop: a third, identity-aware transport via Google Drive (round 23)
-
-A third connectivity mode alongside Local network (round 8) and Remote relay (round 10): instead of the snapshot traveling peer-to-peer, the sender uploads it to their own Google Drive and the receiver downloads it from theirs, once the sender explicitly grants that one receiver's account access. `ls-net`'s existing room-code/relay machinery is reused unchanged for a lightweight identity handshake — the payload itself never touches it. Numbered round 23 rather than 19 (the number in this round's own build prompt) to keep this README's sequence honest: rounds 19–22 had already landed on another machine before this round started, discovered mid-work and confirmed with the project owner rather than silently renumbering around the gap.
-
-**The one-way trust model is extended, not bent.** Three new, additive `ControlMessage` variants (`CloudAccessRequest{google_email}`, `CloudAccessResponse{accepted, drive_file_id}`, `CloudDownloadConfirmed`) carry only identity/signal fields, never file content — proven the same way round 11's `PullRequest` already was, with a dedicated adversarial test hand-crafting extra JSON fields and asserting they're dropped, not smuggled through. A receiver announces *who they are*; only the sender ever decides, with an explicit Accept/Reject click reusing round 12's known-peer-request UI pattern, whether that identity gets a real Drive permission. Declining calls Drive for nothing at all.
-
-**Two real findings, investigated against Google's current documentation rather than assumed, both confirmed via `WebFetch` against Google's own pages before any code was written:**
-- `drive.file` scope — the narrower, "basic-verification-only" scope — only ever lets an app see files *it created or the user explicitly picked*, never a file merely shared to that account by someone else's upload. A receiver therefore also needs `drive.readonly`. Since every LocalSync instance can act as sender or receiver, linking requests the union of both scopes in one flow rather than asking twice.
-- Drive's native per-file `expirationTime` permission field only has real, enforced effect on Google Workspace accounts — personal Gmail accounts silently drop it, consistently reported across independent sources (Google's own reference page for the field doesn't spell this out explicitly, so this is a real-world-behavior finding, not something quoted from one canonical source). `ls-clouddrop` always *attempts* to set it (a free win if either account happens to be Workspace) but never trusts it: it checks Drive's own response to see whether the field was actually echoed back (`GrantResult.expiration_applied`), and a full app-level retention store (`ls-clouddrop::retention`) enforces the sender's chosen cap regardless, checked at app startup rather than on a new background scheduler — the same "check when convenient" convention `ls_containers::ProvisioningLog` already established.
-
-**A real design gap was caught before any code was built against it**: the original `CloudAccessResponse` had no field for the Drive file id, leaving the receiver with no way to learn what to download (there's no other channel — `drive.readonly` doesn't let an app discover a shared file by searching). Added `drive_file_id: Option<String>` before the crate that depends on it existed.
-
-**`crates/ls-clouddrop` is a new crate — OAuth 2.0 (PKCE + a loopback redirect, not the `urn:ietf:wg:oauth:2.0:oob` "copy this code" flow Google deprecated in 2022 and no longer offers new clients), a minimal Drive API v3 client (app-folder-scoped upload, targeted `type: "user"` permission grants, download, delete, list), and local JSON storage for both the linked account's tokens and per-upload retention — following this project's own established conventions throughout (OS-data-dir + 0600-permission JSON files, same as `ls-security`'s known-peers store and `ls-snapshot`'s identity key; a pure, side-effect-free `due_for_deletion` decision function in the same spirit as this project's other "logic separate from I/O" splits).** Proven with 41 real tests: PKCE checked against RFC 7636's own worked example, a real end-to-end OAuth loopback flow with a hand-simulated browser redirect, and every HTTP interaction (token exchange/refresh, userinfo, every Drive call, including realistic 401/403/404 error bodies) exercised against a real local `wiremock` server rather than mocked at the Rust type level — proving actual request shapes and response parsing, not just "the function compiles."
-
-**The app-level integration (`AppState`, new commands, the frontend) is real, wired, and tested where it can be without live Google credentials.** `start_cloud_drop_session` bundles via the unchanged `ls_snapshot::create_snapshot`, uploads, and hosts a room exactly like `start_send_session`; `respond_to_cloud_access_request` is the only path in this whole round that can call `grant_reader_access`, and only on Accept; `request_cloud_drop_access` downloads and feeds the result into the exact same, unmodified `finalize_received_snapshot` → review → consent → Run pipeline every other transport already uses — a Cloud-drop receive is held for review and never auto-run, same as any other. A new integration test (`apps/desktop/src-tauri/tests/cloud_drop_protocol_test.rs`) proves the reject path over two real, independently connected `ls_net` connections: it succeeds without `GOOGLE_OAUTH_CLIENT_ID` ever being set, which is itself proof the decline branch never reaches Google's API at all, and confirms the wire protocol (`CloudAccessRequest` → `CloudAccessResponse{accepted:false, drive_file_id:None}`) round-trips correctly. The full accept-and-download path, and anything touching a real Drive permission landing on a real second account, needs the real credential below.
-
-**This round requires a real Google Cloud OAuth Client ID that only the project maintainer can create** — see `docs/google-drive-setup.md` for exactly what to obtain and why (the scope choice, the PKCE/loopback flow, the per-file-expiration caveat, a verification checklist). Without one set as `GOOGLE_OAUTH_CLIENT_ID`, Settings → **Link Google account** fails with a message pointing at that doc, and Cloud drop mode is otherwise fully wired but inert.
-
-**A genuine, unrelated environment finding surfaced while verifying this round, fixed on its own merits**: this project's tests had only ever been run in WSL2 before; running them natively on Windows for the first time in this session surfaced two real, pre-existing (not round-23-caused) Windows-toolchain issues — a linker PDB-size limit (`LNK1140`) once this round's added dependencies grew the debug-info footprint, fixed with `debug = "line-tables-only"` in the workspace's dev profile, and a `STATUS_ENTRYPOINT_NOT_FOUND` crash in every `localsync-desktop` test binary, root-caused (via `dumpbin` and a controlled before/after comparison against unmodified pre-round-23 code) to this specific Windows install's CNG (`bcryptprimitives.dll`) libraries, unrelated to any of this round's own code. The full workspace suite — including this round's 41 `ls-clouddrop` tests, the new protocol integration test, and every pre-existing test in the repo — passes cleanly in this project's established WSL2 environment; the one unrelated failure there (`ls-net`'s `nat_fallback`, a Podman/coturn/Docker-image test) reproduces identically on completely unmodified round-22 code and is a pre-existing environment flake, not a regression from this round.
-
-## A magic link on top of the room code (round 24)
-
-Rounds 8/10/22 already let a sender generate a room code and share it however they like — round 24 adds a real `https://` link on top of that same code, so sharing with someone who doesn't have LocalSync installed yet doesn't mean walking them through installing it first and then finding somewhere to paste a bare code.
-
-**A real custom URL scheme, registered the maintained way.** `localsync://receive?code=XXXX` is registered via `tauri-plugin-deep-link`, configured once in `tauri.conf.json` (`plugins.deep-link.desktop.schemes`) — not hand-rolled per-OS registry/plist/desktop-file code. Clicking a link with LocalSync installed switches straight to the Receive tab with the code already in the input box, reusing the exact same code-entry path a person typing it in by hand would use (it only ever pre-fills the field — it never calls `receive_snapshot` itself, so accepting a connection still always needs the same explicit click as every other path into this app). A real, easy-to-miss gap the deep-link plugin's own docs call out directly: it only *emits an event* on macOS — on Windows and Linux, opening a link when the app is already running spawns a brand-new second process instead of reaching the first one. `tauri-plugin-single-instance`, with its own `deep-link` feature enabled, closes that gap: it redirects that second process's launch back into the first, already-running one (and focuses its window), which is exactly what the deep-link plugin's own README recommends instead of anything hand-rolled.
-
-**A static, no-backend fallback page for everyone else.** `web/` is a plain HTML/CSS/JS page — no framework, no build step, no database — that a magic link opens in the browser first. It attempts the same `localsync://` handoff immediately; if the tab is still visible and focused after a short timeout (the standard technique: a real visibility/blur heuristic, not a fixed guess — see `web/app.js`'s own comment for the exact window), it assumes the app isn't installed and shows a real fallback: the code itself with a copy button, and a download link for the visitor's OS (best-effort from `navigator.userAgent`, with its real limitation — e.g. iPadOS has defaulted to a desktop-Safari-style user agent claiming "Macintosh" since iPadOS 13 — documented plainly rather than pretended away; every OS's download is always shown regardless, never hidden behind a guess). The download links themselves are fetched **live** from `GET https://api.github.com/repos/decypher0/LocalSync/releases/latest` (public, unauthenticated) at the moment someone actually lands on the page, rather than hardcoded — so the page never needs an edit or a redeploy just because round 15's release pipeline shipped a new version.
-
-**Hosted on GitHub Pages, deployed by its own dedicated workflow.** `.github/workflows/pages.yml` uses the official `actions/deploy-pages` flow (not a `gh-pages` branch), triggered on any push to `web/` (plus `workflow_dispatch`) — deliberately decoupled from round 15's release pipeline, since this page's own content barely ever changes (it fetches release data live, per above); only a real edit to the page itself is worth redeploying for. **One manual, one-time step this workflow cannot do on its own**: in this repo's own Settings → Pages, "Source" must be set to "GitHub Actions" (it defaults to "Deploy from a branch", which would silently ignore this workflow). Once that's set and the workflow has run once, the page is live at `https://decypher0.github.io/LocalSync/` — the URL a project-page-style GitHub Pages site always resolves to for this repo, matching the `MAGIC_LINK_BASE_URL` the desktop app itself uses to build links (see `app.js`).
-
-**Send now offers "Copy code" and "Copy link" as two distinct actions**, not a replacement for one with the other — a teammate who already has LocalSync only needs the bare code (unchanged from every prior round); someone being onboarded for the first time benefits from the full link instead, which is exactly what the two buttons next to the room code are for.
-
-This round's fallback-page logic (`parseCode`, `detectOS`, `pickInstallerAssets`, the exact `localsync://` URL it builds) has real, automated test coverage — 24 passing cases in `web/test-magic-link-logic.js`, run via Node's own built-in test runner (`node --test web/test-magic-link-logic.js`, zero new dependencies) and wired into `pages.yml` so a regression there blocks the deploy. What isn't and can't be tested here: whether a real click on a real link, on a real OS, actually launches the installed app or correctly falls back when it isn't — the same category of gap as every prior round's native-dialog and visual-UI claims. See `docs/round5-manual-test-checklist.md`'s round 24 addendum for exactly what to click through by hand.
-
-## What's not verified here
-
-Multi-service stacks beyond app+DB and anything past a single share→run flow are unbuilt by design — see the MVP scope note above. Windows/macOS provisioning code exists now (above) but real-machine proof beyond this round's single verified Windows pass is deliberately deferred to `docs/round5-manual-test-checklist.md`, run by a human on real hardware — not simulated here, by design, per that round's explicit budget rule. A minor, separately-tracked finding from round 2: `crates/ls-net`'s `CONNECT_TIMEOUT` was seen to trip once in 7 back-to-back `nat_fallback` test runs under heavy host contention (multiple container lifecycles in quick succession) — not the transport bug that round fixed (it failed before any transfer began), not reproduced outside of rapid repeated automated testing. Round 12 raised this same constant from 30s to 5 minutes for an unrelated reason (a real UX bug — the human room-code handoff window, see below) which happens to give this old finding far more headroom too; not re-tested under contention specifically, but the arithmetic alone makes a recurrence far less likely. Round 8's Linux file-picker fix (above) is verified by source inspection and a clean build, not by a live click — no real desktop environment was available this round to confirm a picker dialog actually appears; that's the one round-8 item still deferred to `docs/round5-manual-test-checklist.md`. The Windows NSIS firewall hook is verified by config/macro-name correctness against Tauri's documented schema, not by installing the built package and inspecting Windows Defender Firewall's rule list — also deferred to that checklist. Round 11's multi-receiver/push/pull-request flow is proven same-box (real network stack, real Podman-free receivers, but one process) per that round's explicit budget rule — a real test across genuinely separate machines, with real connection drops/reconnects over time, is deferred to `docs/round5-manual-test-checklist.md` like every other multi-machine claim in this project. Round 12's countdown timer, the "Previously connected" list, and the recognized-peer banner's new placement are all real, additive UI code with no JS test harness in this repo (consistent with every prior round's UI work) — build-verified and manually traced, not visually observed in a running app; that's deferred to the checklist too. Round 13 is the starkest example of this project's real-hardware division of labor yet: neither "does a console window actually flash on Windows" nor "does the details panel actually render live text" can be observed in this environment at all — both fixes are proven at the process/data level (a real subprocess spawned with the right creation flag; a real log file receiving real `podman-compose` output live) but the actual visual behavior is deferred entirely to `docs/round5-manual-test-checklist.md`. Round 14's `.github/workflows/macos.yml` was written and statically validated (`actionlint` + `shellcheck`, zero findings) but has not actually been run as of this writing — it's `workflow_dispatch`-only by design (macOS CI minutes cost real quota), so someone has to deliberately trigger it from the Actions tab before any of its results (real `cargo test --workspace` pass/fail on macOS, whether the `.dmg` build succeeds, whether Podman provisioning works inside GitHub's macOS runners) exist to report. Until then, macOS remains exactly where round 5 left it: real, documented, unverified code. Round 15's release pipeline has the identical status one level up: written, statically validated, not yet triggered — no real Release, no real installers, and no confirmation the Windows/Linux builds (their first-ever CI runs) actually succeed exist until someone runs it. The end-user install steps in the new **Download & Install** section were written from the real, documented behavior of SmartScreen/Gatekeeper/AppImage's FUSE dependency, not observed against a real downloaded LocalSync build — that's the same real-hardware gap as everything else on this list, just for a brand-new audience (a non-technical downloader) rather than a developer. Round 16 splits into two very different confidence levels: the auto-update wiring itself (plugin registration, the signing keypair, `latest.json` generation) is verified as far as this environment allows — real local builds, a real `.sig` produced and inspected, the manifest script run against real and synthetic data — but the actual click-through (does the in-app banner appear, does clicking "Install update" really replace a running installed copy and relaunch it) has never been observed against two real, different-versioned builds on real hardware, and is deferred to `docs/round5-manual-test-checklist.md` like every other real-machine claim here. Code-signing is a different, starker case: it is infrastructure only, by design, per that round's explicit instructions — no certificate, Apple Developer account, or credential of any kind has touched this project, so every installer this pipeline has ever produced, including this round's, remains unsigned; see `docs/code-signing.md` for exactly what adding real credentials would take. Round 17's database-source wizard is, unusually, verified more thoroughly by automated tests than most prior rounds' UI work — real multi-folder bundling, a real disposable database, a real round-trip export/reimport, and the full command-layer flow all pass as real, non-fabricated tests — precisely because none of that needed a live GUI to prove; only the wizard's own visual step-through (does the UI actually render and advance correctly when clicked) is deferred to `docs/round5-manual-test-checklist.md`, the same real-hardware gap as every other round's UI claims. Separately, and entirely out of scope by this round's own design: nothing here makes the receiver able to build or run several raw, non-containerized folders together — that's real, substantial, unbuilt work for a future round. Round 18 inverts that pattern for two of its three fixes: the multi-engine support and the connection-test root-cause/fix are proven more thoroughly than most rounds' backend work ever is, against three real disposable local database servers, full round-trip restores included — because none of that needed a live GUI to prove. The one exception is the installer terminal-flashing fix, which is a Windows-visual behavior no sandbox here can observe; it's fixed from real NSIS mechanics (`nsExec` genuinely runs a child hidden, unlike `ExecWait`), but only a real Windows install can confirm no window actually flashes — deferred to `docs/round5-manual-test-checklist.md` like every other Windows-visual claim in this project. Round 22 splits the same way its own goals did: the flow-order, error-placement, and multi-folder-sharing fixes are logic changes proven with real tests against real local MySQL/PostgreSQL/MongoDB instances (including two new regression tests per engine — a literal "localhost" connecting successfully, and a real error's full reason surviving in the chain — and one genuinely new one, real database listing via `list_db_schemas`/`list_databases`, proven the same way); the real schema-browsing and improved table-selection screens are implemented and same-box-verified (the right real data reaches the display layer, confirmed by the same automated tests), but whether they actually *render and look right* — a real picker appearing, real checkboxes behaving, the file dialog's native filter actually restricting file types — needs a developer's own eyes on real hardware, deferred to `docs/round5-manual-test-checklist.md`'s round 22 addendum like every other round's UI-rendering claims. Round 23 is the clearest instance yet of this project's real-credential/real-hardware boundary: everything that can be proven without a live Google account is — PKCE against RFC 7636's own known-correct vector, a real end-to-end OAuth loopback flow with a simulated browser redirect, every Drive/token HTTP interaction against a real local mock server with realistic error bodies, the full retention decision table, and the app-level control-message protocol (including the reject path, proven to touch Google's API not at all) over real `ls_net` connections — but the actual OAuth consent-screen click-through, a real cross-account send/receive/accept/reject cycle, and which of the two documented `expirationTime` behaviors a real personal vs. Workspace account actually produces today all need a real `GOOGLE_OAUTH_CLIENT_ID`, a real browser, and (for the cross-account cases) two real Google accounts on two real machines — none of which exist in this sandbox; see `docs/google-drive-setup.md` for what to set up and `docs/round5-manual-test-checklist.md`'s round 23 addendum for exactly what to click through once it is. Round 20 is almost entirely this same kind of claim: the centered layout, the Refresh-button fix, the mode-first reorder, and the modal wizard's structure are all code-verified (syntax, DOM-id cross-referencing, tag balance, and — for the Refresh fix specifically — tracing the exact same working code path round 16 already proved) rather than fabricated, but this sandbox has no display and no working synthetic input, so whether the layout genuinely looks centered and bounded, whether every audited button truly does the right thing when a human clicks it, and whether the modal wizard actually reads as one coherent guided sequence are all deferred to `docs/round5-manual-test-checklist.md`'s round 20 addendum, same as every other round's visual/click-through claims. Round 21 is the most extreme version of this same gap in the whole project: it is a pure visual-quality round, and this sandbox is structurally incapable of judging visual quality. What's real and checkable — every icon reference resolving to a real symbol, every color being a token rather than a scattered hex value, the four re-tuned dark-mode text colors actually clearing WCAG AA's 4.5:1 contrast ratio against the real dark background (computed directly, not eyeballed), the theme choice persisting and applying without a flash on launch — was verified exactly that way. Whether the icon set, spacing, and color choices actually *look* modern and intentional side by side, on a real screen, in both themes, is a judgment this round explicitly defers to the developer; see `docs/round5-manual-test-checklist.md`'s round 21 addendum. Round 24 splits cleanly along the same line its own hard budget rule draws: the deep-link plugin registration, the single-instance/deep-link interplay, and the fallback page's own decision logic (OS detection, asset picking, the exact scheme URL built) are all either compiled/linked correctly (confirmed via a real `cargo build`, including `cargo tree` proving the `deep-link` feature really pulled in `tauri-plugin-deep-link` as a dependency of `tauri-plugin-single-instance`) or covered by 24 real, passing automated tests (`web/test-magic-link-logic.js`, run via Node's built-in test runner, no framework dependency). What none of that reaches, and what this round is explicit about deferring: whether clicking a real `localsync://` link on a real OS actually launches or focuses the installed app, and whether the fallback page's own timeout/visibility heuristic correctly distinguishes "installed" from "not installed" in practice — both need a human clicking a real link on real hardware, the same category of gap as every prior round's native-dialog and visual-UI claims. GitHub Pages hosting itself is documented and workflow-automated but not yet live as of this writing — like round 15's release pipeline before its first real trigger, the one-time manual "Source: GitHub Actions" repository setting and the workflow's first real run both still need to actually happen before `https://decypher0.github.io/LocalSync/` resolves to anything.
+*A license has not yet been chosen for this project.* If you're the maintainer, add a `LICENSE` file and update this section before treating this repo as fully open source — without one, default copyright law applies and others technically don't have permission to use, modify, or redistribute this code, however open the intent.
