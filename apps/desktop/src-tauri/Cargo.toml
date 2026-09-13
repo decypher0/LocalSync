@@ -43,6 +43,11 @@ tauri-plugin-dialog = { version = "2", default-features = false, features = ["xd
 # install - never used for anything else.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Round 23: opens the system default browser to Google's real OAuth consent
+# screen from the link-account command - the standard Tauri v2 plugin for
+# "open this URL/path with whatever the OS already uses", not something
+# worth hand-rolling per platform.
+tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -66,6 +71,7 @@ ls-net = { path = "../../../crates/ls-net" }
 ls-security = { path = "../../../crates/ls-security" }
 ls-containers = { path = "../../../crates/ls-containers" }
 ls-dbsource = { path = "../../../crates/ls-dbsource" }
+ls-clouddrop = { path = "../../../crates/ls-clouddrop" }
 # Only for hashing a freshly-exported dump file (round 17) - already a
 # dependency two crates down the graph (ls-snapshot, ls-security); promoted
 # to a direct dependency here too rather than reaching through them.
