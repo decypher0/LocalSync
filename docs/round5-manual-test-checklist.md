@@ -1329,3 +1329,126 @@ real page that tells them what to download for their machine and holds
 onto their code until they're ready to paste it in. Neither path needed
 a backend, a database, or a hardcoded download URL that would go stale
 the next time a release ships.
+
+## Round 25 addendum: critical send/receive bugs + layout regression
+
+Round 25 fixes three real, blocking bugs found in the first genuine
+cross-machine test since rounds 20-24 landed: a bad IPC argument name
+that broke every database-attached Send outright, a receive-side bug
+that made the receiver's own unrelated Settings toggle block valid
+codes, and an investigation into a reported layout regression that
+turned out not to be reproducible as a source or plain-build bug.
+
+### What changed, and why (root causes, not guesses)
+
+- **Goal 1 - the `share_snapshot_wizard` crash**: `apps/desktop/src/app.js`
+  was sending the wizard's dump payload with a `filePath` key (this
+  app's own internal JS naming convention) instead of the `file_path`
+  Rust's `DumpPlanDto` actually declares. Tauri's `invoke` bridge
+  converts a command's own top-level argument names between camelCase
+  and snake_case automatically, but does **not** do that recursively for
+  nested struct fields - those deserialize via plain `serde_json` against
+  the exact declared name. Confirmed via `git log -S"filePath"`: this
+  exact bug has existed, unnoticed, since round 17 - every automated test
+  calls `commands::share_snapshot_wizard` directly, bypassing this exact
+  JS reconstruction step, so nothing ever exercised the real IPC
+  boundary until an actual database-attached Send did. Fixed, and - since
+  this is now the *second* real bug found at this exact translation step
+  (round 22 found `engine` silently dropped here) - pulled the payload
+  construction into its own file (`apps/desktop/src/wizard-payload.js`)
+  specifically so it's testable from plain Node (`app.js` itself touches
+  `window`/`document` from its first line, so it can't be `require()`d
+  directly); `test-wizard-payload.js` has 7 passing tests, including one
+  that directly asserts the outbound key is `file_path` and that the
+  internal `filePath` key never leaks into the outbound object - proven
+  to actually catch this exact class of regression by temporarily
+  reintroducing the bug and confirming the test fails, then restoring the
+  fix and confirming it passes again.
+- **Goal 2 - receivers no longer pick a connection mode**: a receiver
+  pasting a Local-network code was shown "Remote relay URL is required in
+  Settings for Remote relay mode" whenever their own Settings mode toggle
+  (meant for choosing a *sender*'s default, unrelated to what a given
+  pasted code actually needs) happened to be on "Remote relay" - blocking
+  a perfectly valid code before `decode_room_code` was ever even called.
+  Root cause: `decode_room_code` took a caller-supplied `mode` argument
+  that the frontend read from that same Settings toggle. Fixed at the
+  source of truth: local-mode codes are always exactly 14 base62
+  characters (the packed LAN-IP/port/room-id string), remote-mode codes
+  are always exactly the bare 4-character id `generate_room_id()`
+  produces - the two shapes never collide, so `decode_room_code` no
+  longer takes a `mode` parameter at all, trying a local-shaped decode
+  first and only falling back to treating the code as a remote-mode bare
+  id (which does still need a separately-known relay URL - that's real,
+  unavoidable information a short id can't encode on its own, not a mode
+  pick) if that fails. `request_cloud_drop_access` (round 23) had the
+  identical bug and got the identical fix. Proven with a new Rust test,
+  `decode_room_code_tells_local_and_remote_codes_apart_with_no_mode_argument`,
+  plus the existing `local_mode_still_produces_the_old_encoded_code` now
+  explicitly passing `None` for `relay_url` - not just an empty string -
+  to prove zero remote-relay configuration is required or consulted for
+  a real local-mode code.
+- **Goal 3 - the layout regression**: investigated directly rather than
+  guessed at. Confirmed the *source* is correct - `.app-shell`, every
+  design token, and all 30 icon `<symbol>`s from rounds 20/21 are present
+  and correct in the current `main`. Then tested whether a plain local
+  build actually re-embeds frontend changes, since Tauri bakes
+  `apps/desktop/src/*` into the compiled binary via `generate_context!()`
+  rather than serving it from a separate dist folder: three real,
+  reproducible tests in this sandbox - editing only `styles.css` (a
+  modified file) triggered a real recompile, adding a brand-new,
+  previously-unreferenced file also triggered one, and a same-inputs
+  rebuild afterward was a genuine no-op (ruling out "it always
+  recompiles regardless" as a false explanation for the first two
+  results). **This means the regression is not reproducible as either a
+  source bug or a plain local-build bug.** The one remaining,
+  unproven-but-plausible mechanism this sandbox can't fully exercise:
+  the release pipeline's `Swatinem/rust-cache` restores a cached
+  `target/` keyed on `Cargo.lock`/`Cargo.toml`, not on frontend content -
+  a cache restore's file mtimes don't necessarily land in the same
+  relative order a normal edit-then-rebuild would, a real (if unproven
+  here) risk class for any mtime-sensitive staleness check. Hardened
+  `build.rs` defensively against exactly that with an explicit
+  `cargo:rerun-if-changed=../src` - costs nothing (the tests above already
+  passed without it) and closes the one gap this investigation couldn't
+  fully exercise outside a real CI run. The most likely real-world
+  explanation for what was actually observed: a previously-installed
+  build, or a `tauri dev` process left running from before rounds 20/21,
+  being tested instead of a freshly rebuilt/reinstalled one - this
+  project's dev mode has no live frontend reload (no `devUrl`
+  configured), so a long-running dev session genuinely would keep
+  showing whatever the frontend looked like when it was last started.
+
+### What to check on real hardware
+
+1. **Goal 1, for real**: attach a real database to a folder in the Send
+   wizard (any of the three engines) and confirm Send actually completes
+   instead of failing immediately with a `missing field 'file_path'`
+   error - the exact crash reported.
+2. **Goal 2, for real**: on the receiving machine, set Settings' own
+   relay mode to "Remote relay" (with or without a URL filled in) and
+   then paste a code from a sender who used **Local network** mode -
+   confirm it connects successfully with no error about a relay URL,
+   proving the receiver's own Settings no longer affects a Local-mode
+   code at all. Then do the reverse - paste a genuine Remote-relay code
+   with no relay URL configured anywhere - and confirm you now get a
+   clear message asking for one, rather than either a wrong error or a
+   silent failure.
+3. **Goal 3, for real**: after pulling this round's changes, do a
+   genuinely clean rebuild (quit any running LocalSync/`tauri dev`
+   process first, then rebuild and reinstall/relaunch from scratch) and
+   confirm the centered layout, icons, and theme system from rounds
+   20/21 actually appear. If they still don't, that's real, valuable
+   information this sandbox couldn't produce on its own - worth checking
+   specifically whether it reproduces from a *freshly triggered* release
+   pipeline run (not a cached one) versus a local build, to help isolate
+   whether the `Swatinem/rust-cache` risk this round hardened against is
+   the actual mechanism.
+
+### What "success" looks like
+
+Sending a database-attached project no longer crashes. Receiving a
+Local-network code never asks about a Remote relay, regardless of
+whatever the receiver's own Settings happen to say. And whatever's
+actually served by a real install reflects the real, current source -
+confirmed as far as this sandbox can reach, with a concrete next check
+for the one part it couldn't fully verify itself.

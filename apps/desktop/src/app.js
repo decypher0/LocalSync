@@ -1253,16 +1253,15 @@ $("send-btn").addEventListener("click", async () => {
       $("send-progress-label").textContent = `Sending… ${formatBytes(bytes)} / ${formatBytes(total)}`;
     });
 
-    // Round 22 fix: this was dropping `engine` (a required field on the
-    // Rust side's DumpPlanDto since round 18) when rebuilding the payload
-    // here - any database-attached send would have failed IPC
-    // deserialization outright. Missed by round 18's own test coverage
-    // because that test calls commands::share_snapshot_wizard directly,
-    // bypassing this exact JS reconstruction step entirely.
-    const folders = wizardFolders.map((f) => ({
-      path: f.path,
-      dump: f.needsDb && f.dump ? { schema: f.dump.schema, filePath: f.dump.filePath, engine: f.dump.engine } : null,
-    }));
+    // Round 22 found `engine` silently dropped here; round 25 found
+    // `filePath` sent instead of the `file_path` Rust's DumpPlanDto
+    // actually declares - see wizard-payload.js's own comment for the
+    // full root cause. Extracted into its own file specifically so this
+    // exact translation step - the one part of the whole wizard flow no
+    // Rust test can reach, since every one of them calls
+    // commands::share_snapshot_wizard directly - finally has a real,
+    // automated regression test (test-wizard-payload.js).
+    const folders = buildWizardFoldersPayload(wizardFolders);
     const snapshotId = await invoke("share_snapshot_wizard", {
       folders,
       roomCode: roomId,
@@ -1363,12 +1362,17 @@ $("receive-btn").addEventListener("click", async () => {
     return;
   }
 
-  const mode = relayMode();
+  // Round 25 fix: a receiver never picks a connection mode - mode
+  // selection is a *sender* decision (Settings' relayMode()/relayUrl()
+  // exist for Send's own remote-mode default, and the wizard has its own
+  // separate choice on top of that; neither describes what a given pasted
+  // code actually needs). decode_room_code itself now figures that out
+  // from the code's own shape - see its doc comment. relayUrl() is passed
+  // through unconditionally: harmless if the code turns out to be
+  // local-shaped (never consulted in that case), and exactly what's
+  // needed if it turns out to be remote-shaped, without a blocking
+  // upfront guess about which one it'll be.
   const url = relayUrl();
-  if (mode === "remote" && !url) {
-    $("receive-error").textContent = "Remote relay URL is required in Settings for Remote relay mode.";
-    return;
-  }
 
   // Round 23: waits for the sender's Accept/Reject over the control
   // channel, then downloads straight from Drive - no `receive-progress`
@@ -1377,7 +1381,7 @@ $("receive-btn").addEventListener("click", async () => {
   if ($("cloud-drop-receive-toggle").checked) {
     $("receive-btn").disabled = true;
     try {
-      const outcome = await invoke("request_cloud_drop_access", { mode, code: roomCode, relayUrl: mode === "remote" ? url : null });
+      const outcome = await invoke("request_cloud_drop_access", { code: roomCode, relayUrl: url || null });
       if (!outcome.accepted) {
         $("receive-error").textContent = "The sender declined this request.";
       } else {
@@ -1404,7 +1408,7 @@ $("receive-btn").addEventListener("click", async () => {
   });
 
   try {
-    const decoded = await invoke("decode_room_code", { mode, code: roomCode, relayUrl: mode === "remote" ? url : null });
+    const decoded = await invoke("decode_room_code", { code: roomCode, relayUrl: url || null });
     const roomId = decoded.room_id;
     const signalingUrl = decoded.signaling_url;
 
