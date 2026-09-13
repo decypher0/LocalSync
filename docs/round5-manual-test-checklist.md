@@ -1181,17 +1181,20 @@ protocol over real `ls_net` connections — already has 43 passing automated
 tests (41 in `ls-clouddrop`, 2 in the new `cloud_drop_protocol_test.rs`); this
 checklist is for the rest.
 
-### Before you start: get a real Client ID
+### Before you start: get a real Client ID and Client Secret
 
 Follow `docs/google-drive-setup.md` start to finish first — a Google Cloud
 project, the Drive API enabled, an OAuth consent screen in "Testing" status
 with **two of your own Google accounts** added as test users (one to act as
-sender, one as receiver), and a Desktop-app-type OAuth Client ID. Set
-`GOOGLE_OAUTH_CLIENT_ID` to that value before launching either app instance.
-Without it, Settings → **Link Google account** fails immediately with a
-message pointing back at that doc — confirm that's what you see if you
-launch without setting it, as a sanity check that the failure path itself is
-honest before you set the real value.
+sender, one as receiver), and a Desktop-app-type OAuth Client ID. Set both
+`GOOGLE_OAUTH_CLIENT_ID` **and** `GOOGLE_OAUTH_CLIENT_SECRET` (round 31 -
+see that round's own addendum below for why the secret is needed at all
+despite this being a PKCE flow) to the two values from that Client ID's
+Credentials page entry, before launching either app instance. Without
+either one, Settings → **Link Google account** fails immediately with a
+message naming exactly which variable is missing — confirm that's what you
+see if you launch with one or both unset, as a sanity check that the
+failure path itself is honest before you set the real values.
 
 ### What to check
 
@@ -1518,4 +1521,60 @@ have ever pushed a real `vX.Y.Z` tag - a plain `workflow_dispatch` dev
 build is enough for the magic-link page and (once the signing secret
 exists) the in-app updater to both find real data, every single run, not
 just the lucky first time someone tags a release.
+
+---
+
+## Round 31 addendum: OAuth token exchange now needs a client secret too
+
+Real testing against a live, correctly-configured Desktop-app OAuth client
+found round 23's "PKCE means no client secret needed" claim wrong: Google's
+real token endpoint rejected the exchange outright with `400 Bad Request:
+invalid_request - client_secret is missing`. Investigated before fixing -
+confirmed against Google's own docs and multiple independent real-world
+reports of the identical error against Google specifically (not a fluke of
+one misconfigured client) - see `crates/ls-clouddrop/src/oauth.rs`'s own
+module doc comment and `docs/google-drive-setup.md` for the full
+explanation. `GOOGLE_OAUTH_CLIENT_SECRET` is now a second required
+environment variable alongside `GOOGLE_OAUTH_CLIENT_ID` - see this
+checklist's own round 23 addendum above, updated to mention both.
+
+### What's already confirmed, without needing real hardware
+
+- All 40 of `ls-clouddrop`'s existing tests still pass with the new
+  required `client_secret` field threaded through every `OAuthConfig`
+  construction site.
+- Two existing wiremock-backed tests - one for the authorization-code
+  exchange (`run_oauth_flow_completes_end_to_end_against_a_simulated_browser_redirect`),
+  one for the refresh exchange (`refresh_access_token_sends_expected_request_and_parses_response`) -
+  were strengthened with an explicit `client_secret=...` body assertion:
+  if the real request built by this code ever omitted it, the mock
+  wouldn't match and these tests would fail with a connection/response
+  error, not silently pass.
+- `cargo build --workspace` and `cargo test --workspace` both still pass
+  in full after this change - no other crate was touched.
+
+### What to check on real hardware
+
+1. **The actual failure this round fixes**: with only `GOOGLE_OAUTH_CLIENT_ID`
+   set (not the secret), confirm Settings → **Link Google account** fails
+   fast with a clear message naming `GOOGLE_OAUTH_CLIENT_SECRET`
+   specifically, rather than opening a browser toward a request Google
+   would reject anyway.
+2. **The real fix**: set both `GOOGLE_OAUTH_CLIENT_ID` and
+   `GOOGLE_OAUTH_CLIENT_SECRET` (see `docs/google-drive-setup.md`) and
+   confirm the full link flow this checklist's round 23 addendum already
+   describes now completes successfully against a real Desktop-app OAuth
+   client - the exact scenario that failed before this round's fix.
+3. **Refresh, specifically**: if you can wait for (or force) a stored
+   token to near its expiry, confirm `ensure_valid_access_token`'s real
+   refresh call against Google's live endpoint succeeds too, not just the
+   initial exchange - the fix applies to both, but only the initial
+   exchange was the one real testing actually hit first.
+
+### What "success" looks like
+
+Linking a Google account works end to end against a real Desktop-app OAuth
+client without any client-secret-related error - the exact failure this
+round exists to fix - and continues working across a real token refresh,
+not just the first exchange.
 
