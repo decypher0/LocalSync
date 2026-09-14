@@ -240,6 +240,38 @@ jobs:
             echo "No TAURI_SIGNING_PRIVATE_KEY secret - building unsigned with createUpdaterArtifacts disabled for this run (no .sig, no latest.json)."
           fi
 
+      # Round 33 goal 1: two real, back-to-back release failures were both
+      # Tauri's AppImage bundler hitting a real HTTP 504 downloading
+      # AppRun/linuxdeploy from github.com/tauri-apps/binary-releases - a
+      # plain, unversioned, uncached network fetch with no retry of its own
+      # (confirmed directly against tauri-bundler's own source,
+      # src/bundle/linux/appimage/linuxdeploy.rs: a single `agent.get(url)
+      # .call()`, no retry/backoff logic at all). It downloads into
+      # `dirs::cache_dir()/tauri` (confirmed against that exact function's
+      # own Linux implementation: $XDG_CACHE_HOME or, since GitHub's runners
+      # don't set that, $HOME/.cache - i.e. ~/.cache/tauri here) and skips
+      # re-downloading anything already there (`if !linuxdeploy.exists()`),
+      # so caching that one real, well-known directory across runs is
+      # enough to make most runs never touch the network for this at all.
+      # Keyed on the exact @tauri-apps/cli version this build actually
+      # resolves to (read from the checked-in package-lock.json, not
+      # guessed) - these helper binaries' identity is pinned inside that
+      # exact tauri-bundler version's own source, so a future CLI bump
+      # correctly gets a fresh cache instead of silently reusing stale
+      # tools from a different bundler version.
+      - name: Determine the pinned @tauri-apps/cli version
+        id: tauri_cli_version
+        run: |
+          version=$(jq -r '.packages["node_modules/@tauri-apps/cli"].version' apps/desktop/package-lock.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Pinned @tauri-apps/cli version: $version"
+
+      - name: Cache Tauri's AppImage helper binaries (AppRun/linuxdeploy)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tauri
+          key: appimage-tools-${{ steps.tauri_cli_version.outputs.version }}
+
       - name: Build the .deb and AppImage
         # ubuntu-22.04, not ubuntu-latest (24.04 as of this writing):
         # building against a newer glibc raises the *minimum* glibc version
@@ -262,17 +294,55 @@ jobs:
         # update-capable .sig - Tauri's updater doesn't support .deb at
         # all, so the .deb here stays a manual-download-only artifact
         # either way.
+        #
+        # Round 33 goals 2/3: a cache miss (first run, or an evicted cache)
+        # still needs the download to succeed, and Tauri's own bundler has
+        # no retry of its own (see the caching step's comment above) - so
+        # this wraps the whole build in a short retry-with-backoff loop
+        # (cheap: a retry's own `cargo build` is a near-instant no-op
+        # thanks to Swatinem/rust-cache above, only the AppImage step
+        # itself actually redoes real work). If every attempt still fails,
+        # this doesn't fail the job - it falls back to building the .deb
+        # alone (confirmed, from real recent runs, to succeed every single
+        # time independent of the AppImage step) and records that fact in
+        # appimage_failed for the locate step below, matching how this
+        # project already treats macOS's own unsigned/non-notarized case as
+        # a degraded-but-real release rather than no release at all: a
+        # release without a Linux AppImage this one time is better than no
+        # release at all over a transient, unrelated GitHub outage.
+        id: build_deb_appimage
         working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm install
-          if [ "${{ steps.updater_key.outputs.present }}" = "true" ]; then
-            npm run tauri build -- --bundles deb,appimage
-          else
-            npm run tauri build -- --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
-          fi
+
+          build_cmd() {
+            local bundles="$1"
+            if [ "${{ steps.updater_key.outputs.present }}" = "true" ]; then
+              npm run tauri build -- --bundles "$bundles"
+            else
+              npm run tauri build -- --bundles "$bundles" --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            fi
+          }
+
+          appimage_failed=false
+          max_attempts=3
+          attempt=1
+          until build_cmd deb,appimage; do
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::warning::AppImage bundling failed after $max_attempts attempts (the known, transient github.com/tauri-apps/binary-releases HTTP 504 this round exists to work around) - falling back to a .deb-only build for this run. Re-run the workflow to try producing an AppImage again once GitHub's own outage clears."
+              build_cmd deb
+              appimage_failed=true
+              break
+            fi
+            backoff=$((attempt * 15))
+            echo "Attempt $attempt/$max_attempts of building deb+appimage failed - retrying in ${backoff}s..."
+            sleep "$backoff"
+            attempt=$((attempt + 1))
+          done
+          echo "appimage_failed=$appimage_failed" >> "$GITHUB_OUTPUT"
 
       - name: Dump target/ contents (diagnostic)
         # Temporary, added to actually see what (if anything) the build
@@ -305,27 +375,34 @@ jobs:
           # finds it regardless of which triple the build step used.
           find_one() {
             local fmt="$1" ext="$2"
-            local matches
-            matches=$(find target -type f -path "*/bundle/$fmt/*.$ext" 2>/dev/null)
-            if [ -z "$matches" ]; then
-              echo "No .$ext found anywhere under target (looked for */bundle/$fmt/*.$ext) - build must have failed silently somewhere upstream." >&2
-              return 1
-            fi
-            if [ "$(echo "$matches" | wc -l)" -gt 1 ]; then
-              echo "Note: more than one .$ext found, using the first - all matches:" >&2
-              echo "$matches" >&2
-            fi
-            echo "$matches" | head -n1
+            find target -type f -path "*/bundle/$fmt/*.$ext" 2>/dev/null | head -n1
           }
 
-          deb_path=$(find_one deb deb) || exit 1
-          appimage_path=$(find_one appimage AppImage) || exit 1
-          # Not required (absent whenever the signing secret isn't
-          # configured) - so it doesn't go through find_one's hard-fail path.
-          appimage_sig_path=$(find target -type f -path '*/bundle/appimage/*.AppImage.sig' 2>/dev/null | head -n1)
+          # .deb is the one output the build step above never falls back
+          # away from (see its own comment - confirmed to succeed every
+          # time independent of the AppImage step), so it alone stays a
+          # hard requirement here.
+          deb_path=$(find_one deb deb)
+          if [ -z "$deb_path" ]; then
+            echo "No .deb found anywhere under target (looked for */bundle/deb/*.deb) - build must have failed silently somewhere upstream." >&2
+            exit 1
+          fi
+
+          # Round 33 goal 3: the AppImage itself is now best-effort - a
+          # missing one here just means the build step's own retry+fallback
+          # already logged and handled it (appimage_failed=
+          # ${{ steps.build_deb_appimage.outputs.appimage_failed }}), not a
+          # new failure to report. The sig only makes sense to look for at
+          # all when the AppImage itself actually exists.
+          appimage_path=$(find_one appimage AppImage)
+          appimage_sig_path=""
+          if [ -n "$appimage_path" ]; then
+            appimage_sig_path=$(find target -type f -path '*/bundle/appimage/*.AppImage.sig' 2>/dev/null | head -n1)
+          fi
+
           echo "found deb: $deb_path"
-          echo "found appimage: $appimage_path"
-          echo "found appimage sig: ${appimage_sig_path:-(none - no signing secret configured)}"
+          echo "found appimage: ${appimage_path:-(none - see the build step's own appimage_failed output)}"
+          echo "found appimage sig: ${appimage_sig_path:-(none)}"
           {
             echo "deb_path=$deb_path"
             echo "appimage_path=$appimage_path"
@@ -338,6 +415,7 @@ jobs:
           path: ${{ steps.find_installers.outputs.deb_path }}
 
       - uses: actions/upload-artifact@v4
+        if: steps.find_installers.outputs.appimage_path != ''
         with:
           name: LocalSync-linux-appimage
           path: ${{ steps.find_installers.outputs.appimage_path }}
