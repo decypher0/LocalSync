@@ -18,10 +18,10 @@ const $ = (id) => document.getElementById(id);
 
 // ---------- preload (dev shortcut for LOCALSYNC_PRELOAD_SNAPSHOT) ----------
 // Fires the same IncomingSnapshotInfo shape receive_snapshot resolves with,
-// so this reuses renderReview verbatim — the review screen a developer sees
-// this way is the same code path a real P2P receive draws, not a separate
-// mockup. See scripts/demo-review-screen.sh.
-listen("preload-review", (evt) => renderReview(evt.payload));
+// so this reuses startReceiveSessionFromInfo verbatim — the review screen a
+// developer sees this way is the same code path a real P2P receive draws,
+// not a separate mockup. See scripts/demo-review-screen.sh.
+listen("preload-review", (evt) => startReceiveSessionFromInfo(evt.payload));
 
 // ---------- firewall warning (Linux ufw active at startup) ----------
 listen("firewall-warning", (evt) => {
@@ -48,7 +48,7 @@ function handleDeepLinkUrls(urls) {
     if (!code) continue;
     switchToTab("receive");
     $("receive-room-code").value = code;
-    $("receive-error").textContent = "";
+    $("receive-start-error").textContent = "";
     break; // only one link is ever meaningful per launch/event
   }
 }
@@ -222,15 +222,24 @@ listen("cloud-access-request", (evt) => {
 
 // ---------- snapshot updated (receiver-side: sender pushed a fresh snapshot) ----------
 // Same payload shape receive_snapshot resolves with, so this reuses
-// renderReview verbatim - a pushed update goes through the exact same
-// diff-review-then-Run/Reject screen as a normal receive.
-let updateBannerTimeout = null;
+// applyReviewInfoToSession verbatim - a pushed update goes through the
+// exact same diff-review-then-Run/Reject screen as a normal receive.
+// Round 29: attaches to whichever receive session most recently connected
+// to a sender (lastReceiveSessionId) rather than a single global "the
+// receive" - matches the backend's own single-outgoing-connection model
+// (see lastReceiveSessionId's own doc comment above) rather than pretending
+// this app can already receive pushed updates from more than one sender at
+// once. Falls back to a fresh tab if that session is gone (e.g. closed, or
+// this is a restart) so the update is never silently dropped.
 listen("snapshot-updated", (evt) => {
-  renderReview(evt.payload);
-  const banner = $("update-banner");
-  banner.classList.remove("hidden");
-  clearTimeout(updateBannerTimeout);
-  updateBannerTimeout = setTimeout(() => banner.classList.add("hidden"), 4000);
+  const session = lastReceiveSessionId && sessions.get(lastReceiveSessionId);
+  if (!session) {
+    startReceiveSessionFromInfo(evt.payload);
+    return;
+  }
+  applyReviewInfoToSession(session, evt.payload);
+  renderSessionTabs();
+  if (session.id === activeSessionId) renderActiveSession();
 });
 
 // ---------- settings ----------
@@ -272,11 +281,81 @@ const savedTheme = currentThemeChoice();
 $(`theme-${savedTheme}`).checked = true;
 applyTheme(savedTheme);
 
+// Shared by Settings' own radios and the round 29 app menu's Theme submenu -
+// one source of truth for "choosing a theme", not two divergent code paths
+// that happen to agree today.
+function setThemeChoice(choice) {
+  $(`theme-${choice}`).checked = true;
+  localStorage.setItem(THEME_KEY, choice);
+  applyTheme(choice);
+}
+
 ["system", "light", "dark"].forEach((choice) => {
-  $(`theme-${choice}`).addEventListener("change", () => {
-    localStorage.setItem(THEME_KEY, choice);
-    applyTheme(choice);
-  });
+  $(`theme-${choice}`).addEventListener("change", () => setThemeChoice(choice));
+});
+
+// ---------- round 29 goal B2: real application-level menu ----------
+// One handler for every item build_menu (main.rs) creates - Quit is
+// handled directly in Rust (see main.rs's own comment) and never reaches
+// here. Every other item just reuses whatever existing, already-correct UI
+// already does the same thing (Settings' own theme radios, the Settings
+// panel, the Check-for-updates button) rather than duplicating that logic.
+listen("menu-action", (evt) => {
+  switch (evt.payload) {
+    case "menu-check-updates":
+      $("settings-panel").classList.remove("hidden");
+      $("check-updates-status").textContent = "Checking…";
+      runUpdateCheck(true);
+      break;
+    case "menu-settings":
+      $("settings-panel").classList.remove("hidden");
+      break;
+    case "menu-theme-system":
+    case "menu-theme-light":
+    case "menu-theme-dark":
+      setThemeChoice(evt.payload.slice("menu-theme-".length));
+      break;
+    case "menu-session-history":
+      openSessionHistory();
+      break;
+  }
+});
+
+// ---------- round 29 goal B2: session history (persisted, unlike the
+// this-run-only session tabs above) ----------
+async function openSessionHistory() {
+  $("settings-panel").classList.add("hidden");
+  $("session-history-panel").classList.remove("hidden");
+  $("session-history-error").textContent = "";
+  try {
+    renderSessionHistoryList(await invoke("load_session_history"));
+  } catch (err) {
+    $("session-history-error").textContent = String(err);
+  }
+}
+
+function renderSessionHistoryList(entries) {
+  const list = $("session-history-list");
+  list.innerHTML = "";
+  // Newest first - a long-lived install's oldest entries are the least
+  // relevant to see first.
+  const sorted = [...entries].sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
+  $("session-history-empty").classList.toggle("hidden", sorted.length > 0);
+  for (const entry of sorted) {
+    const li = document.createElement("li");
+    const kindIcon = entry.kind === "send" ? "icon-send" : "icon-download";
+    const when = entry.ended_at ? `${entry.started_at} → ${entry.ended_at}` : `${entry.started_at} (in progress)`;
+    li.innerHTML = `
+      <svg class="icon"><use href="#${kindIcon}"></use></svg>
+      <span>${escapeHtml(entry.title)}</span>
+      <span class="hint-inline">${escapeHtml(when)}</span>
+    `;
+    list.appendChild(li);
+  }
+}
+
+$("session-history-close-btn").addEventListener("click", () => {
+  $("session-history-panel").classList.add("hidden");
 });
 
 // ---------- round 23: linked Google account (Cloud drop) ----------
@@ -405,6 +484,11 @@ function switchToTab(name) {
   document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
   document.querySelector(`.tab-btn[data-tab="${name}"]`).classList.add("active");
   $(`tab-${name}`).classList.add("active");
+  // Round 29: clicking a top-level Send/Receive nav tab always means "I
+  // want to start something new" - deselect whatever session tab was
+  // showing (its own state keeps running untouched in the background;
+  // this only changes what's currently *visible*).
+  setActiveSession(null);
   // Show "Previously connected" the moment someone looks at the Send tab,
   // not only after they've just sent something or clicked Refresh by hand.
   if (name === "send") refreshReceivers();
@@ -412,6 +496,291 @@ function switchToTab(name) {
 
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => switchToTab(btn.dataset.tab));
+});
+
+// ---------- round 29 goal A2/B1: the multi-session model ----------
+//
+// Root cause of "starting a second, different send while one is already
+// active doesn't work" (round 28/29's own investigation, see
+// tests/concurrent_multi_session_test.rs for the proof the *backend* was
+// never the problem - two genuinely concurrent `share_snapshot` calls,
+// spawned before either is awaited, already worked correctly): this file
+// used to track "the current send" and "the current receive" as a small
+// handful of bare module-level variables (`currentRoomCode`,
+// `unlistenSendProgress`, `currentSnapshotId`, ...) and a single shared set
+// of DOM elements - starting a second send before the first finished simply
+// overwrote all of it, silently losing the first session's own progress/
+// room-code display even though its actual backend transfer kept running
+// untouched underneath.
+//
+// Fix: every session (a send in flight, or a receive in flight/held/
+// running) is now a real object in this `sessions` Map, keyed by the same
+// room code / snapshot id the backend already uses to key its own
+// `connected_receivers`/`verified`/`sessions` maps - no new identifier
+// scheme invented. `activeSessionId` decides which *one* session's data is
+// currently rendered into the shared detail viewport (round 29 goal B1 -
+// "one tab per session", terminal-multiplexer style: every other session
+// keeps its own state exactly as it was, whether or not it's the one
+// currently visible.
+const sessions = new Map();
+let activeSessionId = null;
+
+/// A session's shape - not a class, just the one object literal every
+/// creation site below fills in the same way. `kind` is "send" or
+/// "receive"; everything past `status` is only ever read/written by that
+/// kind's own code paths (a send session's `snapshotId`/`manifest`/etc.
+/// simply stay at their initial `null`, and vice versa).
+function newSession(kind, id, title) {
+  return {
+    id,
+    kind,
+    title,
+    status: "connecting", // connecting | active | reviewing | running | done | error
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    errorText: "",
+    resultText: "",
+    busy: false, // an action button (Run/Reject/Stop/Ask for update) is mid-flight
+    // ---- send-only ----
+    roomCode: null,
+    codeExpiresAt: null,
+    progressUnlisten: null,
+    progressBytes: 0,
+    progressTotal: 0,
+    folders: [], // [{ path, dump: {schema, engine} | null }]
+    cloudDrop: false,
+    // ---- receive-only ----
+    snapshotId: null,
+    senderPubkeyHex: null,
+    manifest: null,
+    diff: null,
+    recognizedPeer: null,
+    runningSessionId: null,
+    servicePorts: null,
+    dbCacheHit: null,
+    runInProgress: false,
+    runLogText: "",
+    runErrorText: "",
+  };
+}
+
+function activeSession() {
+  return activeSessionId ? sessions.get(activeSessionId) : null;
+}
+
+/// Fire-and-forget, same reasoning as everything else in this app that
+/// persists something the user doesn't need to wait on (e.g. `remember_peer`)
+/// - a failure to record history is worth logging, never worth blocking or
+/// erroring the actual session over.
+function recordSessionHistory(session) {
+  // SessionHistoryEntry (session_history.rs) has no #[serde(rename_all)],
+  // so its JSON field names are exactly its Rust field names - snake_case,
+  // not the camelCase invoke() otherwise auto-converts top-level command
+  // *argument* names to. This nested struct's own fields get no such
+  // conversion, so they're spelled out snake_case here to match.
+  invoke("record_session_history_entry", {
+    entry: {
+      id: session.id,
+      kind: session.kind,
+      title: session.title,
+      started_at: session.startedAt,
+      ended_at: session.endedAt,
+    },
+  }).catch((err) => console.error("record_session_history_entry failed:", err));
+}
+
+function addSession(session) {
+  sessions.set(session.id, session);
+  recordSessionHistory(session);
+  renderSessionTabs();
+  setActiveSession(session.id);
+}
+
+/// Marks a session finished (successfully or not) without removing its tab
+/// - the person can still look at a completed/failed session's detail until
+/// they explicitly close it (closeSessionTab below). Safe to call more than
+/// once (e.g. an error path and a later cleanup both reaching for it).
+function endSession(session, status) {
+  if (session.endedAt) return;
+  session.status = status;
+  session.endedAt = new Date().toISOString();
+  if (session.progressUnlisten) {
+    session.progressUnlisten();
+    session.progressUnlisten = null;
+  }
+  recordSessionHistory(session);
+  renderSessionTabs();
+  if (session.id === activeSessionId) renderActiveSession();
+}
+
+function closeSessionTab(id) {
+  const session = sessions.get(id);
+  if (session && session.progressUnlisten) session.progressUnlisten();
+  sessions.delete(id);
+  if (activeSessionId === id) {
+    setActiveSession(null);
+  } else {
+    renderSessionTabs();
+  }
+}
+
+const SESSION_STATUS_ICON = {
+  connecting: "icon-wifi",
+  active: "icon-send",
+  reviewing: "icon-shield-alert",
+  running: "icon-play",
+  done: "icon-check",
+  error: "icon-circle-x",
+};
+
+function renderSessionTabs() {
+  const bar = $("session-tabs-bar");
+  const list = $("session-tabs-list");
+  bar.classList.toggle("hidden", sessions.size === 0);
+  list.innerHTML = "";
+  for (const session of sessions.values()) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "session-tab-btn" + (session.id === activeSessionId ? " active" : "");
+    btn.dataset.sessionId = session.id;
+    const kindIcon = session.kind === "send" ? "icon-send" : "icon-download";
+    const statusIcon = SESSION_STATUS_ICON[session.status] || "icon-wifi";
+    btn.innerHTML = `
+      <svg class="icon"><use href="#${kindIcon}"></use></svg>
+      <span class="session-tab-title">${escapeHtml(session.title)}</span>
+      <svg class="icon session-tab-status session-tab-status-${session.status}"><use href="#${statusIcon}"></use></svg>
+      <span class="session-tab-close" data-close-session="${session.id}" title="Close tab">
+        <svg class="icon"><use href="#icon-x"></use></svg>
+      </span>
+    `;
+    list.appendChild(btn);
+  }
+}
+
+$("session-tabs-list").addEventListener("click", (e) => {
+  const closeTarget = e.target.closest("[data-close-session]");
+  if (closeTarget) {
+    closeSessionTab(closeTarget.dataset.closeSession);
+    return;
+  }
+  const tabBtn = e.target.closest(".session-tab-btn");
+  if (tabBtn) setActiveSession(tabBtn.dataset.sessionId);
+});
+
+/// The single entry point for "which session's data is currently on
+/// screen." `null` means no session selected - the plain Send/Receive
+/// compose UI (start-send-wizard-btn / the receive-idle form) is what
+/// shows in that case, exactly as it always has.
+function setActiveSession(id) {
+  activeSessionId = id;
+  renderSessionTabs();
+  renderActiveSession();
+}
+
+function renderActiveSession() {
+  const session = activeSession();
+  const viewport = $("session-detail-viewport");
+  $("session-detail-popover").classList.add("hidden");
+
+  if (!session) {
+    viewport.classList.add("hidden");
+    return;
+  }
+  viewport.classList.remove("hidden");
+  $("session-detail-title").textContent = session.title;
+  const statusText = {
+    connecting: "Connecting…",
+    active: "Active",
+    reviewing: "Awaiting review",
+    running: "Running",
+    done: "Done",
+    error: "Error",
+  }[session.status] || session.status;
+  $("session-detail-status").textContent = statusText;
+
+  $("session-send-view").classList.toggle("hidden", session.kind !== "send");
+  $("session-receive-view").classList.toggle("hidden", session.kind !== "receive");
+
+  if (session.kind === "send") {
+    renderSendSessionDetail(session);
+  } else {
+    renderReceiveSessionDetail(session);
+  }
+}
+
+$("session-detail-close-btn").addEventListener("click", () => {
+  if (activeSessionId) closeSessionTab(activeSessionId);
+});
+
+// ---------- round 29 goal B3: per-session detail popover ----------
+$("session-detail-info-btn").addEventListener("click", async () => {
+  const session = activeSession();
+  const popover = $("session-detail-popover");
+  if (!session) return;
+  popover.classList.toggle("hidden");
+  if (popover.classList.contains("hidden")) return;
+
+  const peopleWrap = $("session-detail-people-wrap");
+  const foldersWrap = $("session-detail-folders-wrap");
+  const dbWrap = $("session-detail-db-wrap");
+  peopleWrap.classList.add("hidden");
+  foldersWrap.classList.add("hidden");
+  dbWrap.classList.add("hidden");
+
+  if (session.kind === "send") {
+    // Connected people: session.id (== info.room_id for a normal send - see
+    // its own creation site's comment) is the peer_id the backend roster
+    // already keys on, *not* the user-facing session.roomCode - filter the
+    // full roster down to just this one rather than adding a new,
+    // session-scoped backend command for what's already exposed. A Cloud
+    // drop session has no roster entry here at all (it uses a separate,
+    // per-round-23 map) - this simply (and correctly) finds nothing for it.
+    try {
+      const roster = await invoke("list_connected_receivers");
+      const mine = roster.filter((r) => r.peer_id === session.id);
+      if (mine.length > 0) {
+        peopleWrap.classList.remove("hidden");
+        $("session-detail-people-list").innerHTML = mine
+          .map((r) => `<li><span class="mono">${escapeHtml(r.peer_id)}</span> <span class="hint-inline">connected ${escapeHtml(r.connected_at)}</span></li>`)
+          .join("");
+      }
+    } catch (err) {
+      console.error("list_connected_receivers failed:", err);
+    }
+
+    if (session.folders.length > 0) {
+      foldersWrap.classList.remove("hidden");
+      $("session-detail-folders-list").innerHTML = session.folders
+        .map((f) => `<li>${escapeHtml(wizFolderLabel(f.path))}${f.dump ? ` <span class="hint-inline">(${escapeHtml(f.dump.engine)}, schema ${escapeHtml(f.dump.schema)})</span>` : ""}</li>`)
+        .join("");
+    }
+    const dbFolders = session.folders.filter((f) => f.dump);
+    if (dbFolders.length > 0) {
+      dbWrap.classList.remove("hidden");
+      $("session-detail-db-list").innerHTML = dbFolders
+        .map((f) => `<li>${escapeHtml(wizFolderLabel(f.path))}: <strong>${escapeHtml(f.dump.engine)}</strong>, schema <span class="mono">${escapeHtml(f.dump.schema)}</span></li>`)
+        .join("");
+    }
+  } else {
+    if (session.manifest) {
+      foldersWrap.classList.remove("hidden");
+      const folderNames = (session.manifest.folders && session.manifest.folders.length > 0)
+        ? session.manifest.folders.map((f) => f.path || f)
+        : [session.manifest.project_name];
+      $("session-detail-folders-list").innerHTML = folderNames.map((f) => `<li>${escapeHtml(String(f))}</li>`).join("");
+
+      const dumps = session.manifest.database_dumps || [];
+      if (dumps.length > 0) {
+        dbWrap.classList.remove("hidden");
+        $("session-detail-db-list").innerHTML = dumps
+          .map((d) => `<li><strong>${escapeHtml(d.engine || "mysql")}</strong>, schema <span class="mono">${escapeHtml(d.schema)}</span></li>`)
+          .join("");
+      }
+    }
+  }
+
+  const anyShown = !peopleWrap.classList.contains("hidden") || !foldersWrap.classList.contains("hidden") || !dbWrap.classList.contains("hidden");
+  $("session-detail-empty").classList.toggle("hidden", anyShown);
 });
 
 // ---------- send: round 17/22 database-source wizard ----------
@@ -1041,14 +1410,6 @@ $("wiz-ready-back-btn").addEventListener("click", () => {
   advanceDbWizard();
 });
 
-let unlistenSendProgress = null;
-let codeExpiryInterval = null;
-// Round 24: the room code from the send session currently on screen - set
-// once, right after start_send_session returns, and read by both the
-// "Copy code" and "Copy link" buttons below. Not persisted anywhere; a new
-// send session (or the wizard resetting) simply overwrites it.
-let currentRoomCode = null;
-
 // Round 24: where the magic-link fallback page (web/) is actually hosted -
 // see .github/workflows/pages.yml and the README's "Magic link" section
 // for how it gets there and what one-time manual repo setting this URL
@@ -1060,35 +1421,55 @@ function buildMagicLink(roomCode) {
   return `${MAGIC_LINK_BASE_URL}?code=${encodeURIComponent(roomCode)}`;
 }
 
-// Visible countdown instead of a silent background timer (round 12) - the
-// room code is only good until the sender's connect_as_sender call (started
-// right after this, by share_snapshot below) gives up waiting for a peer.
-// See commands::SendSessionInfo's code_expires_in_seconds doc comment.
-function startCodeExpiryCountdown(totalSeconds) {
-  clearInterval(codeExpiryInterval);
+// Round 29: was a single `codeExpiryInterval` tied to "the one send on
+// screen" (round 12). Now a session's own `codeExpiresAt` (an absolute
+// timestamp, set once when its room code is issued) is the source of
+// truth, and this one interval - running for the app's whole lifetime,
+// not per-session - just re-renders whichever session happens to be
+// active right now. Cheap: it's a no-op unless the active session is a
+// send still waiting on a peer.
+function renderSendCodeExpiry(session) {
   const el = $("send-code-expiry");
-  let remaining = totalSeconds;
-  const render = () => {
-    if (remaining <= 0) {
-      el.textContent = "Code expired — click Send again for a new one.";
-      el.className = "hint-inline error-inline";
-      clearInterval(codeExpiryInterval);
-      return;
-    }
+  if (!session.roomCode || !session.codeExpiresAt) {
+    el.textContent = "";
+    return;
+  }
+  const remaining = Math.round((session.codeExpiresAt - Date.now()) / 1000);
+  if (remaining <= 0) {
+    el.textContent = "Code expired — click Send again for a new one.";
+    el.className = "hint-inline error-inline";
+  } else {
     const m = Math.floor(remaining / 60);
     const s = remaining % 60;
     el.textContent = `Expires in ${m}:${String(s).padStart(2, "0")} — share it before then.`;
     el.className = "hint-inline";
-  };
-  render();
-  codeExpiryInterval = setInterval(() => {
-    remaining -= 1;
-    render();
-  }, 1000);
+  }
 }
-function stopCodeExpiryCountdown() {
-  clearInterval(codeExpiryInterval);
-  $("send-code-expiry").textContent = "";
+setInterval(() => {
+  const session = activeSession();
+  if (session && session.kind === "send") renderSendCodeExpiry(session);
+}, 1000);
+
+// Round 29 goal B1: paints the shared send-detail DOM from one session
+// object - called whenever that session is the one currently selected
+// (right after creating/updating it, and from setActiveSession's own
+// renderActiveSession). Every other session's data stays untouched in its
+// own object until it's selected.
+function renderSendSessionDetail(session) {
+  $("send-code-wrap").classList.toggle("hidden", !session.roomCode);
+  $("send-room-code-display").textContent = session.roomCode || "";
+  renderSendCodeExpiry(session);
+
+  const showProgress = !session.cloudDrop && (session.status === "active" || (session.status === "done" && session.progressTotal > 0));
+  $("send-progress-wrap").classList.toggle("hidden", !showProgress);
+  if (showProgress) {
+    setProgress("send-progress-bar", session.progressTotal ? (session.progressBytes / session.progressTotal) * 100 : 0);
+    $("send-progress-label").textContent =
+      session.status === "done" ? "Sent." : `Sending… ${formatBytes(session.progressBytes)} / ${formatBytes(session.progressTotal)}`;
+  }
+
+  $("send-result").textContent = session.resultText || "";
+  $("send-error").textContent = session.errorText || "";
 }
 
 // Round 24: distinct from each other on purpose - a teammate who already
@@ -1106,10 +1487,12 @@ async function copyToClipboard(text, statusIfOk) {
   }
 }
 $("copy-code-btn").addEventListener("click", () => {
-  if (currentRoomCode) copyToClipboard(currentRoomCode, "Code copied.");
+  const roomCode = activeSession()?.roomCode;
+  if (roomCode) copyToClipboard(roomCode, "Code copied.");
 });
 $("copy-link-btn").addEventListener("click", () => {
-  if (currentRoomCode) copyToClipboard(buildMagicLink(currentRoomCode), "Link copied.");
+  const roomCode = activeSession()?.roomCode;
+  if (roomCode) copyToClipboard(buildMagicLink(roomCode), "Link copied.");
 });
 
 // Resets all wizard state, for the next send after this one finishes (or
@@ -1155,15 +1538,19 @@ function retentionChoiceDto() {
   return { kind: "deleteAfterDownload" };
 }
 
+// Round 29 goal A2/B1: every click creates its own session object instead
+// of overwriting one shared set of globals/DOM - this is the actual fix for
+// "starting a second, different send while one is already active doesn't
+// work" (see tests/concurrent_multi_session_test.rs for the backend-side
+// proof this was always safe to do). The button is only disabled for the
+// brief `start_send_session`/`start_cloud_drop_session` round trip; once a
+// session exists it's freed again, so a second Send click can start a
+// genuinely concurrent session while the first's transfer is still running.
 $("send-btn").addEventListener("click", async () => {
-  $("send-error").textContent = "";
   $("wiz-send-error").textContent = "";
-  $("send-result").textContent = "";
-  $("send-code-wrap").classList.add("hidden");
-  stopCodeExpiryCountdown();
 
   if (wizardFolders.length === 0) {
-    $("send-error").textContent = "Select at least one project folder.";
+    $("wiz-send-error").textContent = "Select at least one project folder.";
     return;
   }
 
@@ -1174,9 +1561,17 @@ $("send-btn").addEventListener("click", async () => {
   const mode = wizRelayMode();
   const url = wizRelayUrl();
   if (mode === "remote" && !url) {
-    $("send-error").textContent = "Remote relay URL is required for Remote relay mode.";
+    $("wiz-send-error").textContent = "Remote relay URL is required for Remote relay mode.";
     return;
   }
+
+  const folderLabels = wizardFolders.map((f) => wizFolderLabel(f.path));
+  const sessionFolders = wizardFolders.map((f) => ({ path: f.path, dump: f.dump ? { schema: f.dump.schema, engine: f.dump.engine } : null }));
+  // resetSendWizard() below reassigns the module-level `wizardFolders` to a
+  // fresh empty array (so the wizard can be reopened for another session
+  // right away) - this keeps a reference to the array actually used by
+  // *this* send, which buildWizardFoldersPayload still needs afterward.
+  const foldersForPayload = wizardFolders;
 
   $("send-btn").disabled = true;
 
@@ -1184,35 +1579,31 @@ $("send-btn").addEventListener("click", async () => {
   // commands::start_cloud_drop_session's doc comment on why only
   // wizardFolders[0] - same documented boundary push_update/pull-requests
   // already have for a wizard-originated send) and hosts the same kind of
-  // room code, but never opens a bulk-transfer channel - the "Send" click
-  // just waits for a receiver to request access, exactly like the
-  // room-code-then-wait UX below already shows.
+  // room code, but never opens a bulk-transfer channel - the whole thing
+  // resolves once the upload is done, there's no separate progress phase.
   if ($("cloud-drop-toggle").checked) {
     try {
       const retention = retentionChoiceDto();
       const info = await invoke("start_cloud_drop_session", {
         mode,
         relayUrl: mode === "remote" ? url : null,
-        projectPath: wizardFolders[0].path,
+        projectPath: foldersForPayload[0].path,
         retention,
       });
       // Round 20 goal 4: same reason the non-Cloud-drop path below closes
-      // the modal on success - the room code renders on the main Send tab
-      // page, behind the modal's backdrop, and would be invisible if the
-      // wizard stayed open. The code is a real, paste-able room code here
-      // too (request_cloud_drop_access decodes it exactly like a normal
-      // receive), so round 24's Copy code/Copy link buttons work on it the
-      // same way - currentRoomCode is what they read from.
+      // the modal on success - the room code renders in the session tab's
+      // detail viewport, behind the modal's backdrop, and would be
+      // invisible if the wizard stayed open.
       closeSendWizard();
-      currentRoomCode = info.room_code;
-      $("send-room-code-display").textContent = info.room_code;
-      $("copy-status").textContent = "";
-      $("send-code-wrap").classList.remove("hidden");
-      startCodeExpiryCountdown(info.code_expires_in_seconds);
-      $("send-result").textContent = `Uploaded to Drive as ${info.file_id}. Waiting for the receiver to request access…`;
+      const session = newSession("send", info.room_code, folderLabels[0]);
+      session.roomCode = info.room_code;
+      session.cloudDrop = true;
+      session.folders = [sessionFolders[0]];
+      session.resultText = `Uploaded to Drive as ${info.file_id}. Waiting for the receiver to request access…`;
+      addSession(session);
+      endSession(session, "done");
       resetSendWizard();
     } catch (err) {
-      $("send-error").textContent = String(err);
       $("wiz-send-error").textContent = String(err);
     } finally {
       $("send-btn").disabled = false;
@@ -1220,37 +1611,50 @@ $("send-btn").addEventListener("click", async () => {
     return;
   }
 
+  let session = null;
   try {
     // "local": hosts an embedded relay + derives a LAN-IP-encoded room code
     // (unchanged round-8 behavior). "remote": a relay is already running
     // elsewhere (see README) - only a bare room id is generated, and it IS
     // the whole paste-able code, since both apps already share the relay URL.
     const info = await invoke("start_send_session", { mode, relayUrl: mode === "remote" ? url : null });
-    const roomId = info.room_id;
-    const signalingUrl = info.signaling_url;
     // Round 20 goal 4: the modal's job ends once there's a real room code
-    // to show - close it now so that code/the live progress below render
-    // on the main Send tab page, exactly where they always have.
+    // to show - close it now so the code/progress below render in the
+    // session tab, exactly where they always have.
     closeSendWizard();
-    currentRoomCode = info.room_code;
-    $("send-room-code-display").textContent = info.room_code;
-    $("copy-status").textContent = "";
-    $("send-code-wrap").classList.remove("hidden");
-    startCodeExpiryCountdown(info.code_expires_in_seconds);
 
-    $("send-progress-wrap").classList.remove("hidden");
-    setProgress("send-progress-bar", 0);
-    $("send-progress-label").textContent = "Connecting to peer…";
+    // Round 29: keyed by info.room_id, not info.room_code - the backend's
+    // own share_snapshot_wizard/share_snapshot take a `room_code` *parameter*
+    // that's actually always called with room_id (see start_send_session's
+    // own doc comment: "room_code is just what's shown to the user... calls
+    // share_snapshot(..., room_id, ...)"), and that's the value baked into
+    // both the "share-progress" event's session_id and connected_receivers'
+    // peer_id. info.room_code stays around only for session.roomCode, the
+    // separate, purely-cosmetic display/copy value.
+    session = newSession("send", info.room_id, folderLabels.join(", "));
+    session.roomCode = info.room_code;
+    session.folders = sessionFolders;
+    session.codeExpiresAt = Date.now() + info.code_expires_in_seconds * 1000;
+    addSession(session);
+    resetSendWizard();
+    $("send-btn").disabled = false; // free to start another send now - this one keeps running in its own tab
 
-    if (unlistenSendProgress) unlistenSendProgress();
-    unlistenSendProgress = await listen("share-progress", (evt) => {
-      // First progress event means a peer actually connected and the
-      // transfer started - the code did its job, no need to keep
-      // frightening the user with a ticking clock.
-      stopCodeExpiryCountdown();
-      const { bytes, total } = evt.payload;
-      setProgress("send-progress-bar", total ? (bytes / total) * 100 : 0);
-      $("send-progress-label").textContent = `Sending… ${formatBytes(bytes)} / ${formatBytes(total)}`;
+    // Round 29: filtered by session_id (now threaded through every
+    // Progress emit in commands.rs) so concurrent sends' identically-named
+    // "share-progress" events never cross-update the wrong session.
+    session.progressUnlisten = await listen("share-progress", (evt) => {
+      if (evt.payload.session_id !== session.id) return;
+      const wasConnecting = session.status === "connecting";
+      session.status = "active";
+      session.codeExpiresAt = null; // a peer connected - the code did its job
+      session.progressBytes = evt.payload.bytes;
+      session.progressTotal = evt.payload.total;
+      if (session.id !== activeSessionId) return;
+      // Full header+body re-render only for the one-time "connecting" ->
+      // "active" flip (updates the tab's status text/icon); every later
+      // tick on an already-active session only needs the progress bar.
+      if (wasConnecting) renderActiveSession();
+      else renderSendSessionDetail(session);
     });
 
     // Round 22 found `engine` silently dropped here; round 25 found
@@ -1261,27 +1665,27 @@ $("send-btn").addEventListener("click", async () => {
     // Rust test can reach, since every one of them calls
     // commands::share_snapshot_wizard directly - finally has a real,
     // automated regression test (test-wizard-payload.js).
-    const folders = buildWizardFoldersPayload(wizardFolders);
+    const folders = buildWizardFoldersPayload(foldersForPayload);
     const snapshotId = await invoke("share_snapshot_wizard", {
       folders,
-      roomCode: roomId,
-      signalingUrl,
+      roomCode: info.room_id,
+      signalingUrl: info.signaling_url,
     });
-    $("send-progress-label").textContent = "Sent.";
-    $("send-result").textContent = `Sent as ${snapshotId}`;
+    session.resultText = `Sent as ${snapshotId}`;
+    endSession(session, "done");
     refreshReceivers(); // this send may have just added a new roster entry
-    resetSendWizard();
   } catch (err) {
-    // Round 20 goal 4: the wizard modal only closes on success (right before
-    // the room code is shown), so a failure here can happen while it's still
-    // open - #send-error lives on the main Send tab page, behind the modal's
-    // backdrop, and would be invisible at exactly the moment it matters.
-    // Writing to both costs nothing (the hidden one is simply never seen).
-    $("send-error").textContent = String(err);
-    $("wiz-send-error").textContent = String(err);
-    stopCodeExpiryCountdown();
-  } finally {
-    $("send-btn").disabled = false;
+    if (session) {
+      // endSession() itself refreshes the active view if this session is
+      // still the one on screen.
+      session.errorText = String(err);
+      endSession(session, "error");
+    } else {
+      // Failed before a session even existed (start_send_session itself) -
+      // the wizard is still open, so the error belongs there.
+      $("wiz-send-error").textContent = String(err);
+      $("send-btn").disabled = false;
+    }
   }
 });
 
@@ -1345,92 +1749,60 @@ $("receivers-list").addEventListener("click", async (e) => {
 });
 
 // ---------- receive ----------
-let unlistenReceiveProgress = null;
-let currentSnapshotId = null;
-let currentSenderPubkeyHex = null;
-let currentSessionId = null;
+// Round 29: the receiver-side counterpart to send-btn's session model
+// above. `lastReceiveSessionId` exists only for `snapshot-updated` (a
+// pushed update arriving on the one background `state.outgoing_conn` -
+// still a real, documented singleton on the Rust side, see
+// commands.rs::listen_for_pushed_updates's doc comment; this round's fix
+// is scoped to concurrent *sends*, per the actual bug report) - it has no
+// room-code/snapshot-id of its own to key off, so this just remembers
+// which receive tab most recently connected to a sender, matching the
+// backend's own single-upstream-connection model rather than inventing a
+// multi-upstream one the backend doesn't have.
+let lastReceiveSessionId = null;
 
-$("cloud-drop-receive-toggle").addEventListener("change", () => {
-  $("cloud-drop-receive-hint").classList.toggle("hidden", !$("cloud-drop-receive-toggle").checked);
-});
+function applyReviewInfoToSession(session, info) {
+  session.snapshotId = info.snapshot_id;
+  session.senderPubkeyHex = info.sender_pubkey_hex;
+  session.manifest = info.manifest;
+  session.diff = info.diff;
+  session.recognizedPeer = info.recognized_peer;
+  session.title = info.manifest.project_name;
+  session.status = "reviewing";
+  session.errorText = "";
+}
 
-$("receive-btn").addEventListener("click", async () => {
-  const roomCode = $("receive-room-code").value.trim();
-  $("receive-error").textContent = "";
-  if (!roomCode) {
-    $("receive-error").textContent = "Room code is required.";
-    return;
+// Round 29 goal B1: paints the shared receive-detail DOM from one session
+// object, the receive-side counterpart to renderSendSessionDetail. Ephemeral
+// per-button status text (ask-update/reject/run/stop) is always cleared on
+// entry - it belongs to whichever DOM node is on screen right now, and must
+// never bleed a different session's leftover text onto this one.
+function renderReceiveSessionDetail(session) {
+  $("ask-update-status").textContent = "";
+  $("reject-error").textContent = "";
+  $("stop-error").textContent = "";
+  $("run-btn").disabled = session.busy;
+  $("reject-btn").disabled = session.busy;
+  $("ask-update-btn").disabled = session.busy;
+  $("stop-btn").disabled = session.busy;
+
+  const showProgress = session.status === "active";
+  $("receive-progress-wrap").classList.toggle("hidden", !showProgress);
+  if (showProgress) {
+    setProgress("receive-progress-bar", session.progressTotal ? (session.progressBytes / session.progressTotal) * 100 : 0);
+    $("receive-progress-label").textContent = `Receiving… ${formatBytes(session.progressBytes)} / ${formatBytes(session.progressTotal)}`;
   }
+  $("receive-error").textContent = session.status === "error" ? session.errorText : "";
 
-  // Round 25 fix: a receiver never picks a connection mode - mode
-  // selection is a *sender* decision (Settings' relayMode()/relayUrl()
-  // exist for Send's own remote-mode default, and the wizard has its own
-  // separate choice on top of that; neither describes what a given pasted
-  // code actually needs). decode_room_code itself now figures that out
-  // from the code's own shape - see its doc comment. relayUrl() is passed
-  // through unconditionally: harmless if the code turns out to be
-  // local-shaped (never consulted in that case), and exactly what's
-  // needed if it turns out to be remote-shaped, without a blocking
-  // upfront guess about which one it'll be.
-  const url = relayUrl();
+  $("review-panel").classList.toggle("hidden", session.status !== "reviewing");
+  $("session-panel").classList.toggle("hidden", session.status !== "running");
 
-  // Round 23: waits for the sender's Accept/Reject over the control
-  // channel, then downloads straight from Drive - no `receive-progress`
-  // events fire for this path (there's no P2P bulk transfer to report
-  // progress on), so this skips straight to renderReview on success.
-  if ($("cloud-drop-receive-toggle").checked) {
-    $("receive-btn").disabled = true;
-    try {
-      const outcome = await invoke("request_cloud_drop_access", { code: roomCode, relayUrl: url || null });
-      if (!outcome.accepted) {
-        $("receive-error").textContent = "The sender declined this request.";
-      } else {
-        renderReview(outcome.info);
-      }
-    } catch (err) {
-      $("receive-error").textContent = String(err);
-    } finally {
-      $("receive-btn").disabled = false;
-    }
-    return;
-  }
+  if (session.status === "reviewing") renderReviewPanel(session);
+  if (session.status === "running") renderRunningPanel(session);
+}
 
-  $("receive-btn").disabled = true;
-  $("receive-progress-wrap").classList.remove("hidden");
-  setProgress("receive-progress-bar", 0);
-  $("receive-progress-label").textContent = "Waiting for sender…";
-
-  if (unlistenReceiveProgress) unlistenReceiveProgress();
-  unlistenReceiveProgress = await listen("receive-progress", (evt) => {
-    const { bytes, total } = evt.payload;
-    setProgress("receive-progress-bar", total ? (bytes / total) * 100 : 0);
-    $("receive-progress-label").textContent = `Receiving… ${formatBytes(bytes)} / ${formatBytes(total)}`;
-  });
-
-  try {
-    const decoded = await invoke("decode_room_code", { code: roomCode, relayUrl: url || null });
-    const roomId = decoded.room_id;
-    const signalingUrl = decoded.signaling_url;
-
-    // This only verifies + diffs. Nothing from the snapshot executes until
-    // the user reviews it below and clicks Run.
-    const info = await invoke("receive_snapshot", {
-      roomCode: roomId,
-      signalingUrl,
-    });
-    renderReview(info);
-  } catch (err) {
-    $("receive-error").textContent = String(err);
-  } finally {
-    $("receive-btn").disabled = false;
-  }
-});
-
-function renderReview(info) {
-  currentSnapshotId = info.snapshot_id;
-  currentSenderPubkeyHex = info.sender_pubkey_hex;
-  const m = info.manifest;
-
+function renderReviewPanel(session) {
+  const m = session.manifest;
   $("m-project").textContent = m.project_name;
   $("m-commit").textContent = m.git_commit;
   $("m-parent").textContent = m.git_parent_commit || "(none — initial snapshot)";
@@ -1441,17 +1813,17 @@ function renderReview(info) {
   $("peer-remember-done").classList.add("hidden");
   $("peer-remember-error").textContent = "";
   $("peer-remember-name").value = "";
-  if (info.recognized_peer) {
+  if (session.recognizedPeer) {
     $("peer-recognized").classList.remove("hidden");
     $("peer-new").classList.add("hidden");
-    $("peer-recognized-name").textContent = info.recognized_peer.name;
-    $("peer-recognized-since").textContent = `(first seen ${info.recognized_peer.first_seen})`;
+    $("peer-recognized-name").textContent = session.recognizedPeer.name;
+    $("peer-recognized-since").textContent = `(first seen ${session.recognizedPeer.first_seen})`;
   } else {
     $("peer-recognized").classList.add("hidden");
     $("peer-new").classList.remove("hidden");
   }
 
-  const diff = info.diff;
+  const diff = session.diff;
   const fileCount = diff.entries.length;
   $("diff-totals").innerHTML =
     `<span class="file-count">${fileCount} file${fileCount === 1 ? "" : "s"} changed</span>` +
@@ -1512,18 +1884,153 @@ function renderReview(info) {
     body.appendChild(details);
   }
 
-  $("receive-idle").classList.add("hidden");
-  $("review-panel").classList.remove("hidden");
-  $("session-panel").classList.add("hidden");
+  // Round 29: restores whatever this session's own in-flight/failed Run
+  // attempt looked like, so switching tabs away mid-Run and back doesn't
+  // lose the log or silently drop the error.
+  $("run-error").textContent = session.runErrorText || "";
+  const showRunProgress = session.runInProgress || !!session.runErrorText;
+  $("run-progress-wrap").classList.toggle("hidden", !showRunProgress);
+  if (showRunProgress) {
+    $("run-log").textContent = session.runLogText || "";
+    document.querySelector("#run-progress-wrap .spinner")?.classList.toggle("hidden", !session.runInProgress);
+    $("run-progress-label").textContent = session.runInProgress ? "Starting containers…" : "Failed — see details below.";
+  }
 }
+
+function renderRunningPanel(session) {
+  $("s-project").textContent = session.manifest.project_name;
+  const cacheEl = $("s-cache");
+  if (session.dbCacheHit) {
+    cacheEl.textContent = "Hit — reused seeded volume (fast start)";
+    cacheEl.className = "v cache-hit";
+  } else {
+    cacheEl.textContent = "Miss — cold start, seeded from scratch";
+    cacheEl.className = "v cache-cold";
+  }
+
+  const list = $("s-ports");
+  list.innerHTML = "";
+  for (const [service, ports] of session.servicePorts) {
+    const hostPort = ports.split(":")[0];
+    const li = document.createElement("li");
+    li.innerHTML = `${escapeHtml(service)} — <a href="#" data-url="http://localhost:${hostPort}">http://localhost:${hostPort}</a> (${escapeHtml(ports)})`;
+    list.appendChild(li);
+  }
+}
+
+/// Creates a session straight from an already-resolved IncomingSnapshotInfo -
+/// used by the dev preload shortcut and by a pushed update that arrives with
+/// no known prior session to attach to (e.g. after a restart).
+function startReceiveSessionFromInfo(info) {
+  const session = newSession("receive", info.snapshot_id, info.manifest.project_name);
+  applyReviewInfoToSession(session, info);
+  addSession(session);
+  lastReceiveSessionId = session.id;
+  return session;
+}
+
+$("cloud-drop-receive-toggle").addEventListener("change", () => {
+  $("cloud-drop-receive-hint").classList.toggle("hidden", !$("cloud-drop-receive-toggle").checked);
+});
+
+// Round 29 goal A2/B1: every click gets its own session/tab instead of
+// overwriting one shared set of globals/DOM, the same fix as send-btn
+// above. receive-btn is never disabled across the whole flow - once the
+// room code is typed and cleared, there's nothing left for a second click
+// to race against; two concurrent receives just become two tabs.
+$("receive-btn").addEventListener("click", async () => {
+  const roomCode = $("receive-room-code").value.trim();
+  $("receive-start-error").textContent = "";
+  if (!roomCode) {
+    $("receive-start-error").textContent = "Room code is required.";
+    return;
+  }
+
+  // Round 25 fix: a receiver never picks a connection mode - mode
+  // selection is a *sender* decision (Settings' relayMode()/relayUrl()
+  // exist for Send's own remote-mode default, and the wizard has its own
+  // separate choice on top of that; neither describes what a given pasted
+  // code actually needs). decode_room_code itself now figures that out
+  // from the code's own shape - see its doc comment. relayUrl() is passed
+  // through unconditionally: harmless if the code turns out to be
+  // local-shaped (never consulted in that case), and exactly what's
+  // needed if it turns out to be remote-shaped, without a blocking
+  // upfront guess about which one it'll be.
+  const url = relayUrl();
+
+  // Round 23: waits for the sender's Accept/Reject over the control
+  // channel, then downloads straight from Drive - no `receive-progress`
+  // events fire for this path (there's no P2P bulk transfer to report
+  // progress on). The tab appears immediately (before the sender has even
+  // responded) so this wait doesn't block starting anything else.
+  if ($("cloud-drop-receive-toggle").checked) {
+    const session = newSession("receive", `clouddrop-${roomCode}-${Date.now()}`, "Cloud drop request");
+    addSession(session);
+    $("receive-room-code").value = "";
+    try {
+      const outcome = await invoke("request_cloud_drop_access", { code: roomCode, relayUrl: url || null });
+      if (!outcome.accepted) {
+        session.errorText = "The sender declined this request.";
+        endSession(session, "error");
+      } else {
+        applyReviewInfoToSession(session, outcome.info);
+        renderSessionTabs();
+        if (session.id === activeSessionId) renderActiveSession();
+      }
+    } catch (err) {
+      session.errorText = String(err);
+      endSession(session, "error");
+    }
+    return;
+  }
+
+  let session = null;
+  try {
+    const decoded = await invoke("decode_room_code", { code: roomCode, relayUrl: url || null });
+    session = newSession("receive", decoded.room_id, `Receiving (${roomCode})`);
+    addSession(session);
+    $("receive-room-code").value = "";
+
+    // Round 29: filtered by session_id, same reasoning as share-progress
+    // above - concurrent receives never cross-update each other's tab.
+    session.progressUnlisten = await listen("receive-progress", (evt) => {
+      if (evt.payload.session_id !== session.id) return;
+      const wasConnecting = session.status === "connecting";
+      session.status = "active";
+      session.progressBytes = evt.payload.bytes;
+      session.progressTotal = evt.payload.total;
+      if (session.id !== activeSessionId) return;
+      if (wasConnecting) renderActiveSession();
+      else renderReceiveSessionDetail(session);
+    });
+
+    lastReceiveSessionId = session.id;
+    // This only verifies + diffs. Nothing from the snapshot executes until
+    // the user reviews it below and clicks Run.
+    const info = await invoke("receive_snapshot", { roomCode: decoded.room_id, signalingUrl: decoded.signaling_url });
+    applyReviewInfoToSession(session, info);
+    renderSessionTabs();
+    if (session.id === activeSessionId) renderActiveSession();
+  } catch (err) {
+    if (session) {
+      session.errorText = String(err);
+      endSession(session, "error");
+    } else {
+      // Failed before a session existed (decode_room_code itself) - the
+      // idle form's own error, since there's no tab to attach it to.
+      $("receive-start-error").textContent = String(err);
+    }
+  }
+});
 
 $("peer-remember-btn").addEventListener("click", async () => {
   $("peer-remember-error").textContent = "";
+  const session = activeSession();
   const name = $("peer-remember-name").value.trim();
-  if (!name || !currentSenderPubkeyHex) return;
+  if (!name || !session || !session.senderPubkeyHex) return;
   $("peer-remember-btn").disabled = true;
   try {
-    await invoke("remember_peer", { pubkeyHex: currentSenderPubkeyHex, name });
+    await invoke("remember_peer", { pubkeyHex: session.senderPubkeyHex, name });
     $("peer-remember-done").classList.remove("hidden");
   } catch (err) {
     $("peer-remember-done").classList.add("hidden");
@@ -1537,6 +2044,9 @@ $("ask-update-btn").addEventListener("click", async () => {
   const status = $("ask-update-status");
   status.textContent = "";
   status.className = "hint";
+  const session = activeSession();
+  if (!session) return;
+  session.busy = true;
   $("ask-update-btn").disabled = true;
   try {
     await invoke("send_pull_request");
@@ -1545,6 +2055,7 @@ $("ask-update-btn").addEventListener("click", async () => {
     status.textContent = String(err);
     status.className = "error";
   } finally {
+    session.busy = false;
     $("ask-update-btn").disabled = false;
   }
 });
@@ -1553,23 +2064,20 @@ $("ask-update-btn").addEventListener("click", async () => {
 // it, independent of (and no shortcut past) the Run button's own gating.
 $("reject-btn").addEventListener("click", async () => {
   $("reject-error").textContent = "";
-  if (!currentSnapshotId) return;
+  const session = activeSession();
+  if (!session || !session.snapshotId) return;
+  session.busy = true;
   $("reject-btn").disabled = true;
   try {
-    await invoke("reject_snapshot", { snapshotId: currentSnapshotId });
-    currentSnapshotId = null;
-    currentSenderPubkeyHex = null;
-    $("review-panel").classList.add("hidden");
-    $("receive-idle").classList.remove("hidden");
-    $("receive-progress-wrap").classList.add("hidden");
+    await invoke("reject_snapshot", { snapshotId: session.snapshotId });
+    endSession(session, "done"); // also re-renders the active view
   } catch (err) {
     $("reject-error").textContent = String(err);
   } finally {
+    session.busy = false;
     $("reject-btn").disabled = false;
   }
 });
-
-let unlistenRunProgress = null;
 
 // Round 21: the chevron direction itself communicates expanded/collapsed,
 // same as the label text always did - kept as innerHTML (fixed literals
@@ -1591,11 +2099,16 @@ $("run-details-toggle").addEventListener("click", () => {
 });
 
 $("run-btn").addEventListener("click", async () => {
-  $("run-error").textContent = "";
+  const session = activeSession();
   const workDir = $("work-dir").value.trim();
-  if (!currentSnapshotId || !workDir) return;
+  if (!session || !session.snapshotId || !workDir) return;
 
+  session.busy = true;
+  session.runInProgress = true;
+  session.runLogText = "";
+  session.runErrorText = "";
   $("run-btn").disabled = true;
+  $("run-error").textContent = "";
   $("run-progress-wrap").classList.remove("hidden");
   $("run-progress-label").textContent = "Starting containers…";
   document.querySelector("#run-progress-wrap .spinner")?.classList.remove("hidden");
@@ -1606,87 +2119,64 @@ $("run-btn").addEventListener("click", async () => {
   setDetailsToggleExpanded(false);
 
   // Registered before invoke so no early line from the backend's tailer is
-  // missed.
-  if (unlistenRunProgress) unlistenRunProgress();
-  unlistenRunProgress = await listen("run-progress", (evt) => {
+  // missed. Round 29: keyed by snapshot_id (see
+  // commands::tail_provisioning_log) - filtered the same way as the other
+  // progress events, though note the underlying provisioning log file
+  // itself is still one shared file across all Run attempts (documented,
+  // out-of-scope limitation - see commands.rs).
+  const unlistenRunProgress = await listen("run-progress", (evt) => {
+    if (evt.payload.session_id !== session.snapshotId) return;
+    session.runLogText += (session.runLogText ? "\n" : "") + evt.payload.line;
+    if (session.id !== activeSessionId) return;
     const log = $("run-log");
-    log.textContent += (log.textContent ? "\n" : "") + evt.payload.line;
+    log.textContent = session.runLogText;
     log.scrollTop = log.scrollHeight;
   });
 
   try {
     // The one call in this app that executes received code — only reachable
     // from this explicit click, after the diff above has been shown.
-    const session = await invoke("run_snapshot", {
-      snapshotId: currentSnapshotId,
-      workDir,
-    });
-    renderSession(session);
-    // Only hide the progress/details panel on success - renderSession has
-    // already moved the user on to the running-session screen, so there's
-    // nothing left in it worth keeping visible.
-    $("run-progress-wrap").classList.add("hidden");
+    const runInfo = await invoke("run_snapshot", { snapshotId: session.snapshotId, workDir });
+    session.runningSessionId = runInfo.session_id;
+    session.servicePorts = runInfo.service_ports;
+    session.dbCacheHit = runInfo.db_cache_hit;
+    session.status = "running";
+    session.runInProgress = false;
+    recordSessionHistory(session);
+    renderSessionTabs();
+    if (session.id === activeSessionId) renderActiveSession();
   } catch (err) {
-    $("run-error").textContent = String(err);
-    $("run-progress-label").textContent = "Failed — see details below.";
-    document.querySelector("#run-progress-wrap .spinner")?.classList.add("hidden");
-    // Round 12: deliberately does NOT hide #run-progress-wrap here. This
-    // used to happen unconditionally in `finally` below, which meant the
-    // one moment the streamed log content was most useful - right after a
-    // real failure, when it likely explains why - it vanished instantly,
-    // leaving only the bare error string. Left visible (spinner included,
-    // which just stops looking meaningful - a cosmetic wart, not worth
-    // extra code to also swap it for a static icon) until the next Run
+    session.runInProgress = false;
+    session.runErrorText = String(err);
+    if (session.id === activeSessionId) {
+      $("run-error").textContent = session.runErrorText;
+      $("run-progress-label").textContent = "Failed — see details below.";
+      document.querySelector("#run-progress-wrap .spinner")?.classList.add("hidden");
+    }
+    // Round 12: deliberately does NOT hide #run-progress-wrap here - the
+    // streamed log content is most useful right after a real failure,
+    // since it likely explains why. Left visible until the next Run
     // attempt clears it at the top of this handler.
   } finally {
-    $("run-btn").disabled = false;
-    if (unlistenRunProgress) {
-      unlistenRunProgress();
-      unlistenRunProgress = null;
-    }
+    session.busy = false;
+    unlistenRunProgress();
+    if (session.id === activeSessionId) $("run-btn").disabled = false;
   }
 });
 
-function renderSession(session) {
-  currentSessionId = session.session_id;
-  $("s-project").textContent = session.project_name;
-
-  const cacheEl = $("s-cache");
-  if (session.db_cache_hit) {
-    cacheEl.textContent = "Hit — reused seeded volume (fast start)";
-    cacheEl.className = "v cache-hit";
-  } else {
-    cacheEl.textContent = "Miss — cold start, seeded from scratch";
-    cacheEl.className = "v cache-cold";
-  }
-
-  const list = $("s-ports");
-  list.innerHTML = "";
-  for (const [service, ports] of session.service_ports) {
-    const hostPort = ports.split(":")[0];
-    const li = document.createElement("li");
-    li.innerHTML = `${escapeHtml(service)} — <a href="#" data-url="http://localhost:${hostPort}">http://localhost:${hostPort}</a> (${escapeHtml(ports)})`;
-    list.appendChild(li);
-  }
-
-  $("review-panel").classList.add("hidden");
-  $("session-panel").classList.remove("hidden");
-}
-
 $("stop-btn").addEventListener("click", async () => {
   $("stop-error").textContent = "";
-  if (!currentSessionId) return;
+  const session = activeSession();
+  if (!session || !session.runningSessionId) return;
+  session.busy = true;
   $("stop-btn").disabled = true;
   try {
-    await invoke("stop_session", { sessionId: currentSessionId });
-    currentSessionId = null;
-    currentSnapshotId = null;
-    $("session-panel").classList.add("hidden");
-    $("receive-idle").classList.remove("hidden");
-    $("receive-progress-wrap").classList.add("hidden");
+    await invoke("stop_session", { sessionId: session.runningSessionId });
+    endSession(session, "done"); // also re-renders the active view
   } catch (err) {
     $("stop-error").textContent = String(err);
   } finally {
+    session.busy = false;
     $("stop-btn").disabled = false;
   }
 });

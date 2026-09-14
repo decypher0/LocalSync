@@ -638,4 +638,87 @@ button:disabled { opacity: 0.5; cursor: default; }
    panel) - a hairline border alone reads flat; a soft shadow is what
    actually separates a surface from the page behind it at a glance. */
 .manifest-card { box-shadow: var(--shadow-sm); }
+
+/* ---- Round 29 goal B1: session tab strip - a terminal-multiplexer-style
+   row of tabs, one per active session, sitting above the Send/Receive nav
+   tabs. Same tokens/shapes as .tab-btn above rather than a parallel visual
+   language, but visually subordinate to it (smaller, on a card background)
+   since these are transient, closable sessions rather than the two fixed
+   top-level modes. ---- */
+.session-tabs-bar {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.session-tabs-list { display: flex; gap: var(--space-2); }
+.session-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.session-tab-btn:hover { background: var(--card-hover); border-color: var(--border-strong); }
+.session-tab-btn.active { border-color: var(--accent); background: var(--card-hover); font-weight: var(--weight-semibold); }
+.session-tab-title { max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+.session-tab-status { width: 14px; height: 14px; flex-shrink: 0; }
+.session-tab-status-error { color: var(--danger-text); }
+.session-tab-status-done { color: var(--added-text); }
+.session-tab-status-reviewing,
+.session-tab-status-connecting { color: var(--modified-text); }
+.session-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  color: var(--muted);
+}
+.session-tab-close:hover { background: var(--card-hover); color: var(--fg); }
+.session-tab-close .icon { width: 12px; height: 12px; }
+
+/* ---- Round 29 goal B1/B3: the shared per-session detail viewport, and its
+   "connected people / folders / database" popover. ---- */
+#session-detail-viewport { padding: var(--space-5); max-width: 720px; }
+.session-detail-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  position: relative;
+}
+.session-detail-header h2 { margin: 0; }
+.session-detail-header .inline-row { margin-left: auto; }
+.session-detail-popover {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 10;
+  margin-top: var(--space-2);
+  padding: var(--space-4);
+  min-width: 260px;
+  max-width: 360px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.session-detail-popover h3 { margin-top: 0; }
+.session-detail-popover > div + div { margin-top: var(--space-3); }
+
+/* ---- Round 29 goal B2: session history panel - reuses .settings-panel's
+   own card/border-bottom treatment (it's the same kind of "slides in below
+   the topbar" surface), not a new visual pattern. ---- */
+#session-history-panel { display: flex; flex-direction: column; }
+#session-history-list li { display: flex; align-items: center; gap: var(--space-2); }
 .settings-panel { box-shadow: var(--shadow-sm); }

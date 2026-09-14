@@ -1782,3 +1782,104 @@ client without any client-secret-related error - the exact failure this
 round exists to fix - and continues working across a real token refresh,
 not just the first exchange.
 
+## Round 28+29 addendum: concurrent multi-session fix, tabbed layout, app menu, session history, per-session details
+
+Real testing found that starting a second, different send while one send
+was already active didn't work. Investigated before fixing, not assumed: a
+new test (`tests/concurrent_multi_session_test.rs`) spawns two genuinely
+concurrent `share_snapshot`/`receive_snapshot` pairs via `tokio::spawn`
+*before* awaiting either, then `tokio::join!`s all four - proving the
+Rust/`AppState`/`ls-net` layer (round 11's multi-receiver sessions) already
+supported this correctly. The real bug was 100% in `app.js`'s frontend
+state: a small set of bare module-level variables (`currentRoomCode`,
+`unlistenSendProgress`, `currentSnapshotId`, ...) and shared DOM elements
+that a second send/receive simply overwrote, silently losing the first
+session's own display even though its backend transfer kept running
+untouched underneath. Fixed by giving every session (a send in flight, or a
+receive in flight/held/running) a real object in a `sessions` Map, and
+adding a `session_id` field to the `share-progress`/`receive-progress`/
+`run-progress` events (previously unidentified, which would have made even
+a correct frontend model unable to tell concurrent sessions' events apart).
+On top of that fix: a tab per active session (terminal-multiplexer style), a
+real application menu (Check for updates / Settings / Theme / Session
+history), a session-history panel persisted via the OS app-data directory
+(survives restart, unlike the session tabs themselves), and a per-session
+details popover showing connected people / folders / database info for
+whichever session is selected.
+
+Two narrower, pre-existing limitations were deliberately left as-is this
+round, since the reported bug and this round's own proof test are both
+specifically about the *send* side: `AppState.outgoing_conn` (the
+receiver's single "ask for update" pull-request target) is still a
+singleton, and `ls_containers::ProvisioningLog` is still one shared log
+file across all Run attempts. Both are called out in `commands.rs` and
+`main.rs` comments as known, out-of-scope boundaries, not silently
+unaddressed gaps.
+
+### What's already confirmed, without needing real hardware
+
+- `two_concurrent_sends_different_projects_different_receivers` (new)
+  passes: two different projects, sent concurrently to two different
+  receivers on the same box, each receiver gets the correct project's
+  manifest (never swapped), and `list_connected_receivers` correctly
+  attributes both roster entries.
+- `cargo build --workspace` and `cargo test --workspace` both pass in
+  full (WSL2 - the established authoritative environment for this crate's
+  tests, since its test binaries crash on native Windows for an unrelated,
+  pre-existing reason - see this checklist's own round 26 notes).
+- `session_history.rs`'s 5 unit tests pass: missing-file-is-empty,
+  upsert-adds, upsert-with-same-id-replaces-not-duplicates,
+  different-ids-both-persist, and the 200-entry cap correctly drops the
+  oldest.
+- `web/test-magic-link-logic.js` (24 tests) and
+  `apps/desktop/src/test-wizard-payload.js` (7 tests) both still pass
+  unmodified - this round's frontend changes didn't touch either's own
+  pure-logic code path.
+- `index.html`'s restructuring (moving the send/review/run panels into the
+  new shared session-detail viewport) was checked for balanced, correctly
+  nested tags with a real HTML parser, not just visual inspection.
+
+### What to check on real hardware
+
+1. **The actual reported scenario, for real**: start a send, then - while
+   its room code/progress is still showing - start a second, different
+   send (a different project, to a different or the same receiving
+   machine). Confirm both now genuinely run side by side, each in its own
+   tab, with correct independent progress/room codes - this exact scenario
+   is what failed before this round's fix.
+2. **Tabbed layout, generally**: with 2-3 sessions active at once (a mix of
+   sends and receives), confirm switching tabs shows each session's own
+   correct state (room code, progress, review/run screen) with nothing
+   bleeding from a different tab - including mid-transfer and mid-Run tab
+   switches, and closing a finished session's tab.
+3. **Application menu**: confirm all four items work - Check for updates
+   (opens Settings and runs the same check the button does), Settings
+   (opens the existing panel), Theme → System/Light/Dark (matches the
+   Settings radios exactly, including which one is already selected), and
+   View → Session history.
+4. **Session history persistence**: run a few sends/receives, open Session
+   history from the menu and confirm they're listed, then fully quit and
+   relaunch the app and confirm the same entries are still there - this is
+   the round's own explicit requirement that this not be an in-memory-only
+   list.
+5. **Per-session details popover**: for an active multi-receiver send,
+   confirm the popover lists every currently-connected person, the
+   folder(s) involved, and (if a database wizard was used) the engine and
+   schema name(s) for that specific session - and that a different
+   session's popover shows its own, different data.
+6. **Visual/interaction polish, generally**: this round's UI was built with
+   round 21's existing design tokens, but real layout/spacing/interaction
+   quality (tab overflow with many sessions, popover positioning near
+   window edges, etc.) needs a developer's own hands-on look - it was not
+   validated in a real browser/webview this round.
+
+### What "success" looks like
+
+Two or more independent sends and/or receives - different projects,
+different peers, mixed send/receive - genuinely run at the same time, each
+visible in its own tab with correct, non-bleeding state, backed by a passing
+same-box concurrency test rather than an assumption. The application menu,
+theme switching, session history, and per-session details all work as
+real, functioning features on top of that confirmed backend capability, not
+a cosmetic layer sitting on an unconfirmed one.
+

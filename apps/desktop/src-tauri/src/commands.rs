@@ -17,17 +17,32 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::AppState;
 
+/// Round 29: `session_id` (the room code for a send, the same one for a
+/// receive) is what makes this event routable to the correct tab once the
+/// frontend can have several of these in flight at once (goal B1) - every
+/// `share-progress`/`receive-progress` emission fires the same *event name*
+/// regardless of which session it's for, so without this field, two
+/// concurrent sessions' progress bars would each receive *both* sessions'
+/// updates with no way to tell them apart. `commands::Progress` itself
+/// already had every value needed to fill this in at each emit site -
+/// added, not backfilled from somewhere new.
 #[derive(Clone, Serialize)]
 pub struct Progress {
+    pub session_id: String,
     pub bytes: usize,
     pub total: usize,
 }
 
 /// One `run-progress` event = one new line tailed live from
 /// `ls_containers::ProvisioningLog`'s file while `run_snapshot` is in
-/// flight. See `tail_provisioning_log` below.
+/// flight. See `tail_provisioning_log` below. Round 29: `session_id` for
+/// the same reason as `Progress` above - keyed by the *receiver's* held
+/// snapshot id (there's no room code still in scope by the time Run is
+/// clicked; the snapshot id is the identifier the review/run UI already
+/// keys everything else on).
 #[derive(Clone, Serialize)]
 pub struct RunProgress {
+    pub session_id: String,
     pub line: String,
 }
 
@@ -242,8 +257,9 @@ pub async fn share_snapshot<R: tauri::Runtime>(
         })?;
     log::info!("share_snapshot: data channel open, sending payload ({} bytes)", bytes.len());
 
+    let progress_session_id = room_code.clone();
     ls_net::send_payload(&conn, &bytes, |sent, total| {
-        let _ = app.emit("share-progress", Progress { bytes: sent, total });
+        let _ = app.emit("share-progress", Progress { session_id: progress_session_id.clone(), bytes: sent, total });
     })
     .await
     .map_err(|e| {
@@ -535,8 +551,9 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
         bytes.len()
     );
 
+    let progress_session_id = room_code.clone();
     ls_net::send_payload(&conn, &bytes, |sent, total| {
-        let _ = app.emit("share-progress", Progress { bytes: sent, total });
+        let _ = app.emit("share-progress", Progress { session_id: progress_session_id.clone(), bytes: sent, total });
     })
     .await
     .map_err(|e| {
@@ -656,7 +673,7 @@ pub async fn push_update<R: tauri::Runtime>(
             .ok_or_else(|| format!("no connected receiver with id {peer_id}"))?;
         (entry.conn.clone(), entry.project_path.clone())
     };
-    bundle_and_push(&app, &conn, &project_path).await
+    bundle_and_push(&app, &conn, &project_path, &peer_id).await
 }
 
 /// The sender's response to a `pull-request` event. Accepting bundles and
@@ -682,7 +699,7 @@ pub async fn respond_to_pull_request<R: tauri::Runtime>(
             .ok_or_else(|| format!("no connected receiver with id {peer_id}"))?;
         (entry.conn.clone(), entry.project_path.clone())
     };
-    bundle_and_push(&app, &conn, &project_path).await.map(Some)
+    bundle_and_push(&app, &conn, &project_path, &peer_id).await.map(Some)
 }
 
 /// Shared by `push_update` and an accepted `respond_to_pull_request`:
@@ -690,10 +707,15 @@ pub async fn respond_to_pull_request<R: tauri::Runtime>(
 /// one is coming (`ControlMessage::IncomingUpdate`, on the *control*
 /// channel), then send it the normal way (`send_payload`, on the *bulk
 /// transfer* channel — the same one `share_snapshot`'s initial send used).
+/// Round 29: `session_id` (the receiver's `peer_id`, already how
+/// `connected_receivers` keys this same connection) rides along on the
+/// progress events so the sender's per-session tab can tell a push/pull
+/// re-send's progress apart from any other session's.
 async fn bundle_and_push<R: tauri::Runtime>(
     app: &AppHandle<R>,
     conn: &ls_net::DataChannelConn,
     project_path: &str,
+    session_id: &str,
 ) -> Result<String, String> {
     log::info!("bundle_and_push: starting for project_path={project_path}");
     let root = PathBuf::from(project_path);
@@ -710,8 +732,9 @@ async fn bundle_and_push<R: tauri::Runtime>(
     ls_net::send_control(conn, &ls_net::ControlMessage::IncomingUpdate)
         .await
         .map_err(|e| e.to_string())?;
+    let progress_session_id = session_id.to_string();
     ls_net::send_payload(conn, &bytes, |sent, total| {
-        let _ = app.emit("share-progress", Progress { bytes: sent, total });
+        let _ = app.emit("share-progress", Progress { session_id: progress_session_id.clone(), bytes: sent, total });
     })
     .await
     .map_err(|e| {
@@ -756,8 +779,9 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
         })?;
     log::info!("receive_snapshot: data channel open, receiving payload");
 
+    let progress_session_id = room_code.clone();
     let bytes = ls_net::receive_payload(&conn, |received, total| {
-        let _ = app.emit("receive-progress", Progress { bytes: received, total });
+        let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
     })
     .await
     .map_err(|e| {
@@ -771,7 +795,7 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
 
     let conn = std::sync::Arc::new(conn);
     *state.outgoing_conn.lock().map_err(|e| e.to_string())? = Some(conn.clone());
-    tauri::async_runtime::spawn(listen_for_pushed_updates(app, conn));
+    tauri::async_runtime::spawn(listen_for_pushed_updates(app, conn, room_code));
 
     Ok(info)
 }
@@ -782,7 +806,11 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
 /// connection (the receiver moved on to a different sender) — checked before
 /// acting on an `IncomingUpdate` so a stale listener from a superseded
 /// connection can't clobber `state.verified` after the fact.
-async fn listen_for_pushed_updates<R: tauri::Runtime>(app: AppHandle<R>, conn: std::sync::Arc<ls_net::DataChannelConn>) {
+async fn listen_for_pushed_updates<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    conn: std::sync::Arc<ls_net::DataChannelConn>,
+    session_id: String,
+) {
     loop {
         match ls_net::recv_control(&conn).await {
             Ok(ls_net::ControlMessage::IncomingUpdate) => {
@@ -799,7 +827,7 @@ async fn listen_for_pushed_updates<R: tauri::Runtime>(app: AppHandle<R>, conn: s
                 }
                 log::info!("receive_snapshot: sender is pushing an update, receiving it");
                 let bytes = match ls_net::receive_payload(&conn, |received, total| {
-                    let _ = app.emit("receive-progress", Progress { bytes: received, total });
+                    let _ = app.emit("receive-progress", Progress { session_id: session_id.clone(), bytes: received, total });
                 })
                 .await
                 {
@@ -958,7 +986,19 @@ pub fn reject_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Resul
 /// `ls_containers::run_snapshot` itself falls back on), there's no file to
 /// tail — the details view just stays empty, which is fine, this is a
 /// nice-to-have.
-async fn tail_provisioning_log<R: tauri::Runtime>(app: AppHandle<R>) {
+// Round 29: `session_id` (the snapshot id `run_snapshot` was called with)
+// tags every emitted line so the frontend can route it to the right tab.
+// Known, narrower boundary this round doesn't fix: `ProvisioningLog` is one
+// shared file across every Run attempt (see its own doc comment - never
+// per-snapshot), so if two Runs are genuinely concurrent, both of their
+// tail tasks poll the *same* file and each could see the other's lines
+// mixed in with a real session_id tag that isn't actually always accurate
+// for interleaved output - the container orchestration itself
+// (`ls_containers::run_snapshot`) already supports concurrent runs via
+// unique compose project names; only this live-log-tailing convenience
+// view can blend two truly-simultaneous Runs' output. Flagged rather than
+// silently presented as fully solved - see this round's own report.
+async fn tail_provisioning_log<R: tauri::Runtime>(app: AppHandle<R>, session_id: String) {
     let path = match ls_containers::ProvisioningLog::open_default() {
         Ok(log) => log.path().to_path_buf(),
         Err(_) => return,
@@ -980,7 +1020,7 @@ async fn tail_provisioning_log<R: tauri::Runtime>(app: AppHandle<R>) {
         // half-formed.
         if let Some(last_newline) = new_bytes.iter().rposition(|&b| b == b'\n') {
             for line in String::from_utf8_lossy(&new_bytes[..=last_newline]).lines() {
-                let _ = app.emit("run-progress", RunProgress { line: line.to_string() });
+                let _ = app.emit("run-progress", RunProgress { session_id: session_id.clone(), line: line.to_string() });
             }
             offset += (last_newline + 1) as u64;
         }
@@ -1018,7 +1058,7 @@ pub async fn run_snapshot<R: tauri::Runtime>(
 
     // Tail the real provisioning log for the duration of the attempt only -
     // aborted the moment ls_containers::run_snapshot resolves, whichever way.
-    let tail_task = tauri::async_runtime::spawn(tail_provisioning_log(app.clone()));
+    let tail_task = tauri::async_runtime::spawn(tail_provisioning_log(app.clone(), snapshot_id.clone()));
     let result = ls_containers::run_snapshot(&verified, &PathBuf::from(work_dir)).await;
     tail_task.abort();
 
@@ -1447,4 +1487,22 @@ pub async fn cleanup_expired_cloud_drops() {
             Err(e) => log::warn!("cleanup_expired_cloud_drops: failed to delete {file_id}: {e:#}"),
         }
     }
+}
+
+// ---------- round 29 goal B2: session history ----------
+//
+// The frontend's own `sessions` map (app.js) already tracks everything
+// worth recording - kind, title, when it started/ended - for the tab UI
+// this round adds. These two commands are purely storage: read the whole
+// list back, or upsert one entry by id. See `session_history`'s own doc
+// comment for why upsert (not append-only).
+
+#[tauri::command]
+pub fn load_session_history() -> Result<Vec<crate::session_history::SessionHistoryEntry>, String> {
+    crate::session_history::load()
+}
+
+#[tauri::command]
+pub fn record_session_history_entry(entry: crate::session_history::SessionHistoryEntry) -> Result<(), String> {
+    crate::session_history::upsert(entry)
 }
