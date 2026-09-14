@@ -270,10 +270,192 @@
     </div>
   </section>
 
+  <!-- ---- Round 29 goal B2: session history - opened from the new
+       application menu (View → Session history), not the Settings gear.
+       Reads from `load_session_history` (persisted to the OS app-data
+       dir - see session_history.rs), so this survives a restart, unlike
+       the session tabs above which are this-run-only. ---- -->
+  <section id="session-history-panel" class="settings-panel hidden">
+    <div class="inline-row receivers-header">
+      <h2>Session history</h2>
+      <button id="session-history-close-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Close</button>
+    </div>
+    <ul id="session-history-list" class="ports-list"></ul>
+    <p id="session-history-empty" class="hint hidden">No past sessions recorded yet.</p>
+    <p id="session-history-error" class="error"></p>
+  </section>
+
   <nav class="tabs">
     <button class="tab-btn active" data-tab="send"><svg class="icon"><use href="#icon-send"></use></svg> Send</button>
     <button class="tab-btn" data-tab="receive"><svg class="icon"><use href="#icon-download"></use></svg> Receive</button>
   </nav>
+
+  <!-- ---- Round 29 goal B1: one tab per active session (a project being
+       sent, or a connection being received), similar in spirit to a
+       terminal multiplexer - clicking one shows that session's own detail
+       below (room code/progress for a send, review/run for a receive) in
+       the single shared viewport further down, while every other session's
+       own state keeps running/waiting untouched in the background. Hidden
+       whenever there are zero sessions - Send/Receive's own "start
+       something new" UI is the only thing visible then, same as before
+       this round. ---- -->
+  <div id="session-tabs-bar" class="session-tabs-bar hidden">
+    <div id="session-tabs-list" class="session-tabs-list"></div>
+  </div>
+
+  <!-- ---- Round 29 goal B1/B3: the shared per-session detail viewport -
+       whichever session is selected in the tab strip above gets rendered
+       here. Reuses the exact same send-progress/review/run panels every
+       prior round already built and proved correct (round 11's targeted
+       push, round 12's countdown, round 13's live log, ...) - this round
+       doesn't reimplement any of that, it just makes *which session's*
+       data currently fills them a real, switchable choice instead of the
+       one implicit "whatever happened most recently" session those panels
+       used to always show. ---- -->
+  <section id="session-detail-viewport" class="hidden">
+    <div class="session-detail-header">
+      <h2 id="session-detail-title"></h2>
+      <span id="session-detail-status" class="hint-inline"></span>
+      <span class="inline-row">
+        <button id="session-detail-info-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-circle-help"></use></svg> Details</button>
+        <button id="session-detail-close-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Close tab</button>
+      </span>
+    </div>
+
+    <!-- ---- Round 29 goal B3: per-session detail popover - connected
+         people (send), folder(s), and database info, for whichever session
+         is currently selected. A popover rather than always-open real
+         estate, since most of this is "check once, rarely again" info, not
+         something worth permanently competing for space with the
+         room-code/progress/review content beneath it. ---- -->
+    <div id="session-detail-popover" class="session-detail-popover hidden">
+      <h3>Session details</h3>
+      <div id="session-detail-people-wrap" class="hidden">
+        <p class="hint"><strong>Connected people</strong></p>
+        <ul id="session-detail-people-list" class="ports-list"></ul>
+      </div>
+      <div id="session-detail-folders-wrap" class="hidden">
+        <p class="hint"><strong>Folder(s)</strong></p>
+        <ul id="session-detail-folders-list" class="ports-list"></ul>
+      </div>
+      <div id="session-detail-db-wrap" class="hidden">
+        <p class="hint"><strong>Database</strong></p>
+        <ul id="session-detail-db-list" class="ports-list"></ul>
+      </div>
+      <p id="session-detail-empty" class="hint hidden">Nothing to show yet for this session.</p>
+    </div>
+
+    <div id="session-send-view" class="hidden">
+      <div id="send-code-wrap" class="room-code-wrap hidden">
+        <span class="hint">Share this code with the receiver:</span>
+        <code id="send-room-code-display" class="room-code-display"></code>
+        <span class="inline-row send-code-actions">
+          <button id="copy-code-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-copy"></use></svg> Copy code</button>
+          <button id="copy-link-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-link"></use></svg> Copy link</button>
+          <span id="copy-status" class="hint-inline"></span>
+        </span>
+        <p id="send-code-expiry" class="hint-inline"></p>
+      </div>
+
+      <div id="send-progress-wrap" class="progress-wrap hidden">
+        <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
+        <p id="send-progress-label" class="hint"></p>
+      </div>
+      <p id="send-result" class="result"></p>
+      <p id="send-error" class="error"></p>
+    </div>
+
+    <div id="session-receive-view" class="hidden">
+      <div id="receive-progress-wrap" class="progress-wrap hidden">
+        <div class="progress-track"><div id="receive-progress-bar" class="progress-bar"></div></div>
+        <p id="receive-progress-label" class="hint"></p>
+      </div>
+      <p id="receive-error" class="error"></p>
+
+      <!-- ---- Trust gate: diff review, shown only after receive_snapshot resolves ---- -->
+      <div id="review-panel" class="hidden">
+        <!-- ---- Sender identity: recognized-peer banner, shown first - who's
+             connecting, before what they sent. Connection-level info only:
+             this never gates or pre-fills anything below; Run/Reject are the
+             only two buttons that actually decide anything here. ---- -->
+        <div id="peer-recognized" class="peer-banner peer-banner-recognized hidden">
+          <span class="peer-banner-icon" aria-hidden="true"><svg class="icon"><use href="#icon-circle-check"></use></svg></span>
+          <span>Recognized peer: <strong id="peer-recognized-name"></strong>
+          <span id="peer-recognized-since" class="hint-inline"></span></span>
+        </div>
+        <div id="peer-new" class="peer-banner peer-banner-new hidden">
+          <span class="peer-banner-icon" aria-hidden="true"><svg class="icon"><use href="#icon-circle-help"></use></svg></span>
+          <span>New sender — haven't seen this identity before.</span>
+          <span class="inline-row peer-remember-row">
+            <input id="peer-remember-name" type="text" placeholder="Remember as…" />
+            <button id="peer-remember-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-save"></use></svg> Save</button>
+          </span>
+          <span id="peer-remember-done" class="hint hidden">Saved — future receives from this sender will show as recognized.</span>
+          <p id="peer-remember-error" class="error"></p>
+        </div>
+
+        <h2>Review before you run</h2>
+        <p class="warn">
+          <svg class="icon"><use href="#icon-shield-alert"></use></svg>
+          Nothing has executed yet. This project has only been verified and unpacked for
+          inspection — clicking Run is what starts sandboxed containers.
+        </p>
+
+        <span class="inline-row ask-update-row">
+          <button id="ask-update-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Ask for update</button>
+          <span id="ask-update-status" class="hint"></span>
+        </span>
+
+        <div class="manifest-card">
+          <div class="manifest-row"><span class="k">Project</span><span id="m-project" class="v"></span></div>
+          <div class="manifest-row"><span class="k">Commit</span><span id="m-commit" class="v mono"></span></div>
+          <div class="manifest-row"><span class="k">Parent commit</span><span id="m-parent" class="v mono"></span></div>
+          <div class="manifest-row"><span class="k">Services</span><span id="m-services" class="v"></span></div>
+        </div>
+
+        <h3>Diff summary</h3>
+        <p id="diff-totals" class="diff-totals"></p>
+        <div id="diff-body" class="diff-groups"></div>
+
+        <label>
+          Work directory (where the sandbox gets unpacked)
+          <input id="work-dir" type="text" value="/tmp/localsync-work" />
+        </label>
+        <span class="inline-row">
+          <button id="run-btn" class="danger-btn" type="button"><svg class="icon"><use href="#icon-play"></use></svg> Run</button>
+          <button id="reject-btn" class="ghost-btn reject-btn" type="button"><svg class="icon"><use href="#icon-circle-x"></use></svg> Reject</button>
+        </span>
+        <p id="reject-error" class="error"></p>
+
+        <div id="run-progress-wrap" class="progress-wrap hidden">
+          <div class="run-status">
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="run-progress-label">Starting containers…</span>
+          </div>
+          <button id="run-details-toggle" class="link-btn" type="button" aria-expanded="false"><svg class="icon"><use href="#icon-chevron-down"></use></svg> Show details</button>
+          <pre id="run-log" class="run-log hidden"></pre>
+        </div>
+
+        <p id="run-error" class="error"></p>
+      </div>
+
+      <!-- ---- Running session status ---- -->
+      <div id="session-panel" class="hidden">
+        <h2>Running</h2>
+        <div class="manifest-card">
+          <div class="manifest-row"><span class="k">Project</span><span id="s-project" class="v"></span></div>
+          <div class="manifest-row">
+            <span class="k">DB cache</span>
+            <span id="s-cache" class="v"></span>
+          </div>
+        </div>
+        <h3>Service ports</h3>
+        <ul id="s-ports" class="ports-list"></ul>
+        <button id="stop-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-stop-circle"></use></svg> Stop</button>
+        <p id="stop-error" class="error"></p>
+      </div>
+    </div>
+  </section>
 
   <!-- ============ SEND ============ -->
   <section id="tab-send" class="tab-panel active">
@@ -569,29 +751,6 @@
       </div>
     </div>
 
-    <div id="send-code-wrap" class="room-code-wrap hidden">
-      <span class="hint">Share this code with the receiver:</span>
-      <code id="send-room-code-display" class="room-code-display"></code>
-      <!-- Round 24: two distinct actions, not one - a teammate who already
-           has LocalSync installed just needs the bare code (what "Copy
-           code" copies, unchanged from before this round); someone being
-           onboarded for the first time benefits from the full magic link
-           instead (what "Copy link" copies - see buildMagicLink() for
-           where that URL points and why). -->
-      <span class="inline-row send-code-actions">
-        <button id="copy-code-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-copy"></use></svg> Copy code</button>
-        <button id="copy-link-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-link"></use></svg> Copy link</button>
-        <span id="copy-status" class="hint-inline"></span>
-      </span>
-      <p id="send-code-expiry" class="hint-inline"></p>
-    </div>
-
-    <div id="send-progress-wrap" class="progress-wrap hidden">
-      <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
-      <p id="send-progress-label" class="hint"></p>
-    </div>
-    <p id="send-result" class="result"></p>
-    <p id="send-error" class="error"></p>
   </section>
 
   <!-- ============ RECEIVE ============ -->
@@ -612,96 +771,7 @@
         until they do.
       </p>
       <button id="receive-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-download"></use></svg> Receive</button>
-
-      <div id="receive-progress-wrap" class="progress-wrap hidden">
-        <div class="progress-track"><div id="receive-progress-bar" class="progress-bar"></div></div>
-        <p id="receive-progress-label" class="hint"></p>
-      </div>
-      <p id="receive-error" class="error"></p>
-    </div>
-
-    <!-- ---- Trust gate: diff review, shown only after receive_snapshot resolves ---- -->
-    <p id="update-banner" class="result hidden">A new update just arrived from the sender.</p>
-    <div id="review-panel" class="hidden">
-      <!-- ---- Sender identity: recognized-peer banner, shown first - who's
-           connecting, before what they sent. Connection-level info only:
-           this never gates or pre-fills anything below; Run/Reject are the
-           only two buttons that actually decide anything here. ---- -->
-      <div id="peer-recognized" class="peer-banner peer-banner-recognized hidden">
-        <span class="peer-banner-icon" aria-hidden="true"><svg class="icon"><use href="#icon-circle-check"></use></svg></span>
-        <span>Recognized peer: <strong id="peer-recognized-name"></strong>
-        <span id="peer-recognized-since" class="hint-inline"></span></span>
-      </div>
-      <div id="peer-new" class="peer-banner peer-banner-new hidden">
-        <span class="peer-banner-icon" aria-hidden="true"><svg class="icon"><use href="#icon-circle-help"></use></svg></span>
-        <span>New sender — haven't seen this identity before.</span>
-        <span class="inline-row peer-remember-row">
-          <input id="peer-remember-name" type="text" placeholder="Remember as…" />
-          <button id="peer-remember-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-save"></use></svg> Save</button>
-        </span>
-        <span id="peer-remember-done" class="hint hidden">Saved — future receives from this sender will show as recognized.</span>
-        <p id="peer-remember-error" class="error"></p>
-      </div>
-
-      <h2>Review before you run</h2>
-      <p class="warn">
-        <svg class="icon"><use href="#icon-shield-alert"></use></svg>
-        Nothing has executed yet. This project has only been verified and unpacked for
-        inspection — clicking Run is what starts sandboxed containers.
-      </p>
-
-      <span class="inline-row ask-update-row">
-        <button id="ask-update-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Ask for update</button>
-        <span id="ask-update-status" class="hint"></span>
-      </span>
-
-      <div class="manifest-card">
-        <div class="manifest-row"><span class="k">Project</span><span id="m-project" class="v"></span></div>
-        <div class="manifest-row"><span class="k">Commit</span><span id="m-commit" class="v mono"></span></div>
-        <div class="manifest-row"><span class="k">Parent commit</span><span id="m-parent" class="v mono"></span></div>
-        <div class="manifest-row"><span class="k">Services</span><span id="m-services" class="v"></span></div>
-      </div>
-
-      <h3>Diff summary</h3>
-      <p id="diff-totals" class="diff-totals"></p>
-      <div id="diff-body" class="diff-groups"></div>
-
-      <label>
-        Work directory (where the sandbox gets unpacked)
-        <input id="work-dir" type="text" value="/tmp/localsync-work" />
-      </label>
-      <span class="inline-row">
-        <button id="run-btn" class="danger-btn" type="button"><svg class="icon"><use href="#icon-play"></use></svg> Run</button>
-        <button id="reject-btn" class="ghost-btn reject-btn" type="button"><svg class="icon"><use href="#icon-circle-x"></use></svg> Reject</button>
-      </span>
-      <p id="reject-error" class="error"></p>
-
-      <div id="run-progress-wrap" class="progress-wrap hidden">
-        <div class="run-status">
-          <span class="spinner" aria-hidden="true"></span>
-          <span id="run-progress-label">Starting containers…</span>
-        </div>
-        <button id="run-details-toggle" class="link-btn" type="button" aria-expanded="false"><svg class="icon"><use href="#icon-chevron-down"></use></svg> Show details</button>
-        <pre id="run-log" class="run-log hidden"></pre>
-      </div>
-
-      <p id="run-error" class="error"></p>
-    </div>
-
-    <!-- ---- Running session status ---- -->
-    <div id="session-panel" class="hidden">
-      <h2>Running</h2>
-      <div class="manifest-card">
-        <div class="manifest-row"><span class="k">Project</span><span id="s-project" class="v"></span></div>
-        <div class="manifest-row">
-          <span class="k">DB cache</span>
-          <span id="s-cache" class="v"></span>
-        </div>
-      </div>
-      <h3>Service ports</h3>
-      <ul id="s-ports" class="ports-list"></ul>
-      <button id="stop-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-stop-circle"></use></svg> Stop</button>
-      <p id="stop-error" class="error"></p>
+      <p id="receive-start-error" class="error"></p>
     </div>
   </section>
   </div>

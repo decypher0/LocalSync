@@ -9,4 +9,5 @@
 
 pub mod commands;
 pub mod send_log;
+pub mod session_history;
 pub mod state;
