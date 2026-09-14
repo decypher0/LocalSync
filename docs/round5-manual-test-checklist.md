@@ -1883,3 +1883,122 @@ theme switching, session history, and per-session details all work as
 real, functioning features on top of that confirmed backend capability, not
 a cosmetic layer sitting on an unconfirmed one.
 
+## Round 33 addendum: AppImage download flakiness + missing macOS updater signature
+
+Round 33 fixes two separate, real release-pipeline problems - a flaky
+external download that failed two real release runs in a row, and a
+macOS updater signature that never materialized despite the signing key
+being confirmed present. This entire round is CI/workflow logic - no
+application code changed, so rounds 1-25's own tests are unaffected by
+construction, not just unmodified. Both fixes needed a real `workflow_dispatch`
+run to fully confirm (this sandbox has no `gh`/token access to trigger
+one or pull raw job logs - see below for exactly what that means for
+what's verified here).
+
+### What changed, and why (root cause confirmed against real source, not guessed)
+
+- **The macOS `.sig` bug (goal 4) - the real find**: `--bundles dmg`
+  (the flag `build-macos-dmg/action.yml` has always built with) never
+  actually attempts the updater bundle at all, regardless of
+  `createUpdaterArtifacts` or whether a real signing key is present -
+  confirmed directly against `tauri-bundler`'s own source
+  (`src/bundle.rs`): the updater step only runs when the *requested*
+  bundle targets include `PackageType::MacOsBundle` (CLI short name
+  `"app"`) specifically, not `Dmg` - even though `dmg` already builds an
+  `.app` as its own internal dependency. The bundler's own log line for
+  this exact misconfiguration even names the fix directly: "The bundler
+  was configured to create updater artifacts but no updater-enabled
+  targets were built. Please enable one of these targets: app, appimage,
+  msi, nsis." Neither of this round's own two suspected causes (a stale
+  path assumption in the locate step, or a missing Apple code-signing
+  certificate) was the actual issue - the locate step's path pattern was
+  already correct (confirmed against `updater_bundle.rs`'s own output
+  path construction), and code-signing is entirely unrelated to whether
+  the updater archive gets built at all.
+- **The fix**: `--bundles dmg` -> `--bundles dmg,app` in the one shared
+  composite action both `release.yml` and `macos.yml` already use for
+  this - costs nothing extra to build (the `.app` was already being built
+  as `dmg`'s own dependency either way; the only change is Tauri now also
+  counts it as an explicitly-requested target instead of deleting it
+  afterward). Because `macos.yml` never previously exercised the updater
+  step at all (this exact bug made it a no-op there too, harmlessly, this
+  whole time), it never needed its own "is a signing key present" check -
+  now that the updater step is a real possibility again, that workflow
+  gained the same check `release.yml`'s three build jobs already use, so
+  its own (currently always-absent) key stays a clean skip instead of a
+  new hard failure.
+- **The AppImage download flake (goals 1-3)**: confirmed directly against
+  `tauri-bundler`'s own source
+  (`src/bundle/linux/appimage/linuxdeploy.rs`) that the AppRun/linuxdeploy
+  download is a single, one-shot HTTP GET with no retry or timeout
+  configuration of its own, and that it caches into
+  `dirs::cache_dir()/tauri` - confirmed against that function's own Linux
+  implementation to resolve to `~/.cache/tauri` on GitHub's runners
+  (`$XDG_CACHE_HOME` isn't set there) - skipping the download entirely
+  whenever a file is already there. Added: a `actions/cache` step for
+  that exact directory, keyed on the real, pinned `@tauri-apps/cli`
+  version read from the checked-in `package-lock.json` (not guessed) so a
+  future CLI bump can't silently reuse stale tools from a different
+  bundler version; a retry-with-backoff loop (3 attempts) around the
+  build step for the cache-miss case, verified with a real, isolated
+  script simulating a transient failure (succeeds on retry), a persistent
+  failure (exhausts retries), and the happy path (no retries needed) -
+  all three behaved exactly as intended; and a fallback to a `.deb`-only
+  build if every attempt still fails, rather than failing the whole job -
+  matching how this project already treats macOS's own unsigned/
+  non-notarized case as a real, degraded release rather than no release
+  at all. The locate step's own hard-fail-if-missing check now applies
+  only to the `.deb` (confirmed, from the two real recent failures, to
+  succeed independently of the AppImage step every time) - a missing
+  AppImage is logged and skipped, not a new job failure.
+
+### What's verified here vs. what needs a real trigger
+
+Everything above is confirmed against Tauri's own real bundler source
+code (not assumed from documentation or the round's own hypotheses) and
+against the workflow files' own real logic - `actionlint` is clean on
+every workflow file, and the retry/fallback control flow was tested with
+a real, isolated shell script standing in for the three scenarios that
+matter (transient failure, persistent failure, happy path). What this
+sandbox could not do: pull the actual raw job logs from the two real
+failed runs (no `gh` CLI or GitHub token available here - the round's own
+quoted log details, exact filenames and the exact HTTP 504, were taken as
+real, reliable evidence of what those runs actually hit, and cross-checked
+against Tauri's source rather than re-derived from scratch), or trigger a
+real `workflow_dispatch` run to watch the fixes work end to end - that's
+this round's one remaining, real-hardware-equivalent gap.
+
+### What to check on real hardware (a real `workflow_dispatch` run)
+
+1. **The AppImage cache, across two runs**: trigger the Release workflow
+   twice in a row. The first run's "Cache Tauri's AppImage helper
+   binaries" step should report a cache miss (or hit, if a prior run
+   already populated it); the second run should show a cache hit, and its
+   own "Build the .deb and AppImage" step's log should show no
+   `github.com/tauri-apps/binary-releases` download at all - `linuxdeploy`
+   already existing (skipped) confirms the caching actually works, not
+   just that the job succeeded.
+2. **The retry+fallback path, if you can force it**: harder to trigger on
+   demand (it needs the real GitHub outage to still be happening) - if a
+   run does hit the AppImage step failing, confirm the log shows the
+   retry attempts and backoff, and that the job still succeeds overall
+   with a `.deb`-only Linux release rather than failing outright.
+3. **The macOS `.sig`, for real**: with `TAURI_SIGNING_PRIVATE_KEY`
+   configured as a repository secret, trigger a real release run and
+   confirm the macOS job's "Locate the updater .sig (if produced)" step
+   now actually finds both a `.app.tar.gz` and a `.app.tar.gz.sig` -
+   previously it only ever found "(none)" for both, regardless of the key.
+4. **`latest.json`, finally**: once all three platforms (Windows, Linux,
+   macOS) produce a real `.sig` in the same run, confirm the `release`
+   job's "Generate latest.json" step reports `generated=true` and the
+   resulting file actually lists all three platforms
+   (`windows-x86_64`/`linux-x86_64`/`darwin-aarch64`) with real signatures
+   - this has never actually happened in a real run before this round,
+   per the macOS side of it never having a signature to include.
+5. **`macos.yml` still runs clean without a key**: since it now has a
+   real (if currently always-failing-the-presence-check) path through the
+   updater logic for the first time, trigger it once and confirm it still
+   completes successfully end-to-end with no signing key configured -
+   exactly as it always has, just via a path that's now actually being
+   exercised instead of silently skipped by the old `--bundles dmg` bug.
+
