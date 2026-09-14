@@ -5,7 +5,48 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use localsync_desktop::{commands, send_log, state::AppState};
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
+
+/// Round 29 goal B2: a real, top-level application menu - previously the
+/// only menu-shaped thing in this app was the Settings gear button, which
+/// still exists and still owns the actual mode/theme/account controls this
+/// menu's items just jump to or mirror. Three submenus:
+///
+/// - **LocalSync**: Check for updates (same command `check-updates-btn`
+///   already calls - see `menu-action` handling in app.js), Settings
+///   (opens the existing settings panel rather than duplicating its
+///   controls here), Quit (handled directly in Rust - the one item that
+///   doesn't need a JS round-trip at all).
+/// - **Theme**: System/Light/Dark - applies through the exact same
+///   `applyTheme()`/`localStorage` logic the Settings radio buttons already
+///   use (one source of truth for "what theme is active", not a second,
+///   parallel one living only in the menu).
+/// - **View → Session history**: opens the new session-history panel (round
+///   29 goal B2) reading from `commands::load_session_history`.
+///
+/// No Cargo.toml feature flag needed for plain text menu items (confirmed
+/// against Tauri's own current docs) - `muda` (the native menu crate this
+/// builds on) was already pulled in transitively.
+fn build_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let app_menu = SubmenuBuilder::new(app, "LocalSync")
+        .text("menu-check-updates", "Check for updates…")
+        .separator()
+        .text("menu-settings", "Settings")
+        .separator()
+        .text("menu-quit", "Quit")
+        .build()?;
+
+    let theme_menu = SubmenuBuilder::new(app, "Theme")
+        .text("menu-theme-system", "System")
+        .text("menu-theme-light", "Light")
+        .text("menu-theme-dark", "Dark")
+        .build()?;
+
+    let view_menu = SubmenuBuilder::new(app, "View").text("menu-session-history", "Session history").build()?;
+
+    MenuBuilder::new(app).items(&[&app_menu, &theme_menu, &view_menu]).build()
+}
 
 /// Two demo instances (sender + receiver) commonly run on the same Linux
 /// box at once. They don't collide on `~/.localsync/identity.key` (only the
@@ -153,6 +194,25 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
         .setup(move |app| {
+            // Round 29 goal B2: the real application-level menu. Built here
+            // (not as a `.menu()` builder call before `.setup`) because
+            // `SubmenuBuilder`/`MenuBuilder` need a live `&App` handle to
+            // attach items to, which only exists once setup starts.
+            let menu = build_menu(app)?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|app_handle, event| {
+                // Quit is the only item handled directly in Rust - every
+                // other item just tells the frontend what was clicked and
+                // lets existing, already-correct JS own the actual
+                // behavior (opening Settings, applying a theme, ...)
+                // rather than this duplicating that logic on the Rust side.
+                if event.id().0 == "menu-quit" {
+                    app_handle.exit(0);
+                    return;
+                }
+                let _ = app_handle.emit("menu-action", event.id().0.clone());
+            });
+
             // Round 23: enforce any Cloud-drop retention that's come due
             // since LocalSync last ran. Fire-and-forget, same "check when
             // convenient, no background scheduler" convention as everything
@@ -210,6 +270,8 @@ fn main() {
             commands::start_cloud_drop_session,
             commands::respond_to_cloud_access_request,
             commands::request_cloud_drop_access,
+            commands::load_session_history,
+            commands::record_session_history_entry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");
