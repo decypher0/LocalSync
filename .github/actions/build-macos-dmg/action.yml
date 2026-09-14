@@ -41,12 +41,32 @@ runs:
     - name: Build the .dmg
       shell: bash
       working-directory: apps/desktop
+      # Round 33: `--bundles dmg` alone is why createUpdaterArtifacts never
+      # actually produced a .app.tar.gz/.sig here, even with a real signing
+      # key present and even though this looked like the right flag (it's
+      # what actually builds the .dmg, after all). Root-caused directly
+      # against tauri-bundler's own source (src/bundle.rs): the updater
+      # bundle is only ever attempted when the *requested* package types
+      # include `PackageType::MacOsBundle` (CLI short name "app") - not
+      # `Dmg`, even though Dmg internally depends on and builds an .app
+      # bundle as its own input. The bundler's own log even says as much
+      # when this is misconfigured: "The bundler was configured to create
+      # updater artifacts but no updater-enabled targets were built. Please
+      # enable one of these targets: app, appimage, msi, nsis" - a warning
+      # this project's own past release runs would have needed a real log
+      # to notice, buried behind an apparently-successful build step.
+      # `--bundles dmg,app` costs nothing extra to build (the .app was
+      # already being built as Dmg's own dependency either way; the only
+      # change is that Tauri now also counts it as an explicitly-requested
+      # target and stops deleting it afterward - see bundle.rs's own "Clean
+      # up .app if only building dmg or updater" step, which is why no
+      # extra .app bundle from before ever seems to survive to look at).
       run: |
         npm install
         if [ "${{ inputs.disable-updater-artifacts }}" = "true" ]; then
-          npm run tauri build -- --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          npm run tauri build -- --bundles dmg,app --config '{"bundle":{"createUpdaterArtifacts":false}}'
         else
-          npm run tauri build -- --bundles dmg
+          npm run tauri build -- --bundles dmg,app
         fi
 
     - name: Dump target/ contents (diagnostic)
