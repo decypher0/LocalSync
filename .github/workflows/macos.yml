@@ -89,12 +89,40 @@ jobs:
           name: cargo-test-macos-log
           path: /tmp/cargo-test-macos.log
 
+      # Round 33: this workflow never set TAURI_SIGNING_PRIVATE_KEY, and
+      # that was harmless purely by accident before this round -
+      # build-macos-dmg's own `--bundles dmg` never actually attempted the
+      # updater bundle at all (see that action's own comment on today's
+      # fix), so an absent key was never put to the test here. Now that
+      # `--bundles dmg,app` makes the updater bundle a real possibility
+      # again, this workflow needs the exact same "is a real key present"
+      # check release.yml's three build jobs already use, so a real key
+      # (if one's ever added) gets used, and its continued absence here
+      # cleanly disables createUpdaterArtifacts instead of a hard failure.
+      - name: Check for the updater signing key
+        id: updater_key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is set - the .app.tar.gz update artifact will be signed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret - building unsigned with createUpdaterArtifacts disabled for this run."
+          fi
+
       - name: Build the real .dmg
         # Round 15 extracted this into a composite action so the release
         # pipeline (release.yml) can build the same .dmg the same way,
         # without a second, drift-prone copy of these steps.
         id: build_dmg
         uses: ./.github/actions/build-macos-dmg
+        with:
+          disable-updater-artifacts: ${{ steps.updater_key.outputs.present != 'true' }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload the .dmg as a workflow artifact
         uses: actions/upload-artifact@v4
