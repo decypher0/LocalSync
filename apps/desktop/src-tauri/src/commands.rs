@@ -516,12 +516,26 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
             parent_commit: None,
         });
         if let Some(dump) = &f.dump {
-            let dump_bytes = std::fs::read(&dump.file_path)
+            // Round: no `fs::read` here anymore — a real database dump can
+            // be multi-GB, and reading it fully into memory just to hand it
+            // to `create_snapshot_multi` a moment later (which used to
+            // `.clone()` it again besides) is exactly what produced a real
+            // `out of memory` failure. `DumpSource::FilePath` lets the file
+            // stay on disk, opened and streamed in bounded chunks only when
+            // `create_snapshot_multi`/`merge_folder_payloads` actually need
+            // its bytes (hashing, then tar-appending). Fail fast here if the
+            // path doesn't exist/isn't readable, rather than surfacing that
+            // error deep inside a spawn_blocking task with a less obvious
+            // message.
+            let meta = std::fs::metadata(&dump.file_path)
                 .map_err(|e| format!("reading dump file {}: {e}", dump.file_path))?;
+            if !meta.is_file() {
+                return Err(format!("reading dump file {}: not a regular file", dump.file_path));
+            }
             pending_dumps.push(ls_snapshot::PendingDump {
                 folder_index: i,
                 schema: dump.schema.clone(),
-                dump_bytes,
+                source: ls_snapshot::DumpSource::FilePath(PathBuf::from(&dump.file_path)),
                 engine: dump.engine.clone(),
             });
         }

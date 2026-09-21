@@ -2003,3 +2003,118 @@ this round's one remaining, real-hardware-equivalent gap.
    exactly as it always has, just via a path that's now actually being
    exercised instead of silently skipped by the old `--bundles dmg` bug.
 
+## Round 34 addendum: Local network Cloud-drop connection hang, duplicate send tabs, Cloud drop moved to Step 1
+
+Real testing on an actual LAN found "Local network" mode's room code
+expiring with the receiver never connecting - the exact "does the core
+value proposition even work" bug this round treated as the top priority.
+Root-caused directly against the code (not assumed): rounds 25
+(`decode_room_code`) and 28 (multi-session state) were both confirmed
+correct via new tests that exercise the real, previously-untested
+production path (a real detected LAN IP, not `127.0.0.1` - every prior
+test explicitly substituted that). The actual bug found and fixed is in
+**Cloud drop's own use of Local-network signaling**:
+`start_cloud_drop_session` connected using `room_code` (the 14-character
+display string a human pastes) instead of `room_id` (the 4-character
+value a real receiver's `decode_room_code` actually extracts and connects
+with) - the two only happen to be equal in "remote" mode, which is why
+this was invisible everywhere except local mode. A sender joined a relay
+room no receiver could ever reach, and sat waiting until the full 300s
+timeout elapsed - exactly the reported symptom.
+
+Honest caveat: the plain (non-Cloud-drop) Send flow was independently
+verified correct with a real, passing, real-LAN-IP test
+(`local_relay_mode_test.rs`) - if a real tester hits this same symptom
+*without* ever touching Cloud drop, that would mean a second, still-
+unfound bug; flag it immediately if so.
+
+Also this round: a failed/expired send tab no longer spawns a duplicate
+tab on retry (a real in-place "Retry" action was added, reusing the
+already-packaged snapshot), and Cloud drop moved from a Step 4 checkbox
+to a genuine third Step 1 transfer-mode radio (confirmed via git history
+that the round 32 that was originally supposed to do this never actually
+happened - no such commit exists anywhere in this repo).
+
+### What to check on real hardware
+
+1. **The actual Local-network fix**: two real machines (or two real
+   processes on one machine, each pointed at the other's real LAN IP -
+   not loopback), sender picks Local network + Cloud drop, generates a
+   code, confirm the receiver actually connects and the upload completes
+   well before the code's countdown reaches zero.
+2. **Plain Local-network send, for real** (this is the case the code
+   review couldn't fully rule out as the tester's exact original path):
+   sender picks Local network (no Cloud drop), confirm a full send/receive
+   cycle completes on a real LAN between two real machines, not just this
+   sandbox's same-box test.
+3. **Retry in place**: start a send, let its code expire (or force a
+   failure), confirm the same tab turns "Expired" (not silently still
+   looking active) rather than a second tab appearing, click **Retry**,
+   confirm it gets a new code without re-visiting folder selection or the
+   database wizard, and that the retry actually completes a real transfer.
+4. **Cloud drop at Step 1**: confirm the wizard's first step now shows
+   Local network / Remote relay / Cloud drop as three real radio options,
+   selecting Cloud drop shows the linked-account status and retention
+   picker right there, and Step 4 no longer has any Cloud-drop UI.
+5. **Round 28/29 presence**: confirmed directly from git history, not
+   just assumed - `git log --oneline main` shows "Round 28+29" merged via
+   PR #12, already part of `main` before this round started.
+
+## Round 35 addendum: dump-file out-of-memory fix + auto-update investigation
+
+Real testing with an actual project's real (large) database dump hit
+`reading dump file ...: out of memory`. Root-caused to the exact line the
+error text pointed at (`apps/desktop/src-tauri/src/commands.rs`'s
+`share_snapshot_wizard`, `std::fs::read(&dump.file_path)`) - but the real
+problem was worse than one full-buffer read: `create_snapshot_multi`
+(`crates/ls-snapshot/src/lib.rs`) then `.clone()`d that same buffer again
+before hashing and tar-appending it, meaning a real dump could have two
+full copies of itself alive in memory simultaneously, on top of whatever
+the OS itself needed to service the read.
+
+**The fix**: `PendingDump.dump_bytes: Vec<u8>` became `PendingDump.source:
+DumpSource` (`Bytes(Vec<u8>)` for already-in-memory content, `FilePath
+(PathBuf)` for a dump still on disk). The command layer no longer reads
+the file at all - it just stats the path (failing fast on a bad one) and
+hands `create_snapshot_multi` a `FilePath`. Hashing (`sha256_hex_of_file`)
+and tar-appending (`append_dump_source`) both stream the file in bounded
+64KB/256KB chunks instead of materializing it whole. Proven with a real
+synthetic-dump test measuring actual peak RSS (`VmHWM`): a 500MB dump
+streamed via `FilePath` peaks at ~5.8MB RSS, versus ~505MB for the same
+file forced through the old `Bytes`-shaped path - i.e. genuinely bounded,
+not just smaller. Round 34's retry-in-place feature does still re-read
+(and re-hash) the dump file from scratch on every retry - deliberately
+left as-is, since a single streamed pass is now cheap/bounded rather than
+something that risks OOM or meaningfully slows a retry down.
+
+**Auto-update**: reported as "not working" with no specifics. Investigated
+from scratch rather than assuming it was a repeat of round 33's
+now-fixed macOS-signature gap - confirmed the update-check/install code,
+Tauri config, and plugin wiring are all correct, and that the real,
+currently-published `latest.json` genuinely has valid signatures for all
+three platforms (round 33's fix is confirmed working in production, not
+just in CI). The actual cause: `tauri.conf.json`'s (and `Cargo.toml`'s/
+`package.json`'s) `version` field had been `"0.1.0"` in every single build
+this project has ever produced - since the updater compares the running
+app's version against `latest.json`'s version and they were always
+identical, `checkForUpdate()` correctly reported "no update available"
+every single time, which is indistinguishable from "broken" to anyone
+testing it. Fixed by bumping all three to `"0.2.0"` - this is what
+actually needs to ship as a real release before an update round-trip can
+be observed at all.
+
+### What to check on real hardware
+
+1. **Large real dump, for real**: send a project with an actual
+   large-ish database dump (the kind that previously produced the OOM)
+   over Local network, and confirm it completes without an out-of-memory
+   error - watch the sending process's real memory usage (Task
+   Manager/Activity Monitor/`top`) and confirm it does not climb anywhere
+   near the dump file's own size.
+2. **The update round-trip, for the first time ever**: install the
+   previous (`0.1.0`) build, then publish a real `0.2.0` release, and
+   confirm **Check for updates** now genuinely reports an update is
+   available, downloads it, and relaunches into the new version - this
+   specific round-trip has never actually been possible to observe before
+   this round, since no version bump had ever existed.
+

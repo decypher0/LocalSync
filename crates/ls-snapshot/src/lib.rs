@@ -3,7 +3,7 @@ mod hash;
 mod sign;
 mod types;
 
-pub use types::{DatabaseDumpEntry, FolderInfo, Manifest, PendingDump, ServiceDef, Snapshot};
+pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};
 use std::fs::File;
@@ -187,16 +187,34 @@ pub fn create_snapshot_multi(folders: &[FolderSpec], dumps: &[types::PendingDump
     let dependency_lock_hash = hash::combine_hex_hashes(&lock_hashes);
     let db_seed_hash = hash::combine_hex_hashes(&seed_hashes);
 
-    let dump_tuples: Vec<(String, String, Vec<u8>)> = dumps
+    // Round: no `.clone()` of the dump content here — `dump_tuples` borrows
+    // each `PendingDump`'s `DumpSource` (either already-in-memory `Bytes`, or
+    // a `FilePath` left unread until `merge_folder_payloads` streams it
+    // straight into the tar builder). Cloning here used to mean two full
+    // copies of a real, multi-GB dump alive in memory at once; this is the
+    // fix for that specific redundant copy.
+    let dump_tuples: Vec<(String, String, &types::DumpSource)> = dumps
         .iter()
         .map(|d| {
             let file_name = format!("{}.{}", d.schema, dump_file_extension(&d.engine));
-            (labels[d.folder_index].clone(), file_name, d.dump_bytes.clone())
+            (labels[d.folder_index].clone(), file_name, &d.source)
         })
         .collect();
-    let database_dumps: Vec<types::DatabaseDumpEntry> = dumps
-        .iter()
-        .map(|d| types::DatabaseDumpEntry {
+    let mut database_dumps: Vec<types::DatabaseDumpEntry> = Vec::with_capacity(dumps.len());
+    for d in dumps {
+        // Hashed via `sha256_hex_of_file` for a `FilePath` source, which
+        // reads the file in bounded chunks rather than pulling the whole
+        // dump into memory just to hash it — the other half of not needing
+        // `d.dump_bytes.clone()`'s old in-memory copy.
+        let hash = match &d.source {
+            types::DumpSource::Bytes(bytes) => {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+            }
+            types::DumpSource::FilePath(path) => hash::sha256_hex_of_file(path)
+                .with_context(|| format!("hashing dump file {}", path.display()))?,
+        };
+        database_dumps.push(types::DatabaseDumpEntry {
             folder: labels[d.folder_index].clone(),
             schema: d.schema.clone(),
             dump_file: format!(
@@ -205,13 +223,10 @@ pub fn create_snapshot_multi(folders: &[FolderSpec], dumps: &[types::PendingDump
                 d.schema,
                 dump_file_extension(&d.engine)
             ),
-            hash: {
-                use sha2::{Digest, Sha256};
-                Sha256::digest(&d.dump_bytes).iter().map(|b| format!("{b:02x}")).collect()
-            },
+            hash,
             engine: d.engine.clone(),
-        })
-        .collect();
+        });
+    }
 
     let payload = bundle::merge_folder_payloads(&bundles, &dump_tuples)?;
 
@@ -682,7 +697,7 @@ mod tests {
             &[PendingDump {
                 folder_index: 0,
                 schema: "orders_db".to_string(),
-                dump_bytes: dump_bytes.clone(),
+                source: DumpSource::Bytes(dump_bytes.clone()),
                 engine: "mysql".to_string(),
             }],
         )
@@ -720,7 +735,7 @@ mod tests {
             &[PendingDump {
                 folder_index: 0,
                 schema: "catalog_db".to_string(),
-                dump_bytes: dump_bytes.clone(),
+                source: DumpSource::Bytes(dump_bytes.clone()),
                 engine: "mongodb".to_string(),
             }],
         )
@@ -748,7 +763,7 @@ mod tests {
         let a = make_git_folder(dir.path(), "solo");
         let err = create_snapshot_multi(
             &[FolderSpec { path: a, parent_commit: None }],
-            &[PendingDump { folder_index: 1, schema: "x".into(), dump_bytes: vec![], engine: "mysql".into() }],
+            &[PendingDump { folder_index: 1, schema: "x".into(), source: DumpSource::Bytes(vec![]), engine: "mysql".into() }],
         )
         .unwrap_err();
         assert!(err.to_string().contains("out of range"));
