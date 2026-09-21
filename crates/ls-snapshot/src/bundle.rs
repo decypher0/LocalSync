@@ -371,7 +371,7 @@ fn port_to_string(v: &serde_yaml::Value) -> Option<String> {
 /// reason to know about; see `create_snapshot_multi`'s `dump_file_extension`.
 pub(crate) fn merge_folder_payloads(
     bundles: &[(String, GitBundle)],
-    dumps: &[(String, String, Vec<u8>)],
+    dumps: &[(String, String, &crate::types::DumpSource)],
 ) -> Result<Vec<u8>> {
     let gz = GzEncoder::new(Vec::new(), Compression::default());
     let mut tb = tar::Builder::new(gz);
@@ -396,9 +396,9 @@ pub(crate) fn merge_folder_payloads(
         }
     }
 
-    for (folder, file_name, dump_bytes) in dumps {
+    for (folder, file_name, source) in dumps {
         let tar_path = format!("db-dumps/{folder}/{file_name}");
-        append_bytes(&mut tb, &tar_path, dump_bytes)?;
+        append_dump_source(&mut tb, &tar_path, source)?;
     }
 
     let gz = tb.into_inner().context("finalizing merged tar")?;
@@ -412,6 +412,34 @@ fn append_bytes<W: Write>(tb: &mut tar::Builder<W>, path: &str, data: &[u8]) -> 
     header.set_cksum();
     tb.append_data(&mut header, path, data)
         .with_context(|| format!("adding {path} to payload"))
+}
+
+/// Appends one database dump's content to the tar builder, streaming it in
+/// bounded chunks (via `tar::Builder::append_data`'s internal buffered copy
+/// loop, fed a `BufReader` over the open file) rather than reading the whole
+/// dump into a `Vec<u8>` first when it lives on disk (`DumpSource::FilePath`)
+/// — the fix for a real `out of memory` failure against a large, real
+/// database dump. `Bytes` (a dump already in memory — e.g. built directly by
+/// a test) still goes through `append_bytes` unchanged.
+fn append_dump_source<W: Write>(tb: &mut tar::Builder<W>, path: &str, source: &crate::types::DumpSource) -> Result<()> {
+    match source {
+        crate::types::DumpSource::Bytes(bytes) => append_bytes(tb, path, bytes),
+        crate::types::DumpSource::FilePath(file_path) => {
+            let len = fs::metadata(file_path)
+                .with_context(|| format!("stat-ing dump file {}", file_path.display()))?
+                .len();
+            let file = fs::File::open(file_path)
+                .with_context(|| format!("opening dump file {}", file_path.display()))?;
+            let mut reader = std::io::BufReader::with_capacity(256 * 1024, file);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(len);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tb.append_data(&mut header, path, &mut reader)
+                .with_context(|| format!("adding {path} to payload"))
+        }
+    }
 }
 
 /// Re-homes every entry from a `git archive --format=tar` output under

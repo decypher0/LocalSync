@@ -121,6 +121,24 @@ pub struct DatabaseDumpEntry {
     pub engine: String,
 }
 
+/// Where a [`PendingDump`]'s content actually lives.
+///
+/// A real database dump can be multi-GB — reading one fully into memory just
+/// to hand it to `create_snapshot_multi` (as the original `Vec<u8>`-only
+/// shape forced every caller to do) is exactly what produced a genuine
+/// `out of memory` failure against a real, large dump. `FilePath` lets the
+/// command layer hand over a path instead and defer any actual reading to
+/// the point the bytes are hashed/tar'd, where it can be done in bounded
+/// chunks rather than one giant allocation. `Bytes` is kept for callers (and
+/// this crate's own unit tests) that already have the content in memory —
+/// e.g. a small dump, or a synthetic one built in a test — with no reason to
+/// round-trip it through a temp file first.
+#[derive(Debug, Clone)]
+pub enum DumpSource {
+    Bytes(Vec<u8>),
+    FilePath(std::path::PathBuf),
+}
+
 /// A database dump ready to be packaged by [`crate::create_snapshot_multi`] —
 /// produced either by `ls-dbsource`'s live export or by reading a developer-
 /// supplied dump file as-is. Not part of the wire format itself (see
@@ -139,7 +157,7 @@ pub struct PendingDump {
     /// `DatabaseDumpEntry::engine`'s doc comment for why this needs to
     /// travel with the dump rather than being inferred later.
     pub engine: String,
-    pub dump_bytes: Vec<u8>,
+    pub source: DumpSource,
 }
 
 /// A snapshot as it travels over the wire / sits on disk.
