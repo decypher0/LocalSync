@@ -401,7 +401,7 @@ jobs:
           fi
 
           echo "found deb: $deb_path"
-          echo "found appimage: ${appimage_path:-(none - see the build step's own appimage_failed output)}"
+          echo "found appimage: ${appimage_path:-(none - see the appimage_failed output of the build step)}"
           echo "found appimage sig: ${appimage_sig_path:-(none)}"
           {
             echo "deb_path=$deb_path"
