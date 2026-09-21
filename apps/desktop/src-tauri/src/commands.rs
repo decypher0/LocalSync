@@ -1208,6 +1208,31 @@ pub struct CloudDropSessionInfo {
     pub file_id: String,
 }
 
+/// The relay room label `start_cloud_drop_session`'s own `connect_as_sender`
+/// call must use: `room_id`, never `room_code`.
+///
+/// Pulled out into its own tiny, pure function specifically so it's testable
+/// without a real Google OAuth config or a live Drive upload (both of which
+/// `start_cloud_drop_session` itself requires, and neither of which exist in
+/// this sandbox - see `cloud_drop_protocol_test.rs`'s own doc comment) —
+/// see `cloud_drop_local_mode_room_id_test.rs`, which imports this exact
+/// function to prove (and guard against regressing) the real bug found in
+/// real Local-network-mode testing: this used to be inlined as
+/// `send_info.room_code`, which is only ever correct by coincidence in
+/// "remote" mode (where `room_code` IS the bare `room_id` -
+/// `start_send_session`'s own doc comment) and silently wrong in "local"
+/// mode, where `room_code` is the 14-character IP+port+id-*encoded* string a
+/// human pastes, not the 4-character `room_id` a real receiver's
+/// `decode_room_code` extracts and actually connects with
+/// (`request_cloud_drop_access` below). A sender connected under the wrong,
+/// longer string joins a relay room no real receiver could ever reach -
+/// `connect_as_sender` then sits waiting for a second peer that never
+/// arrives, until `ls_net::CONNECT_TIMEOUT` (300s) elapses - exactly the
+/// reported "room code expires, receiver never connects" symptom.
+pub fn cloud_drop_sender_room(send_info: &SendSessionInfo) -> &str {
+    &send_info.room_id
+}
+
 /// Sender side: bundles `project_path` exactly like `share_snapshot` does,
 /// uploads it to the sender's own Drive (never grants anyone access yet),
 /// then hosts the same kind of signaling room `start_send_session` does —
@@ -1252,16 +1277,26 @@ pub async fn start_cloud_drop_session<R: tauri::Runtime>(
     .map_err(|e| e.to_string())?;
 
     let send_info = start_send_session(mode, relay_url).await?;
-    log::info!("start_cloud_drop_session: waiting for a receiver on room={}", send_info.room_code);
-    let conn = ls_net::connect_as_sender(&send_info.signaling_url, &send_info.room_code)
+    // See `cloud_drop_sender_room`'s own doc comment for the real,
+    // Local-network-mode-specific bug this guards against.
+    let room = cloud_drop_sender_room(&send_info);
+    log::info!("start_cloud_drop_session: waiting for a receiver on room={room}");
+    let conn = ls_net::connect_as_sender(&send_info.signaling_url, room)
         .await
         .map_err(|e| e.to_string())?;
 
+    // Keyed by the same `room` value the connect call above actually used
+    // (not `send_info.room_code`), for the same reason, and to match the
+    // convention every other transport in this file already uses
+    // (`share_snapshot`/`share_snapshot_wizard`'s `connected_receivers`,
+    // keyed by the value actually used to pair on the relay, not the
+    // user-facing display code).
+    let room = room.to_string();
     state.cloud_drop_uploads.lock().map_err(|e| e.to_string())?.insert(
-        send_info.room_code.clone(),
+        room.clone(),
         crate::state::CloudDropUpload { conn: std::sync::Arc::new(conn), file_id: uploaded.file_id.clone(), retention },
     );
-    tauri::async_runtime::spawn(listen_for_cloud_access_requests(app, send_info.room_code.clone()));
+    tauri::async_runtime::spawn(listen_for_cloud_access_requests(app, room));
 
     Ok(CloudDropSessionInfo {
         room_code: send_info.room_code,

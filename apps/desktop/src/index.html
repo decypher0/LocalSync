@@ -142,6 +142,11 @@
   <path d="M3 5V19A9 3 0 0 0 21 19V5" />
   <path d="M3 12A9 3 0 0 0 21 12" />
     </symbol>
+    <symbol id="icon-upload-cloud" viewBox="0 0 24 24">
+      <path d="M16 16l-4-4-4 4" />
+  <path d="M12 12v9" />
+  <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
+    </symbol>
     <symbol id="icon-sun" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="4" />
   <path d="M12 2v2" />
@@ -357,6 +362,18 @@
         <p id="send-code-expiry" class="hint-inline"></p>
       </div>
 
+      <!-- ---- Round 30 goal A: Retry - an expired code or a failed attempt
+           both leave the exact same folder/database plan ready to go again;
+           this re-issues a fresh room code and re-runs the transfer on
+           *this* tab, instead of "Start a new send…" spawning a second,
+           duplicate tab for the same project (the real bug this round
+           found). Shown by renderSendSessionDetail's own canRetry check. ---- -->
+      <div id="send-retry-wrap" class="room-code-wrap hidden">
+        <span class="badge-expired"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> This send needs a new code</span>
+        <button id="send-retry-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Retry</button>
+        <span id="send-retry-status" class="hint-inline"></span>
+      </div>
+
       <div id="send-progress-wrap" class="progress-wrap hidden">
         <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
         <p id="send-progress-label" class="hint"></p>
@@ -521,16 +538,57 @@
           Local network hosts its own signaling relay automatically — nothing to configure,
           works when both machines are on the same network. Remote relay is for peers on
           different networks — both apps must point at the same separately-hosted relay
-          (see README).
+          (see README). Cloud drop uploads to your Google Drive instead of a direct transfer —
+          lets the receiver download whenever they're ready, and only after you approve their
+          account.
         </p>
         <span class="inline-row">
           <label class="radio-label"><input type="radio" name="wiz-relay-mode" id="wiz-mode-local" value="local" checked /> <svg class="icon"><use href="#icon-wifi"></use></svg> Local network</label>
           <label class="radio-label"><input type="radio" name="wiz-relay-mode" id="wiz-mode-remote" value="remote" /> <svg class="icon"><use href="#icon-globe"></use></svg> Remote relay</label>
+          <label class="radio-label"><input type="radio" name="wiz-relay-mode" id="wiz-mode-cloud" value="cloud" /> <svg class="icon"><use href="#icon-upload-cloud"></use></svg> Cloud drop</label>
         </span>
         <label id="wiz-relay-url-wrap" class="hidden">
           Remote relay URL
           <input id="wiz-relay-url" type="text" placeholder="ws://your-vps-ip:9090" />
         </label>
+
+        <!-- ---- Moved here from the old Step 4 checkbox (see this block's
+             prior home, git-blame'd as "Round 23") - a real, mutually
+             exclusive transfer-mode choice reads much clearer than a
+             checkbox tucked away on the final summary step, and it's the
+             only sender-facing decision that actually needs to happen
+             before folder selection anyway (retention has nothing to do
+             with the project's contents). The identity-request/response
+             handshake this still needs (see start_cloud_drop_session) is
+             hosted the same way "Local network" above always has been -
+             there's no separate remote-relay option for it here, since
+             that combination has no real UI home now that this is one
+             exclusive choice rather than an orthogonal add-on. ---- -->
+        <div id="wiz-cloud-drop-wrap" class="hidden">
+          <span class="inline-row">
+            <span id="wiz-google-account-status" class="hint-inline">Checking Google account…</span>
+            <button id="wiz-link-google-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-link"></use></svg> Link Google account</button>
+          </span>
+          <p id="wiz-google-account-error" class="error"></p>
+
+          <span class="mode-title">Retention</span>
+          <span class="inline-row">
+            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-after-download" value="after_download" checked /> Delete once downloaded</label>
+            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-24h" value="24h" /> Delete after 24 hours</label>
+            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-custom" value="custom" /> Delete at a specific time</label>
+          </span>
+          <label id="retention-custom-wrap" class="hidden">
+            Delete at
+            <input id="retention-custom-datetime" type="datetime-local" />
+          </label>
+          <p class="hint">
+            This is always enforced by LocalSync itself, not just Drive's native sharing
+            expiry — see docs/google-drive-setup.md for why (personal Google accounts don't
+            honor Drive's own expiration field). Only a single folder is sent this way if
+            multiple are selected later in this wizard.
+          </p>
+        </div>
+
         <p id="wiz-mode-error" class="error"></p>
         <button id="wiz-mode-next-btn" class="primary-btn" type="button">Next <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
       </div>
@@ -706,41 +764,10 @@
         <h3>Ready to send</h3>
         <ul id="wiz-ready-summary" class="manifest-card"></ul>
 
-        <!-- ---- Round 23: Cloud drop is orthogonal to the Local/Remote
-             signaling choice in Settings, not a replacement for it - that
-             choice still decides how this app and the receiver find each
-             other for the (tiny) identity-request/response handshake below;
-             this only decides whether the actual snapshot bytes travel
-             peer-to-peer or via the sender's own Google Drive. Only a
-             single folder is sent this way if multiple were selected (same
-             documented boundary `push_update`/pull-requests already have -
-             see commands::start_cloud_drop_session's doc comment). ---- -->
-        <label class="radio-label">
-          <input type="checkbox" id="cloud-drop-toggle" />
-          Cloud drop (upload to your Google Drive instead of a direct transfer — lets the
-          receiver download whenever they're ready, and only after you approve their account)
-        </label>
-        <div id="cloud-drop-options" class="hidden">
-          <span class="hint">
-            Needs a linked Google account (Settings → Google account) on both this device and
-            the receiver's.
-          </span>
-          <span class="mode-title">Retention</span>
-          <span class="inline-row">
-            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-after-download" value="after_download" checked /> Delete once downloaded</label>
-            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-24h" value="24h" /> Delete after 24 hours</label>
-            <label class="radio-label"><input type="radio" name="cloud-retention" id="retention-custom" value="custom" /> Delete at a specific time</label>
-          </span>
-          <label id="retention-custom-wrap" class="hidden">
-            Delete at
-            <input id="retention-custom-datetime" type="datetime-local" />
-          </label>
-          <p class="hint">
-            This is always enforced by LocalSync itself, not just Drive's native sharing
-            expiry — see docs/google-drive-setup.md for why (personal Google accounts don't
-            honor Drive's own expiration field).
-          </p>
-        </div>
+        <!-- ---- Cloud drop is now chosen back on Step 1 (the transfer-mode
+             step), alongside Local network / Remote relay, instead of a
+             separate checkbox here - see wiz-cloud-drop-wrap. This step no
+             longer needs its own Cloud-drop-specific UI. ---- -->
 
         <p id="wiz-send-error" class="error"></p>
         <button id="wiz-ready-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>

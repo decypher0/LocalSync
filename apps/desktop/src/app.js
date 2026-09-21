@@ -438,19 +438,36 @@ updateModeUi();
 // mode here updates the one real shared default rather than creating a
 // second, divergent setting - Settings and the wizard just become two
 // surfaces onto the same underlying choice.
+// "cloud" is a third, mutually exclusive choice here (moved onto this step
+// from its old Step 4 checkbox - see wiz-cloud-drop-wrap in index.html) but
+// is deliberately NOT one of the two values `MODE_KEY` ever persists: that
+// key is also read by Settings/Receive's own relayMode(), which only ever
+// expects "local"/"remote" back. Cloud drop still needs a real signaling
+// mode under the hood for its brief identity-request/response handshake
+// (see commands::start_cloud_drop_session's own `mode` parameter) - this
+// always hands it "local", the same zero-configuration default Local
+// network itself is. Picking Cloud drop only *hides* Local/Remote's own
+// selection state for the rest of this wizard visit, it never overwrites it.
 function wizRelayMode() {
+  if ($("wiz-mode-cloud").checked) return "cloud";
   return $("wiz-mode-remote").checked ? "remote" : "local";
 }
 function wizRelayUrl() {
   return $("wiz-relay-url").value.trim();
 }
 function updateWizModeUi() {
-  $("wiz-relay-url-wrap").classList.toggle("hidden", wizRelayMode() !== "remote");
+  const mode = wizRelayMode();
+  $("wiz-relay-url-wrap").classList.toggle("hidden", mode !== "remote");
+  $("wiz-cloud-drop-wrap").classList.toggle("hidden", mode !== "cloud");
+  if (mode === "cloud") refreshWizGoogleAccountStatus();
 }
 // Called every time step 1 is (re)entered, so it always reflects the most
 // recent choice - made here, or made in Settings since the wizard was last
-// opened.
+// opened. Cloud drop is never restored from storage (see wizRelayMode's own
+// comment) - it always starts unchecked, falling back to whichever of
+// Local/Remote was last persisted.
 function syncWizModeFromStorage() {
+  $("wiz-mode-cloud").checked = false;
   $("wiz-mode-remote").checked = localStorage.getItem(MODE_KEY) === "remote";
   $("wiz-mode-local").checked = !$("wiz-mode-remote").checked;
   $("wiz-relay-url").value = localStorage.getItem(RELAY_URL_KEY) || "";
@@ -464,9 +481,45 @@ $("wiz-mode-remote").addEventListener("change", () => {
   updateWizModeUi();
   localStorage.setItem(MODE_KEY, wizRelayMode());
 });
+$("wiz-mode-cloud").addEventListener("change", () => {
+  // Deliberately not persisted to MODE_KEY - see wizRelayMode's comment.
+  updateWizModeUi();
+});
 $("wiz-relay-url").addEventListener("input", () => {
   localStorage.setItem(RELAY_URL_KEY, wizRelayUrl());
 });
+
+// ---------- Cloud drop's Step-1 linked-Google-account check ----------
+// Adapts the exact same Settings-panel flow (refreshGoogleAccountStatus/
+// link-google-btn above) to Step 1's own DOM ids, so someone who picks
+// Cloud drop without having linked an account yet can do so right there
+// instead of being sent off to Settings and back.
+async function refreshWizGoogleAccountStatus() {
+  $("wiz-google-account-error").textContent = "";
+  try {
+    const linked = await invoke("google_account_status");
+    $("wiz-google-account-status").textContent = linked ? `Linked as ${linked.email}` : "Not linked yet.";
+    $("wiz-link-google-btn").classList.toggle("hidden", !!linked);
+  } catch (err) {
+    $("wiz-google-account-status").textContent = String(err);
+  }
+}
+$("wiz-link-google-btn").addEventListener("click", async () => {
+  $("wiz-google-account-error").textContent = "";
+  $("wiz-link-google-btn").disabled = true;
+  $("wiz-google-account-status").textContent = "Opening your browser for Google sign-in…";
+  try {
+    await invoke("link_google_account");
+    await refreshWizGoogleAccountStatus();
+    await refreshGoogleAccountStatus(); // keep Settings' own status in sync too
+  } catch (err) {
+    $("wiz-google-account-error").textContent = String(err);
+    await refreshWizGoogleAccountStatus();
+  } finally {
+    $("wiz-link-google-btn").disabled = false;
+  }
+});
+
 $("wiz-mode-next-btn").addEventListener("click", () => {
   if (wizRelayMode() === "remote" && !wizRelayUrl()) {
     $("wiz-mode-error").textContent = "Remote relay URL is required for Remote relay mode.";
@@ -535,12 +588,12 @@ function newSession(kind, id, title) {
     id,
     kind,
     title,
-    status: "connecting", // connecting | active | reviewing | running | done | error
+    status: "connecting", // connecting | active | reviewing | running | done | error | expired
     startedAt: new Date().toISOString(),
     endedAt: null,
     errorText: "",
     resultText: "",
-    busy: false, // an action button (Run/Reject/Stop/Ask for update) is mid-flight
+    busy: false, // an action button (Run/Reject/Stop/Ask for update/Retry) is mid-flight
     // ---- send-only ----
     roomCode: null,
     codeExpiresAt: null,
@@ -549,6 +602,18 @@ function newSession(kind, id, title) {
     progressTotal: 0,
     folders: [], // [{ path, dump: {schema, engine} | null }]
     cloudDrop: false,
+    // Round 30 goal A: the exact folder/database plan (Rust-shaped payload,
+    // not the display-only `folders` above - see buildWizardFoldersPayload)
+    // and transfer settings this send was started with, kept around so
+    // Retry (retrySendSession) can re-issue a fresh room code and re-run
+    // share_snapshot_wizard on this same session/tab - without sending the
+    // person back through folder selection or the database wizard for a
+    // project that's already fully configured. null for a cloud-drop
+    // session (it resolves in one shot; nothing left in "expired" for it
+    // to retry) and for anything created before this existed.
+    retryFolders: null,
+    retryMode: null,
+    retryUrl: null,
     // ---- receive-only ----
     snapshotId: null,
     senderPubkeyHex: null,
@@ -631,6 +696,7 @@ const SESSION_STATUS_ICON = {
   running: "icon-play",
   done: "icon-check",
   error: "icon-circle-x",
+  expired: "icon-refresh-cw",
 };
 
 function renderSessionTabs() {
@@ -695,6 +761,7 @@ function renderActiveSession() {
     running: "Running",
     done: "Done",
     error: "Error",
+    expired: "Expired",
   }[session.status] || session.status;
   $("session-detail-status").textContent = statusText;
 
@@ -1430,13 +1497,13 @@ function buildMagicLink(roomCode) {
 // send still waiting on a peer.
 function renderSendCodeExpiry(session) {
   const el = $("send-code-expiry");
-  if (!session.roomCode || !session.codeExpiresAt) {
+  if (!session.roomCode || !session.codeExpiresAt || session.status === "expired") {
     el.textContent = "";
     return;
   }
   const remaining = Math.round((session.codeExpiresAt - Date.now()) / 1000);
   if (remaining <= 0) {
-    el.textContent = "Code expired — click Send again for a new one.";
+    el.textContent = "Code expired.";
     el.className = "hint-inline error-inline";
   } else {
     const m = Math.floor(remaining / 60);
@@ -1445,9 +1512,39 @@ function renderSendCodeExpiry(session) {
     el.className = "hint-inline";
   }
 }
+
+// Round 30 goal A: real, found-in-testing bug - a sender whose code expired
+// (or who hit "Start a new send…" for the same project after a failure) got
+// a brand-new session/tab instead of this one being reused, so the same
+// conceptual send piled up as duplicate tabs. Root cause: nothing ever
+// flipped a stalled "connecting" session to a distinct terminal status once
+// its code timed out - it just sat there still *looking* connecting/healthy
+// forever (only this tick's countdown text, visible only while it happened
+// to be the active tab, ever said otherwise), so there was nothing for a
+// person to "retry" - "Start a new send…" was the only button that seemed
+// to do anything, and it always builds a fresh session because it has no
+// notion of "this is the same project as that other tab."
+//
+// Fix: this sweep (not just the active-session special case above) marks
+// every still-"connecting" send session whose code has timed out as
+// "expired" - a real status with its own tab icon/color (see
+// SESSION_STATUS_ICON/styles.css) - and renderSendSessionDetail's own Retry
+// button (wired to retrySendSession below) re-issues a fresh code on that
+// *same* session object/tab, so retrying never creates a second tab for the
+// same send again.
 setInterval(() => {
+  let anyExpired = false;
+  for (const s of sessions.values()) {
+    if (s.kind === "send" && s.status === "connecting" && s.codeExpiresAt && Date.now() >= s.codeExpiresAt) {
+      s.status = "expired";
+      anyExpired = true;
+    }
+  }
+  if (anyExpired) renderSessionTabs();
   const session = activeSession();
-  if (session && session.kind === "send") renderSendCodeExpiry(session);
+  if (!session || session.kind !== "send") return;
+  if (anyExpired) renderActiveSession();
+  else renderSendCodeExpiry(session);
 }, 1000);
 
 // Round 29 goal B1: paints the shared send-detail DOM from one session
@@ -1470,6 +1567,18 @@ function renderSendSessionDetail(session) {
 
   $("send-result").textContent = session.resultText || "";
   $("send-error").textContent = session.errorText || "";
+
+  // Round 30 goal A: Retry - only offered where it can actually do
+  // something (a send that has somewhere to retry to, i.e. not Cloud drop,
+  // which either already finished or never became a session) and hidden
+  // once the same session has since gone on to something else, e.g. right
+  // after a Retry itself resolves into "active"/"done".
+  const canRetry = !session.cloudDrop && !!session.retryFolders && (session.status === "expired" || session.status === "error");
+  $("send-retry-wrap").classList.toggle("hidden", !canRetry);
+  if (canRetry) {
+    $("send-retry-btn").disabled = session.busy;
+    $("send-retry-status").textContent = session.busy ? "Getting a new code…" : "";
+  }
 }
 
 // Round 24: distinct from each other on purpose - a teammate who already
@@ -1510,10 +1619,11 @@ function resetSendWizard() {
   $("wiz-send-error").textContent = "";
 }
 
-// ---------- round 23: Cloud drop toggle + retention picker (Send tab) ----------
-$("cloud-drop-toggle").addEventListener("change", () => {
-  $("cloud-drop-options").classList.toggle("hidden", !$("cloud-drop-toggle").checked);
-});
+// ---------- round 23: Cloud drop retention picker ----------
+// Cloud drop itself (the toggle that used to live here as a Step-4
+// checkbox) moved to Step 1 - see wiz-mode-cloud/wiz-cloud-drop-wrap - and
+// its retention sub-controls (also now rendered on Step 1, inside
+// wiz-cloud-drop-wrap) are still wired up the same way, right here.
 $("retention-custom").addEventListener("change", () => {
   $("retention-custom-wrap").classList.toggle("hidden", !$("retention-custom").checked);
 });
@@ -1564,6 +1674,7 @@ $("send-btn").addEventListener("click", async () => {
     $("wiz-send-error").textContent = "Remote relay URL is required for Remote relay mode.";
     return;
   }
+  const isCloudDrop = mode === "cloud";
 
   const folderLabels = wizardFolders.map((f) => wizFolderLabel(f.path));
   const sessionFolders = wizardFolders.map((f) => ({ path: f.path, dump: f.dump ? { schema: f.dump.schema, engine: f.dump.engine } : null }));
@@ -1581,12 +1692,17 @@ $("send-btn").addEventListener("click", async () => {
   // already have for a wizard-originated send) and hosts the same kind of
   // room code, but never opens a bulk-transfer channel - the whole thing
   // resolves once the upload is done, there's no separate progress phase.
-  if ($("cloud-drop-toggle").checked) {
+  if (isCloudDrop) {
     try {
       const retention = retentionChoiceDto();
+      // Cloud drop's own signaling handshake always uses "local" (see
+      // wizRelayMode's comment - "cloud" isn't a mode start_cloud_drop_session
+      // itself understands, and there's no remaining UI here to pick Remote
+      // relay for it specifically now that this is one exclusive Step-1
+      // choice instead of an add-on to Local/Remote).
       const info = await invoke("start_cloud_drop_session", {
-        mode,
-        relayUrl: mode === "remote" ? url : null,
+        mode: "local",
+        relayUrl: null,
         projectPath: foldersForPayload[0].path,
         retention,
       });
@@ -1611,37 +1727,82 @@ $("send-btn").addEventListener("click", async () => {
     return;
   }
 
-  let session = null;
+  const session = newSession("send", null, folderLabels.join(", "));
+  session.folders = sessionFolders;
+  // Round 30 goal A: kept so Retry (retrySendSession, below) can redo just
+  // this part later without the person going back through folder selection
+  // or the database wizard - see this session field's own comment in
+  // newSession.
+  session.retryFolders = foldersForPayload;
+  session.retryMode = mode;
+  session.retryUrl = url;
+
+  try {
+    await performSendAttempt(session, mode, url, foldersForPayload, (info) => {
+      // Round 29: keyed by info.room_id, not info.room_code - the backend's
+      // own share_snapshot_wizard/share_snapshot take a `room_code`
+      // *parameter* that's actually always called with room_id (see
+      // start_send_session's own doc comment: "room_code is just what's
+      // shown to the user... calls share_snapshot(..., room_id, ...)"), and
+      // that's the value baked into both the "share-progress" event's
+      // session_id and connected_receivers' peer_id.
+      session.id = info.room_id;
+      // Round 20 goal 4: the modal's job ends once there's a real room code
+      // to show - close it now so the code/progress below render in the
+      // session tab, exactly where they always have.
+      closeSendWizard();
+      addSession(session);
+      resetSendWizard();
+      $("send-btn").disabled = false; // free to start another send now - this one keeps running in its own tab
+    });
+  } catch (err) {
+    // performSendAttempt only ever rethrows here when it failed before a
+    // session/tab existed to show the error on (start_send_session itself)
+    // - anything past that point is handled inside it instead
+    // (endSession("error") on that same session). The wizard is still open,
+    // so the error belongs there.
+    $("wiz-send-error").textContent = String(err);
+    $("send-btn").disabled = false;
+  }
+});
+
+// Round 30 goal A: the one real attempt loop behind both the initial Send
+// click above and Retry (retrySendSession) below - issuing a room code,
+// waiting for a peer, and reporting the result all work identically either
+// way, the only difference is whether `session` is brand new or already an
+// existing tab being redone in place. `onRoomIdKnown` is where the two
+// callers differ: the initial send turns a not-yet-a-tab session into a
+// real one (closes the wizard, calls addSession); retry instead re-keys the
+// *same*, already-open tab under the fresh room id, exactly once
+// start_send_session hands one back - see retrySendSession's own comment
+// for why that in-place re-keying is what actually fixes the duplicate-tab
+// bug this round found.
+async function performSendAttempt(session, mode, url, foldersForPayload, onRoomIdKnown) {
+  let idAssigned = false;
   try {
     // "local": hosts an embedded relay + derives a LAN-IP-encoded room code
     // (unchanged round-8 behavior). "remote": a relay is already running
     // elsewhere (see README) - only a bare room id is generated, and it IS
     // the whole paste-able code, since both apps already share the relay URL.
     const info = await invoke("start_send_session", { mode, relayUrl: mode === "remote" ? url : null });
-    // Round 20 goal 4: the modal's job ends once there's a real room code
-    // to show - close it now so the code/progress below render in the
-    // session tab, exactly where they always have.
-    closeSendWizard();
-
-    // Round 29: keyed by info.room_id, not info.room_code - the backend's
-    // own share_snapshot_wizard/share_snapshot take a `room_code` *parameter*
-    // that's actually always called with room_id (see start_send_session's
-    // own doc comment: "room_code is just what's shown to the user... calls
-    // share_snapshot(..., room_id, ...)"), and that's the value baked into
-    // both the "share-progress" event's session_id and connected_receivers'
-    // peer_id. info.room_code stays around only for session.roomCode, the
-    // separate, purely-cosmetic display/copy value.
-    session = newSession("send", info.room_id, folderLabels.join(", "));
     session.roomCode = info.room_code;
-    session.folders = sessionFolders;
     session.codeExpiresAt = Date.now() + info.code_expires_in_seconds * 1000;
-    addSession(session);
-    resetSendWizard();
-    $("send-btn").disabled = false; // free to start another send now - this one keeps running in its own tab
+    session.status = "connecting";
+    session.errorText = "";
+    session.resultText = "";
+    session.progressBytes = 0;
+    session.progressTotal = 0;
+    session.endedAt = null; // clears a prior attempt's terminal state, if any, so endSession() below isn't a no-op
+    onRoomIdKnown(info);
+    idAssigned = true;
 
-    // Round 29: filtered by session_id (now threaded through every
-    // Progress emit in commands.rs) so concurrent sends' identically-named
-    // "share-progress" events never cross-update the wrong session.
+    // Round 29: filtered by session_id (now threaded through every Progress
+    // emit in commands.rs) so concurrent sends' identically-named
+    // "share-progress" events never cross-update the wrong session. Any
+    // listener from a previous attempt on this same session (a retry) is
+    // torn down first - it's watching for a session_id (the old room id)
+    // that will never be emitted again.
+    if (session.progressUnlisten) session.progressUnlisten();
     session.progressUnlisten = await listen("share-progress", (evt) => {
       if (evt.payload.session_id !== session.id) return;
       const wasConnecting = session.status === "connecting";
@@ -1659,10 +1820,10 @@ $("send-btn").addEventListener("click", async () => {
 
     // Round 22 found `engine` silently dropped here; round 25 found
     // `filePath` sent instead of the `file_path` Rust's DumpPlanDto
-    // actually declares - see wizard-payload.js's own comment for the
-    // full root cause. Extracted into its own file specifically so this
-    // exact translation step - the one part of the whole wizard flow no
-    // Rust test can reach, since every one of them calls
+    // actually declares - see wizard-payload.js's own comment for the full
+    // root cause. Extracted into its own file specifically so this exact
+    // translation step - the one part of the whole wizard flow no Rust
+    // test can reach, since every one of them calls
     // commands::share_snapshot_wizard directly - finally has a real,
     // automated regression test (test-wizard-payload.js).
     const folders = buildWizardFoldersPayload(foldersForPayload);
@@ -1675,18 +1836,59 @@ $("send-btn").addEventListener("click", async () => {
     endSession(session, "done");
     refreshReceivers(); // this send may have just added a new roster entry
   } catch (err) {
-    if (session) {
-      // endSession() itself refreshes the active view if this session is
-      // still the one on screen.
-      session.errorText = String(err);
-      endSession(session, "error");
-    } else {
-      // Failed before a session even existed (start_send_session itself) -
-      // the wizard is still open, so the error belongs there.
-      $("wiz-send-error").textContent = String(err);
-      $("send-btn").disabled = false;
-    }
+    // No session/tab exists yet (start_send_session itself failed, before
+    // onRoomIdKnown ran) - let the caller decide where to show this: the
+    // still-open wizard for a first send, or the same tab being retried for
+    // a retry (see the initial send-btn handler and retrySendSession).
+    if (!idAssigned) throw err;
+    session.endedAt = null; // a retry redoing an already-"error"/"expired" session, see endSession's guard
+    session.errorText = String(err);
+    endSession(session, "error");
   }
+}
+
+// Round 30 goal A: the actual fix for "Start a new send…" spawning a
+// duplicate tab when retrying a failed/expired send for the same project -
+// this re-runs performSendAttempt on the *same* session object this button
+// already lives on, re-keying it (below) to whatever fresh room id the new
+// code uses instead of ever creating a second session/tab. Offered only
+// where renderSendSessionDetail's own canRetry check allows it (an expired
+// or failed non-Cloud-drop send that still has its original folder plan).
+async function retrySendSession(session) {
+  if (session.busy || !session.retryFolders) return;
+  const previousId = session.id;
+  session.busy = true;
+  if (session.id === activeSessionId) renderActiveSession();
+  try {
+    await performSendAttempt(session, session.retryMode, session.retryUrl, session.retryFolders, (info) => {
+      // Re-key this same tab in place under the new room id - the actual
+      // fix: no new entry is ever added to `sessions`, so retrying never
+      // shows up as a second tab for the same send.
+      if (sessions.has(previousId)) sessions.delete(previousId);
+      session.id = info.room_id;
+      sessions.set(session.id, session);
+      if (activeSessionId === previousId) activeSessionId = session.id;
+      recordSessionHistory(session);
+      renderSessionTabs();
+    });
+  } catch (err) {
+    // A retry that fails again on this same, still-"error"/"expired"
+    // session would otherwise hit endSession's own already-ended guard
+    // (endedAt was already set by whatever the *previous* attempt ended
+    // with) and silently no-op instead of recording this attempt's own
+    // failure - clear it first so this failure is the one that sticks.
+    session.endedAt = null;
+    session.errorText = String(err);
+    endSession(session, "error");
+  } finally {
+    session.busy = false;
+    if (session.id === activeSessionId) renderActiveSession();
+  }
+}
+
+$("send-retry-btn").addEventListener("click", () => {
+  const session = activeSession();
+  if (session) retrySendSession(session);
 });
 
 // ---------- connected receivers roster (sender-side) ----------
