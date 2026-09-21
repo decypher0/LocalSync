@@ -13,6 +13,26 @@ fn sha256_hex(bytes: &[u8]) -> String {
     to_hex(&Sha256::digest(bytes))
 }
 
+/// Same digest as `sha256_hex(&fs::read(path)?)`, but reads `path` in
+/// bounded chunks rather than materializing the whole file in memory first —
+/// the difference that matters for a multi-GB database dump. Used by
+/// `create_snapshot_multi` when a `PendingDump`'s content lives on disk
+/// (`DumpSource::FilePath`) rather than already in memory.
+pub(crate) fn sha256_hex_of_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(to_hex(&hasher.finalize()))
+}
+
 /// Lockfile priority tiers for the MVP: Maven, then Gradle, then npm as a
 /// generic fallback. First tier with any file present wins (files within a
 /// tier are concatenated in sorted order); no cascading to the next tier.
