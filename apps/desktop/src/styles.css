@@ -675,6 +675,24 @@ button:disabled { opacity: 0.5; cursor: default; }
 .session-tab-status-done { color: var(--added-text); }
 .session-tab-status-reviewing,
 .session-tab-status-connecting { color: var(--modified-text); }
+/* Round 30 goal A: a session whose code timed out - a real, distinct status
+   (not left looking like a healthy "connecting" tab forever), same amber
+   used for other "needs your attention, not necessarily broken" states
+   above. */
+.session-tab-status-expired { color: var(--modified-text); }
+
+/* Round 30 goal A: the Retry banner/badge inside a send session's own
+   detail view - reuses the same amber "needs attention" color as the tab
+   status above, so a failed/expired tab reads as a matched pair on the tab
+   strip and once opened, not two different visual languages. */
+.badge-expired {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--modified-text);
+  font-weight: var(--weight-semibold);
+}
+.badge-expired .icon { width: 16px; height: 16px; }
 .session-tab-close {
   display: inline-flex;
   align-items: center;

@@ -1207,9 +1207,10 @@ failure path itself is honest before you set the real values.
    tab shows a plain confirmation page and Settings now shows your real
    linked email.
 2. **A full send/receive/accept cycle, two real accounts, ideally two real
-   machines.** On the sender: check the **Cloud drop** box on the Send
-   wizard's final step, pick a retention option, click **Send** — confirm a
-   room code appears and a real file lands in your Google Drive (check
+   machines.** On the sender: pick the **Cloud drop** radio on the Send
+   wizard's first step (transfer mode), pick a retention option, click
+   through to **Send** — confirm a room code appears and a real file lands
+   in your Google Drive (check
    drive.google.com yourself; look for a "LocalSync Cloud Drop" folder).
    On the receiver (linked to your *second* test account): check **This is
    a Cloud drop code**, paste the code, click **Receive** — confirm the
