@@ -1,6 +1,4 @@
 use anyhow::{bail, Context, Result};
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -72,6 +70,39 @@ const NOISE_DIR_NAMES: &[&str] = &[
     ".nuxt",        // Nuxt build output
 ];
 
+/// Round 36: payload compression codec. Both `bundle_project`'s per-folder
+/// tar and `merge_folder_payloads`'s combined tar use this — a real 5GB
+/// database dump transferring at ~5MB/sec uncompressed made transfer
+/// *size/time* (a separate axis from round 35's transfer *memory* fix) a
+/// real, reported problem. zstd at this level is both faster than gzip's
+/// `Compression::default()` (6) and compresses same-content-class data
+/// (repetitive SQL/text) noticeably smaller — see
+/// `crates/ls-snapshot/tests/compression_ratio_test.rs` for the measured
+/// numbers this level was picked against. Level 3 is zstd's own documented
+/// default: a deliberate speed/ratio balance, not tuned specifically for
+/// this project's data.
+const ZSTD_LEVEL: i32 = 3;
+
+/// Wraps `w` in a streaming zstd encoder — the direct swap-in replacement
+/// for the `GzEncoder::new(w, Compression::default())` this project used
+/// before round 36. Like `GzEncoder`, this only ever buffers one bounded
+/// internal window's worth of data at a time no matter how much gets
+/// written through it — `tar::Builder` (and, for a `DumpSource::FilePath`
+/// dump, `append_dump_source`'s `BufReader`) still feed it in the same
+/// small, bounded chunks as before, so a multi-GB dump never gets
+/// materialized in memory here either — round 35's streaming fix is
+/// unaffected, just fed through a different compressor.
+fn zstd_encoder<W: Write>(w: W) -> Result<zstd::stream::write::Encoder<'static, W>> {
+    zstd::stream::write::Encoder::new(w, ZSTD_LEVEL).context("initializing zstd encoder")
+}
+
+/// Wraps a byte slice in a streaming zstd decoder — the direct replacement
+/// for the `flate2::read::GzDecoder::new(...)` this project used before
+/// round 36.
+fn zstd_decoder(bytes: &[u8]) -> Result<zstd::stream::read::Decoder<'static, std::io::BufReader<&[u8]>>> {
+    zstd::stream::read::Decoder::new(bytes).context("initializing zstd decoder")
+}
+
 /// True if any component of `path` is a known noise directory name (see
 /// [`NOISE_DIR_NAMES`]) — i.e. the path lives inside one, at any depth.
 fn has_noise_component(path: &Path) -> bool {
@@ -124,8 +155,8 @@ pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Resul
 
     let db_seed_dir = resolve_db_seed_dir(project_root);
 
-    let gz = GzEncoder::new(Vec::new(), Compression::default());
-    let mut tb = tar::Builder::new(gz);
+    let zstd = zstd_encoder(Vec::new())?;
+    let mut tb = tar::Builder::new(zstd);
 
     let archive_bytes = git_bytes(project_root, &["archive", "--format=tar", "HEAD"])?;
     append_git_archive(&mut tb, &archive_bytes, "source")?;
@@ -145,8 +176,8 @@ pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Resul
         }
     }
 
-    let gz = tb.into_inner().context("finalizing tar")?;
-    let payload = gz.finish().context("finalizing gzip")?;
+    let zstd = tb.into_inner().context("finalizing tar")?;
+    let payload = zstd.finish().context("finalizing zstd stream")?;
 
     log::info!(
         "bundling done: commit={} payload_bytes={}",
@@ -373,11 +404,12 @@ pub(crate) fn merge_folder_payloads(
     bundles: &[(String, GitBundle)],
     dumps: &[(String, String, &crate::types::DumpSource)],
 ) -> Result<Vec<u8>> {
-    let gz = GzEncoder::new(Vec::new(), Compression::default());
-    let mut tb = tar::Builder::new(gz);
+    let zstd = zstd_encoder(Vec::new())?;
+    let mut tb = tar::Builder::new(zstd);
 
     for (label, bundle) in bundles {
-        let decoder = flate2::read::GzDecoder::new(bundle.payload.as_slice());
+        let decoder = zstd_decoder(bundle.payload.as_slice())
+            .with_context(|| format!("decoding {label}'s bundle payload"))?;
         let mut archive = tar::Archive::new(decoder);
         for entry in archive
             .entries()
@@ -401,8 +433,8 @@ pub(crate) fn merge_folder_payloads(
         append_dump_source(&mut tb, &tar_path, source)?;
     }
 
-    let gz = tb.into_inner().context("finalizing merged tar")?;
-    gz.finish().context("finalizing merged gzip")
+    let zstd = tb.into_inner().context("finalizing merged tar")?;
+    zstd.finish().context("finalizing merged zstd stream")
 }
 
 fn append_bytes<W: Write>(tb: &mut tar::Builder<W>, path: &str, data: &[u8]) -> Result<()> {

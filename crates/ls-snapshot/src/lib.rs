@@ -323,7 +323,7 @@ mod tests {
     }
 
     fn unpack(payload: &[u8]) -> HashMap<String, Vec<u8>> {
-        let decoder = flate2::read::GzDecoder::new(payload);
+        let decoder = zstd::stream::read::Decoder::new(payload).unwrap();
         let mut archive = tar::Archive::new(decoder);
         let mut out = HashMap::new();
         for entry in archive.entries().unwrap() {

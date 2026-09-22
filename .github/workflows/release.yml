@@ -400,11 +400,43 @@ jobs:
             appimage_sig_path=$(find target -type f -path '*/bundle/appimage/*.AppImage.sig' 2>/dev/null | head -n1)
           fi
 
+          # The .deb also gets a real updater .sig from the same `tauri
+          # build` invocation whenever TAURI_SIGNING_PRIVATE_KEY is set -
+          # tauri-cli's sign_updaters() signs every one of
+          # Updater/Nsis/WindowsMsi/AppImage/Deb/Rpm's bundle_paths
+          # unconditionally (confirmed directly against tauri-cli 2.9.4's
+          # own src/bundle.rs), not just the AppImage. This used to be
+          # produced and then silently discarded here - found and fixed as
+          # part of root-causing Linux's "invalid updater binary format":
+          # a user who installs the .deb (a first-class download this
+          # project has always offered, not an edge case) runs a binary
+          # tauri-bundler patched at build time to self-identify as
+          # BundleType::Deb (tauri-utils's bundle_type(), confirmed
+          # separately per package type). tauri-plugin-updater's
+          # install_inner() dispatches on exactly that self-identification,
+          # so a .deb-installed user's app always calls install_deb() -
+          # which validates the downloaded bytes are actually a .deb
+          # (infer::archive::is_deb) before accepting them. latest.json
+          # only ever contained the AppImage's URL/signature under both
+          # possible lookup keys the plugin tries for a .deb install
+          # ({os}-{arch}-{installer} then the bare {os}-{arch} fallback -
+          # confirmed against tauri-plugin-updater 2.11.0's own
+          # Updater::get_urls) - so every .deb-installed user's updater
+          # downloaded the AppImage's bytes, handed them to
+          # infer::archive::is_deb(), got `false`, and hit exactly
+          # Error::InvalidUpdaterFormat ("invalid updater binary format").
+          # Publishing this .sig lets the release job add a real
+          # "linux-x86_64-deb" manifest entry so .deb installs update
+          # correctly too - see that job's own comment for the other half.
+          deb_sig_path=$(find target -type f -path '*/bundle/deb/*.deb.sig' 2>/dev/null | head -n1)
+
           echo "found deb: $deb_path"
+          echo "found deb sig: ${deb_sig_path:-(none - no signing secret configured)}"
           echo "found appimage: ${appimage_path:-(none - see the appimage_failed output of the build step)}"
           echo "found appimage sig: ${appimage_sig_path:-(none)}"
           {
             echo "deb_path=$deb_path"
+            echo "deb_sig_path=$deb_sig_path"
             echo "appimage_path=$appimage_path"
             echo "appimage_sig_path=$appimage_sig_path"
           } >> "$GITHUB_OUTPUT"
@@ -413,6 +445,12 @@ jobs:
         with:
           name: LocalSync-linux-deb
           path: ${{ steps.find_installers.outputs.deb_path }}
+
+      - uses: actions/upload-artifact@v4
+        if: steps.find_installers.outputs.deb_sig_path != ''
+        with:
+          name: LocalSync-linux-deb-sig
+          path: ${{ steps.find_installers.outputs.deb_sig_path }}
 
       - uses: actions/upload-artifact@v4
         if: steps.find_installers.outputs.appimage_path != ''
@@ -605,6 +643,56 @@ jobs:
         # runs on this project's actual macOS CI target, and doubling
         # macOS runner-minutes (10x cost) for an update channel with no
         # confirmed userbase yet wasn't worth it unasked.
+        # Root cause found this round for Linux's "invalid updater binary
+        # format" install failure (confirmed directly against the exact
+        # pinned crate sources - tauri 2.11.4 / tauri-bundler 2.9.4 /
+        # tauri-plugin-updater 2.11.0 / tauri-utils 2.9.3 - not assumed from
+        # general Tauri knowledge): every package format tauri-bundler
+        # builds gets a distinct `__TAURI_BUNDLE_TYPE_VAR_*` marker patched
+        # into its own copy of the main binary at build time
+        # (tauri-bundler's bundle.rs `patch_binary`, called once per
+        # package_type in the loop in `bundle_project`) - so the .deb's
+        # binary self-identifies as BundleType::Deb and the AppImage's as
+        # BundleType::AppImage (tauri-utils's `platform::bundle_type`).
+        # tauri-plugin-updater's `Update::install_inner` for Linux
+        # (updater.rs) dispatches purely on that self-identification: a
+        # .deb-installed app always calls `install_deb`, which validates the
+        # downloaded bytes really are a .deb (`infer::archive::is_deb`)
+        # before installing. This workflow's latest.json only ever published
+        # one Linux entry - the AppImage's URL/signature - so every
+        # .deb-installed user's updater downloaded the AppImage's bytes,
+        # `is_deb` correctly said no, and the plugin returned exactly
+        # `Error::InvalidUpdaterFormat` ("invalid updater binary format").
+        # This was never a signing/asset-mismatch bug - the AppImage's own
+        # .sig has always matched the AppImage's own bytes byte-for-byte;
+        # the bug was that the manifest only ever described the AppImage, to
+        # every installed format.
+        #
+        # Fix: `Updater::get_urls` (updater.rs) doesn't only look up the
+        # bare `{os}-{arch}` key - it tries `{os}-{arch}-{installer}` first
+        # (`installer.name()`: "appimage"/"deb"/"rpm"/...) and only falls
+        # back to the bare key if that's missing. So the *static* manifest
+        # format this project already uses can describe per-package-type
+        # entries after all - it just never had them. Publishing explicit
+        # "linux-x86_64-appimage" (AppImage users now match this instead of
+        # falling back) and "linux-x86_64-deb" (deb users now match a real
+        # .deb + .deb.sig instead of silently falling back to the AppImage's)
+        # entries fixes both without needing any dynamic/server-side
+        # endpoint. The bare "linux-x86_64" key is kept too, pointing at the
+        # AppImage - it's what any older client or a client that somehow
+        # can't detect its own bundle type still falls back to.
+        #
+        # The .deb entry is treated as optional (unlike win/linux-appimage/
+        # macos, which still hard-require a signature to publish
+        # latest.json at all): the previous round's own comment claiming
+        # "Tauri's updater doesn't support .deb at all" was itself checked
+        # this round and found to be incorrect for the pinned
+        # tauri-plugin-updater 2.11.0 - `install_deb` is real and installs
+        # via `pkexec`/graphical-sudo/`sudo` + `dpkg -i` (updater.rs
+        # `try_install_with_privileges`) - but treating it as optional here
+        # means a still-hypothetical future regression in .deb signing never
+        # blocks Windows/AppImage/macOS auto-update the way a hard
+        # requirement would.
         id: manifest
         run: |
           app_version=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
@@ -616,11 +704,14 @@ jobs:
           win_sig_file=$(find dist -maxdepth 1 -name '*-setup.exe.sig' | head -n1)
           linux_appimage=$(find dist -maxdepth 1 -name '*.AppImage' | head -n1)
           linux_sig_file=$(find dist -maxdepth 1 -name '*.AppImage.sig' | head -n1)
+          linux_deb=$(find dist -maxdepth 1 -name '*.deb' | head -n1)
+          linux_deb_sig_file=$(find dist -maxdepth 1 -name '*.deb.sig' | head -n1)
           macos_tar=$(find dist -maxdepth 1 -name '*.app.tar.gz' | head -n1)
           macos_sig_file=$(find dist -maxdepth 1 -name '*.app.tar.gz.sig' | head -n1)
 
           echo "Windows: exe=${win_exe:-(none)} sig=${win_sig_file:-(none)}"
           echo "Linux:   appimage=${linux_appimage:-(none)} sig=${linux_sig_file:-(none)}"
+          echo "Linux:   deb=${linux_deb:-(none)} sig=${linux_deb_sig_file:-(none)}"
           echo "macOS:   tar=${macos_tar:-(none)} sig=${macos_sig_file:-(none)}"
 
           if [ -z "$win_sig_file" ] || [ -z "$linux_sig_file" ] || [ -z "$macos_sig_file" ]; then
@@ -636,21 +727,40 @@ jobs:
           linux_url="https://github.com/$repo/releases/download/$tag/$(basename "$linux_appimage")"
           macos_url="https://github.com/$repo/releases/download/$tag/$(basename "$macos_tar")"
 
+          # Optional: only present when the .deb build actually produced a
+          # signature (always true whenever TAURI_SIGNING_PRIVATE_KEY is
+          # set, same as the AppImage - see build-linux's own comment).
+          linux_deb_sig=""
+          linux_deb_url=""
+          if [ -n "$linux_deb_sig_file" ] && [ -n "$linux_deb" ]; then
+            linux_deb_sig=$(cat "$linux_deb_sig_file")
+            linux_deb_url="https://github.com/$repo/releases/download/$tag/$(basename "$linux_deb")"
+          else
+            echo "No .deb updater signature found - publishing latest.json without a linux-x86_64-deb entry. .deb-installed users won't get an in-app update prompt until a build produces one." >&2
+          fi
+
           jq -n \
             --arg version "$app_version" \
             --arg pub_date "$pub_date" \
             --arg win_sig "$win_sig" --arg win_url "$win_url" \
             --arg linux_sig "$linux_sig" --arg linux_url "$linux_url" \
             --arg macos_sig "$macos_sig" --arg macos_url "$macos_url" \
+            --arg linux_deb_sig "$linux_deb_sig" --arg linux_deb_url "$linux_deb_url" \
             '{
               version: $version,
               notes: "See the GitHub Release page for details.",
               pub_date: $pub_date,
-              platforms: {
-                "windows-x86_64": { signature: $win_sig, url: $win_url },
-                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
-                "darwin-aarch64": { signature: $macos_sig, url: $macos_url }
-              }
+              platforms: (
+                {
+                  "windows-x86_64": { signature: $win_sig, url: $win_url },
+                  "linux-x86_64": { signature: $linux_sig, url: $linux_url },
+                  "linux-x86_64-appimage": { signature: $linux_sig, url: $linux_url },
+                  "darwin-aarch64": { signature: $macos_sig, url: $macos_url }
+                }
+                + (if $linux_deb_sig != "" then
+                    { "linux-x86_64-deb": { signature: $linux_deb_sig, url: $linux_deb_url } }
+                  else {} end)
+              )
             }' > dist/latest.json
           echo "generated=true" >> "$GITHUB_OUTPUT"
           echo "--- dist/latest.json ---"

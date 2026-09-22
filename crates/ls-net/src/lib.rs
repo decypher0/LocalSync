@@ -18,13 +18,21 @@
 //!
 //! ## ICE strategy
 //! Candidates are *not* trickled over the signaling channel as they're
-//! discovered. Instead each side waits for ICE gathering to complete before
-//! sending its SDP, so the offer/answer already contains every candidate.
-//! This means exactly one signaling round-trip per side (simpler, and
-//! avoids a class of "candidate arrived before remote description was set"
-//! races) at the cost of added connect latency vs. trickle ICE. Fine for
-//! the MVP; revisit if connection setup time on real NATs becomes a
-//! problem.
+//! discovered. Instead each side waits (up to [`ICE_GATHERING_TIMEOUT`]) for
+//! ICE gathering to complete before sending its SDP, so the offer/answer
+//! carries every candidate gathered by then. This means exactly one
+//! signaling round-trip per side (simpler, and avoids a class of "candidate
+//! arrived before remote description was set" races) at the cost of added
+//! connect latency vs. trickle ICE. Fine for the MVP; revisit if connection
+//! setup time on real NATs becomes a problem.
+//!
+//! The wait is bounded rather than unconditional: `webrtc-ice` hardcodes a
+//! 5s timeout per STUN query attempt with no way to configure it through
+//! this crate's dependency, so an unreachable/filtered STUN or TURN server
+//! (a real scenario on restrictive LANs) could otherwise block the
+//! offer/answer for several multiples of that even though a same-LAN peer
+//! never needs anything beyond the near-instant host candidate. See
+//! [`ICE_GATHERING_TIMEOUT`]'s doc comment for the measurements behind this.
 
 mod discovery;
 mod mdns_discovery;
@@ -127,6 +135,40 @@ const DONE_ACK_REPEATS: usize = 5;
 /// exposes this same value to the UI for a visible countdown rather than a
 /// silent background timer.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Ceiling on how long each side waits for ICE gathering to fully complete
+/// before sending its SDP anyway (see the module doc comment on "ICE
+/// strategy" for why gathering isn't trickled).
+///
+/// Measured directly (a same-box `connect_as_sender`/`connect_as_receiver`
+/// pair against the embedded relay, timed with `std::time::Instant` - see
+/// this round's own report for the exact numbers, not kept as a permanent
+/// test): against a real, reachable STUN server, gathering completes in
+/// well under a second (~300-460ms observed for a full connect including
+/// signaling and data-channel open). But `webrtc-ice` 0.9.1 hardcodes a 5s
+/// timeout per
+/// STUN query attempt (`STUN_GATHER_TIMEOUT` in `agent_gather.rs`) with no
+/// way to configure it via `RTCConfiguration`/`AgentConfig` exposed through
+/// this crate's `webrtc = "0.8"` dependency - so when the configured STUN
+/// server (`ice_config`) is unreachable or filtered (a real scenario on
+/// restrictive LANs/corporate networks/some routers - exactly where a user
+/// would be trying a "Local network" share), gathering can block for many
+/// multiples of that 5s figure before `gathering_complete_promise` ever
+/// resolves. Measured directly here: pointing the STUN server at a
+/// non-responding address inflated total connect time from ~300ms to
+/// ~10.3s.
+///
+/// For a same-LAN connection, the host candidate (gathered essentially
+/// instantly - no network round trip) is the only one that actually gets
+/// used anyway, so waiting on an unreachable STUN/TURN server buys nothing
+/// but latency. This bounds that wait: once it elapses, whatever
+/// candidates have gathered so far (in practice, always at least the host
+/// candidate) are sent as-is instead of continuing to block. This is a
+/// deliberately small, contained change - not a switch to trickle ICE - see
+/// the module doc comment for why full trickle ICE (which would let
+/// candidates arrive over the signaling channel after the offer/answer,
+/// rather than being bounded like this) is a larger change left for later.
+const ICE_GATHERING_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// An open, encrypted P2P connection to one peer, carrying two independent
 /// WebRTC data channels:
@@ -410,13 +452,26 @@ async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result
     let (control_open_rx, control_msg_rx) = wire_data_channel(&control_dc);
 
     // Non-trickle ICE: wait for gathering to finish before sending the
-    // offer, so it already carries every local candidate.
+    // offer, so it already carries every local candidate - but only up to
+    // ICE_GATHERING_TIMEOUT (see its doc comment). A same-LAN peer only
+    // ever uses the host candidate anyway, which gathers near-instantly;
+    // this just stops an unreachable/filtered STUN or TURN server from
+    // blocking the offer for several multiples of that.
     let mut gather_complete = pc.gathering_complete_promise().await;
     let offer = pc.create_offer(None).await?;
     pc.set_local_description(offer).await?;
     log::info!("sender: offer created");
-    let _ = gather_complete.recv().await;
-    log::info!("sender: ICE gathering complete");
+    if tokio::time::timeout(ICE_GATHERING_TIMEOUT, gather_complete.recv())
+        .await
+        .is_err()
+    {
+        log::warn!(
+            "sender: ICE gathering did not finish within {ICE_GATHERING_TIMEOUT:?}; \
+             sending offer with whatever candidates have gathered so far"
+        );
+    } else {
+        log::info!("sender: ICE gathering complete");
+    }
     let local_desc = pc
         .local_description()
         .await
@@ -514,11 +569,22 @@ async fn connect_as_receiver_inner(
     log::info!("receiver: offer received");
     pc.set_remote_description(offer).await?;
 
+    // See the matching comment in connect_as_sender_inner: bounded, not
+    // unbounded, non-trickle ICE.
     let mut gather_complete = pc.gathering_complete_promise().await;
     let answer = pc.create_answer(None).await?;
     pc.set_local_description(answer).await?;
-    let _ = gather_complete.recv().await;
-    log::info!("receiver: ICE gathering complete");
+    if tokio::time::timeout(ICE_GATHERING_TIMEOUT, gather_complete.recv())
+        .await
+        .is_err()
+    {
+        log::warn!(
+            "receiver: ICE gathering did not finish within {ICE_GATHERING_TIMEOUT:?}; \
+             sending answer with whatever candidates have gathered so far"
+        );
+    } else {
+        log::info!("receiver: ICE gathering complete");
+    }
     let local_desc = pc
         .local_description()
         .await

@@ -10,7 +10,10 @@ ls-security = { path = "../ls-security" }
 tokio = { version = "1", features = ["process", "fs", "rt-multi-thread", "macros", "io-util"] }
 anyhow = "1"
 serde_yaml = "0.9"
-flate2 = "1"
+# Round 36: matches ls-snapshot's own switch from gzip to zstd for
+# `Snapshot.payload` - unpack_payload() extracts that exact payload to run
+# it, so it has to speak whatever codec actually produced it.
+zstd = "0.13"
 tar = "0.4"
 time = { version = "0.3", features = ["formatting"] }
 # Cross-platform OS data-dir lookup (%APPDATA%, ~/Library/Application Support,
