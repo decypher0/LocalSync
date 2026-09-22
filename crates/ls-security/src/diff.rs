@@ -4,7 +4,7 @@
 //! nothing here executes anything or unpacks `source/`.
 
 use crate::verify::VerifiedSnapshot;
-use flate2::read::GzDecoder;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use tar::Archive;
@@ -42,7 +42,11 @@ pub struct DiffSummary {
 /// exact same output as before — this is purely additive.
 pub fn diff_summary(verified: &VerifiedSnapshot) -> anyhow::Result<DiffSummary> {
     let snapshot = verified.snapshot();
-    let mut archive = Archive::new(GzDecoder::new(&snapshot.payload[..]));
+    // Round 36: `snapshot.payload` is zstd now, not gzip - see
+    // `ls_snapshot::bundle`'s own switch.
+    let decoder = zstd::stream::read::Decoder::new(&snapshot.payload[..])
+        .context("initializing zstd decoder for snapshot payload")?;
+    let mut archive = Archive::new(decoder);
     let mut files: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -104,7 +108,7 @@ mod tests {
             .unwrap();
         let tar_bytes = builder.into_inner().unwrap();
 
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
         encoder.write_all(&tar_bytes).unwrap();
         encoder.finish().unwrap()
     }

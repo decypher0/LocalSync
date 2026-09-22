@@ -110,9 +110,10 @@ tempfile = "3"
 # already depends on, not a new one.
 mysql = { version = "25", default-features = false, features = ["minimal"] }
 # Same two crates ls-snapshot already depends on, to unpack a received
-# snapshot's tar.gz payload and check the packaged dump's bytes directly -
-# not a new format, just verifying one this test already produced.
-flate2 = "1"
+# snapshot's tar.zst payload and check the packaged dump's bytes directly -
+# not a new format, just verifying one this test already produced. (Round
+# 36: zstd, not gzip - see ls-snapshot/src/bundle.rs.)
+zstd = "0.13"
 tar = "0.4"
 # Cargo unifies dev-dependency features into the dependency only for test
 # builds (not the shipped app) - this is what makes tauri::test::mock_app()

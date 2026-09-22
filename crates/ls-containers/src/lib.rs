@@ -171,8 +171,10 @@ async fn unpack_payload(payload: &[u8], dest: &Path) -> Result<()> {
     let dest = dest.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         std::fs::create_dir_all(&dest)?;
-        let gz = flate2::read::GzDecoder::new(payload.as_slice());
-        tar::Archive::new(gz).unpack(&dest)?;
+        // Round 36: matches ls-snapshot's own switch from gzip to zstd.
+        let zstd = zstd::stream::read::Decoder::new(payload.as_slice())
+            .context("initializing zstd decoder for snapshot payload")?;
+        tar::Archive::new(zstd).unpack(&dest)?;
         Ok(())
     })
     .await
@@ -286,8 +288,7 @@ services:
             .unwrap();
         let tar_bytes = builder.into_inner().unwrap();
 
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
         encoder.write_all(&tar_bytes).unwrap();
         let payload = encoder.finish().unwrap();
 
