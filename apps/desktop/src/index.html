@@ -235,6 +235,15 @@
       Remote relay URL
       <input id="relay-url" type="text" placeholder="ws://your-vps-ip:9090" />
     </label>
+    <!-- ---- Round 37: one device identity, used both when this device
+         announces itself as discoverable (Receive tab) and when it's the
+         one initiating a connection to a discovered device (Send wizard) -
+         a real device name, not two divergent settings for the same
+         concept. ---- -->
+    <label>
+      Device name (shown to nearby devices on Local network)
+      <input id="device-name" type="text" placeholder="e.g. Alice's Laptop" />
+    </label>
     <label>
       LOCALSYNC_DATA_DIR (informational — set as an env var before launch; see README)
       <input id="data-dir-display" type="text" disabled />
@@ -552,6 +561,31 @@
           <input id="wiz-relay-url" type="text" placeholder="ws://your-vps-ip:9090" />
         </label>
 
+        <!-- ---- Round 37 goal 2: live nearby-devices list, Local network
+             only - Bluetooth-style "pick a device instead of typing a
+             code". Manual code entry (the final step's own room-code flow,
+             unchanged) always stays available - this list is an addition,
+             never a requirement, and starts empty/loading rather than
+             implying anything is broken while mDNS resolution (a real
+             network round trip) is still in progress. ---- -->
+        <div id="wiz-nearby-wrap" class="hidden">
+          <span class="mode-title">Nearby devices</span>
+          <p id="wiz-nearby-empty" class="hint">
+            Looking for discoverable devices on this network…
+          </p>
+          <ul id="wiz-nearby-list" class="ports-list hidden"></ul>
+          <p class="hint">
+            Don't see the device you want? It may not have discoverability turned on (Receive
+            tab), or this network may block device discovery — a room code always works
+            regardless; enter one on the final step instead of picking a device here.
+          </p>
+          <div id="wiz-nearby-selected" class="peer-banner peer-banner-recognized hidden">
+            <span class="peer-banner-icon" aria-hidden="true"><svg class="icon"><use href="#icon-circle-check"></use></svg></span>
+            <span>Sending directly to <strong id="wiz-nearby-selected-name"></strong> — no code needed.</span>
+            <button id="wiz-nearby-deselect-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Use a code instead</button>
+          </div>
+        </div>
+
         <!-- ---- Moved here from the old Step 4 checkbox (see this block's
              prior home, git-blame'd as "Round 23") - a real, mutually
              exclusive transfer-mode choice reads much clearer than a
@@ -782,6 +816,28 @@
 
   <!-- ============ RECEIVE ============ -->
   <section id="tab-receive" class="tab-panel">
+    <!-- ---- Round 37 goal 1: opt-in discoverability, off by default -
+         familiar Bluetooth-visibility pattern (default off; turning it on
+         is a standing device state, not a per-receive setting, so it lives
+         above the one-shot Receive form below rather than inside it).
+         Purely a discovery convenience - see ls_net::ControlMessage::
+         ConnectionRequest's doc comment for the real Accept/Reject gate a
+         sender who finds this device still has to pass before anything is
+         sent. ---- -->
+    <div id="discoverability-wrap" class="room-code-wrap">
+      <label class="radio-label">
+        <input type="checkbox" id="discoverable-toggle" />
+        Make this device discoverable on Local network
+      </label>
+      <p class="hint">
+        Lets senders on the same Local network see this device in their nearby-devices list
+        and connect directly, instead of you sharing a room code. You still see and must
+        accept every connection request before anything is sent.
+      </p>
+      <p id="discoverable-status" class="hint-inline"></p>
+      <p id="discoverable-error" class="error"></p>
+    </div>
+
     <div id="receive-idle">
       <h2>Receive a project</h2>
       <label>
