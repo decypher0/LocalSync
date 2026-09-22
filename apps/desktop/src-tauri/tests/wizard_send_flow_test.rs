@@ -264,7 +264,10 @@ impl Drop for TestServer {
 }
 
 fn unpack_tar_gz(payload: &[u8]) -> std::collections::HashMap<String, Vec<u8>> {
-    let decoder = flate2::read::GzDecoder::new(payload);
+    // Round 36: the payload is now a tar.zst, not a tar.gz - name kept as-is
+    // (still just "the packaged tar") to minimize churn in this test's call
+    // sites.
+    let decoder = zstd::stream::read::Decoder::new(payload).unwrap();
     let mut archive = tar::Archive::new(decoder);
     let mut out = std::collections::HashMap::new();
     for entry in archive.entries().unwrap() {
