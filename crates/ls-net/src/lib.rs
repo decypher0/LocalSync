@@ -27,11 +27,20 @@
 //! problem.
 
 mod discovery;
+mod mdns_discovery;
 mod signaling;
 
 pub use discovery::{
     decode_room_code, detect_lan_ip, encode_room_code, generate_room_id, host_ephemeral_relay,
 };
+pub use mdns_discovery::{
+    announce, resolved_peer, start_browsing, stop_announcing, stop_browsing, DiscoveredPeer, DiscoveryEvents, SERVICE_TYPE,
+};
+// Re-exported rather than making the desktop crate depend on mdns-sd
+// directly - same boundary this crate already keeps for webrtc/
+// tokio-tungstenite (callers see `ls_net::DataChannelConn`, never `webrtc`'s
+// own types).
+pub use mdns_sd::{ServiceDaemon, ServiceEvent};
 
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -195,6 +204,23 @@ pub enum ControlMessage {
     /// shape as `PullRequest`) - lets the sender apply "delete immediately
     /// after a confirmed download" retention without polling Drive.
     CloudDownloadConfirmed,
+    /// Round 37 (LAN discovery): sender -> receiver, sent immediately once a
+    /// discovery-initiated connection is established, before any payload
+    /// transfer begins. Unlike a manually-pasted room code (where clicking
+    /// Receive is itself the receiver's consent to *this* connection), a
+    /// discoverable device never took any action for this specific
+    /// connection - it was just sitting there, opted in generally. This is
+    /// what lets it see who's asking and decide, same Accept/Reject shape
+    /// every other request in this app already uses - discovery only
+    /// replaces the manual code-copy-paste step with a click, it does not
+    /// weaken the consent model.
+    ConnectionRequest { sender_name: String },
+    /// Receiver -> sender, only ever sent in reply to a `ConnectionRequest`.
+    /// `accepted: false` means the sender's `share_snapshot_wizard` call
+    /// returns an error and nothing further happens; `true` means the exact
+    /// same bundle-then-send that already runs for a manually-entered room
+    /// code proceeds next, unmodified.
+    ConnectionResponse { accepted: bool },
 }
 
 /// Sends one [`ControlMessage`] on `conn`'s control channel. Independent of
