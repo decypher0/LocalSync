@@ -10,7 +10,17 @@ serde_json = "1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 tar = "0.4"
-flate2 = "1"
+# Round 36: replaces flate2/gzip as the payload's compression codec
+# (bundle.rs) - faster and denser than gzip at an equivalent, still-fast
+# level, which matters directly for transfer time over the WebRTC data
+# channel. Streaming reader/writer API, same shape as flate2's
+# GzEncoder/GzDecoder it replaces, so round 35's bounded-memory streaming
+# (DumpSource::FilePath -> append_dump_source) composes unchanged. This is
+# a wire/on-disk format change: a snapshot built by pre-round-36 code is a
+# gzip stream and will fail to decode as zstd, and vice versa - both sides
+# of a transfer, and any already-saved `save_to_file` snapshot someone
+# wants to `load_from_file` later, must be on the same side of this change.
+zstd = "0.13"
 rand = "0.8"
 anyhow = "1"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
@@ -26,3 +36,6 @@ wait-timeout = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# compression_ratio_test.rs's own baseline comparison only (gzip, the codec
+# round 36 replaced) - not used by any non-test code any more.
+flate2 = "1"

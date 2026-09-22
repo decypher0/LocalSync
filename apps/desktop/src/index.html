@@ -383,6 +383,17 @@
         <span id="send-retry-status" class="hint-inline"></span>
       </div>
 
+      <!-- ---- Goal 4: earliest, most-visible sign that a receiver has
+           actually shown up - fires the moment the WebRTC handshake
+           completes (the "receiver-connecting" event), well before the
+           transfer itself finishes and long before session-detail-people-wrap
+           (in the collapsed popover above, and only populated after a full
+           transfer completes) would ever show anyone. Sits right in the main
+           session view, not behind a click. ---- -->
+      <div id="send-receiver-status-wrap" class="room-code-wrap hidden">
+        <span class="badge-connected"><svg class="icon"><use href="#icon-circle-check"></use></svg> Receiver connected — sending…</span>
+      </div>
+
       <div id="send-progress-wrap" class="progress-wrap hidden">
         <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
         <p id="send-progress-label" class="hint"></p>

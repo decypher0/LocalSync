@@ -3588,7 +3588,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
- "flate2",
  "log",
  "ls-clouddrop",
  "ls-containers",
@@ -3613,6 +3612,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -3666,7 +3666,6 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "ed25519-dalek",
- "flate2",
  "ls-security",
  "ls-snapshot",
  "rand 0.8.8",
@@ -3677,6 +3676,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -3721,7 +3721,6 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "ed25519-dalek",
- "flate2",
  "ls-snapshot",
  "rand 0.8.8",
  "serde",
@@ -3730,6 +3729,7 @@ dependencies = [
  "tar",
  "tempfile",
  "time",
+ "zstd",
 ]
 
 [[package]]
@@ -3749,6 +3749,7 @@ dependencies = [
  "tempfile",
  "time",
  "wait-timeout",
+ "zstd",
 ]
 
 [[package]]
