@@ -431,6 +431,201 @@ if (localStorage.getItem(MODE_KEY) === "remote") $("mode-remote").checked = true
 $("relay-url").value = localStorage.getItem(RELAY_URL_KEY) || "";
 updateModeUi();
 
+// ---------- round 37: device name (one identity, used both when this
+// device announces itself as discoverable and when it's the one initiating
+// a connection to a discovered device) ----------
+const DEVICE_NAME_KEY = "localsync.deviceName";
+
+function deviceName() {
+  return $("device-name").value.trim();
+}
+$("device-name").value = localStorage.getItem(DEVICE_NAME_KEY) || "";
+$("device-name").addEventListener("input", () => {
+  localStorage.setItem(DEVICE_NAME_KEY, deviceName());
+});
+
+// ---------- round 37 goal 1: opt-in discoverability (receiving side) ----------
+$("discoverable-toggle").addEventListener("change", async () => {
+  const enabled = $("discoverable-toggle").checked;
+  $("discoverable-error").textContent = "";
+  $("discoverable-status").textContent = enabled ? "Turning on…" : "";
+  $("discoverable-toggle").disabled = true;
+  try {
+    await invoke("set_discoverable", { enabled, nickname: deviceName() });
+    $("discoverable-status").textContent = enabled ? `Discoverable as "${deviceName()}".` : "";
+  } catch (err) {
+    $("discoverable-error").textContent = String(err);
+    $("discoverable-status").textContent = "";
+    $("discoverable-toggle").checked = false; // the backend call failed - never show "on" for a toggle that isn't
+  } finally {
+    $("discoverable-toggle").disabled = false;
+  }
+});
+
+// ---------- round 37 goal 3: incoming connection request (receiving side) ----------
+// Same rendering/dedup pattern as the pull-request/cloud-access-request
+// banners above (reusing #pull-requests, not a new container) - "an
+// incoming request from a peer, shown until acted on" is exactly what this
+// is too. This is the actual consent gate discovery adds: nothing is ever
+// received without this Accept explicitly happening first.
+listen("connection-request", (evt) => {
+  const peerId = evt.payload.peer_id;
+  const existing = [...$("pull-requests").children].find((el) => el.dataset.peer === peerId);
+  if (existing) return;
+  const div = document.createElement("div");
+  div.dataset.peer = peerId;
+  div.className = "peer-banner";
+  div.innerHTML = `
+    <span><strong>${escapeHtml(evt.payload.sender_name)}</strong> wants to send you a project (found via Local network discovery)</span>
+    <span class="inline-row">
+      <button class="ghost-btn accept-btn" type="button"><svg class="icon"><use href="#icon-check"></use></svg> Accept</button>
+      <button class="ghost-btn decline-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Decline</button>
+    </span>
+    <p class="error"></p>
+  `;
+  const errorEl = div.querySelector(".error");
+  // ponytail: on Accept, this awaits the *entire* transfer before resolving
+  // (respond_to_connection_request receives the whole payload before
+  // returning - see its own doc comment) - so unlike a normal receive,
+  // there's no session tab/progress bar until it's already done; the
+  // banner's buttons just stay disabled for the duration. Acceptable for a
+  // discovery-initiated receive (this round's actual scope is finding and
+  // selecting a peer, not this path's progress UI specifically); upgrade
+  // path if a large discovery-initiated project makes this feel stuck: split
+  // accept-and-start-transfer from completion, same as receive_snapshot's
+  // own two-phase (progress event, then resolve) shape.
+  const respond = async (accept) => {
+    div.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try {
+      const info = await invoke("respond_to_connection_request", { peerId, accept });
+      div.remove();
+      if (info) startReceiveSessionFromInfo(info);
+    } catch (err) {
+      errorEl.textContent = String(err);
+      div.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    }
+  };
+  div.querySelector(".accept-btn").addEventListener("click", () => respond(true));
+  div.querySelector(".decline-btn").addEventListener("click", () => respond(false));
+  $("pull-requests").appendChild(div);
+});
+
+// ---------- round 37 goal 2: live nearby-devices list (sending side) ----------
+//
+// Browsing only runs while it's actually useful: while the Send wizard's
+// mode step is showing *and* Local network is the selected mode - started/
+// stopped from showWizardStep/the mode radios' change handlers below, and
+// always stopped on wizard close/cancel, so an idle wizard never leaves a
+// browse daemon running. `wizardSelectedDevice` is the one piece of state
+// that changes what the final Send button actually does - see send-btn's
+// own handler further down.
+let wizardSelectedDevice = null;
+let nearbyDevicesPollInterval = null;
+
+async function startNearbyDevicesBrowsing() {
+  $("wiz-nearby-wrap").classList.remove("hidden");
+  $("wiz-nearby-empty").textContent = "Looking for discoverable devices on this network…";
+  $("wiz-nearby-empty").classList.remove("hidden");
+  $("wiz-nearby-list").classList.add("hidden");
+  try {
+    await invoke("start_discovery_browsing");
+  } catch (err) {
+    $("wiz-nearby-empty").textContent = `Couldn't start device discovery: ${err}`;
+    return;
+  }
+  clearInterval(nearbyDevicesPollInterval);
+  refreshNearbyDevices();
+  nearbyDevicesPollInterval = setInterval(refreshNearbyDevices, 2000);
+}
+
+function stopNearbyDevicesBrowsing() {
+  clearInterval(nearbyDevicesPollInterval);
+  nearbyDevicesPollInterval = null;
+  $("wiz-nearby-wrap").classList.add("hidden");
+  invoke("stop_discovery_browsing").catch((err) => console.error("stop_discovery_browsing failed:", err));
+}
+
+async function refreshNearbyDevices() {
+  let devices;
+  try {
+    devices = await invoke("list_nearby_devices");
+  } catch (err) {
+    $("wiz-nearby-empty").textContent = `Couldn't list nearby devices: ${err}`;
+    $("wiz-nearby-empty").classList.remove("hidden");
+    $("wiz-nearby-list").classList.add("hidden");
+    return;
+  }
+  // A device that was selected but has since gone away (e.g. its
+  // discoverability was turned off) needs its own, more specific message -
+  // silently falling back to manual code entry without saying why would
+  // look like the click simply didn't work.
+  if (wizardSelectedDevice && !devices.some((d) => d.fullname === wizardSelectedDevice.fullname)) {
+    deselectNearbyDevice();
+    $("wiz-nearby-empty").textContent = "That device is no longer discoverable — pick another, or enter a code manually.";
+  }
+  renderNearbyDevicesList(devices);
+}
+
+function renderNearbyDevicesList(devices) {
+  const empty = $("wiz-nearby-empty");
+  const list = $("wiz-nearby-list");
+  if (devices.length === 0) {
+    // Goal 3: a clear, non-alarming empty state - looking for devices is
+    // the normal first few seconds of every browse, and "found nothing" is
+    // an expected, ordinary outcome on networks that block multicast, not
+    // a failure this UI should imply.
+    if (!empty.textContent.startsWith("That device")) {
+      empty.textContent = "No devices found yet — you can still enter a code manually on the final step.";
+    }
+    empty.classList.remove("hidden");
+    list.classList.add("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  list.classList.remove("hidden");
+  list.innerHTML = "";
+  for (const d of devices) {
+    const li = document.createElement("li");
+    const isSelected = wizardSelectedDevice?.fullname === d.fullname;
+    li.innerHTML = `
+      <span class="inline-row receivers-header">
+        <span><svg class="icon"><use href="#icon-wifi"></use></svg> ${escapeHtml(d.nickname)}</span>
+        <button class="${isSelected ? "primary-btn" : "ghost-btn"} select-nearby-btn" type="button" data-fullname="${escapeHtml(d.fullname)}">
+          ${isSelected ? "Selected" : "Select"}
+        </button>
+      </span>
+    `;
+    list.appendChild(li);
+  }
+}
+
+$("wiz-nearby-list").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".select-nearby-btn");
+  if (!btn) return;
+  let devices;
+  try {
+    devices = await invoke("list_nearby_devices");
+  } catch {
+    return;
+  }
+  const device = devices.find((d) => d.fullname === btn.dataset.fullname);
+  if (device) selectNearbyDevice(device);
+});
+
+function selectNearbyDevice(device) {
+  wizardSelectedDevice = device;
+  $("wiz-nearby-selected").classList.remove("hidden");
+  $("wiz-nearby-selected-name").textContent = device.nickname;
+  refreshNearbyDevices();
+}
+
+function deselectNearbyDevice() {
+  wizardSelectedDevice = null;
+  $("wiz-nearby-selected").classList.add("hidden");
+  refreshNearbyDevices();
+}
+$("wiz-nearby-deselect-btn").addEventListener("click", deselectNearbyDevice);
+
 // Round 20 goal 3: the Send wizard's own transfer-mode step - a separate
 // radio group from Settings' (Receive still reads Settings' via
 // relayMode()/relayUrl() above; that flow isn't part of this round's
@@ -460,6 +655,17 @@ function updateWizModeUi() {
   $("wiz-relay-url-wrap").classList.toggle("hidden", mode !== "remote");
   $("wiz-cloud-drop-wrap").classList.toggle("hidden", mode !== "cloud");
   if (mode === "cloud") refreshWizGoogleAccountStatus();
+
+  // Round 37 goal 2: scoped to Local network only, per this round's own
+  // goal - Remote relay/Cloud drop already work across networks LAN
+  // discovery can't reach. A device selected while on Local network stops
+  // meaning anything once the mode changes away from it.
+  if (mode === "local") {
+    startNearbyDevicesBrowsing();
+  } else {
+    stopNearbyDevicesBrowsing();
+    deselectNearbyDevice();
+  }
 }
 // Called every time step 1 is (re)entered, so it always reflects the most
 // recent choice - made here, or made in Settings since the wizard was last
@@ -920,6 +1126,7 @@ function openSendWizard() {
 
 function closeSendWizard() {
   $("send-wizard-overlay").classList.add("hidden");
+  stopNearbyDevicesBrowsing();
 }
 
 $("start-send-wizard-btn").addEventListener("click", openSendWizard);
@@ -1614,6 +1821,8 @@ function resetSendWizard() {
   wizardSharedMode = false;
   wizardSharedGroupIndices = [];
   wizardSharedResolved = null;
+  wizardSelectedDevice = null;
+  $("wiz-nearby-selected").classList.add("hidden");
   renderWizardFolderList();
   $("wiz-folders-error").textContent = "";
   $("wiz-send-error").textContent = "";
@@ -1727,6 +1936,58 @@ $("send-btn").addEventListener("click", async () => {
     return;
   }
 
+  // Round 37 goal 2: a device selected from the nearby-devices list -
+  // connects directly to that device's already-hosted relay instead of
+  // hosting a fresh one and showing a room code (there's nothing to show;
+  // the recipient isn't pasting anything). require_accept:true is what
+  // makes this safe - see share_snapshot_wizard's own doc comment and
+  // ls_net::ControlMessage::ConnectionRequest for the actual gate.
+  if (mode === "local" && wizardSelectedDevice) {
+    const device = wizardSelectedDevice;
+    // Session id is a fresh value per attempt, deliberately *not*
+    // device.room_id - that's the discoverable device's own standing id,
+    // unchanged across repeat sends to it, so reusing it as the session/tab
+    // key would collide with a later send to the same device. The backend's
+    // actual share-progress correlation id (see share_snapshot_wizard) IS
+    // device.room_id though - matched against directly below, not against
+    // session.id.
+    const session = newSession("send", `discover-${device.room_id}-${Date.now()}`, folderLabels.join(", "));
+    session.folders = sessionFolders;
+    closeSendWizard();
+    addSession(session);
+    resetSendWizard();
+    $("send-btn").disabled = false;
+
+    session.progressUnlisten = await listen("share-progress", (evt) => {
+      if (evt.payload.session_id !== device.room_id) return;
+      const wasConnecting = session.status === "connecting";
+      session.status = "active";
+      session.progressBytes = evt.payload.bytes;
+      session.progressTotal = evt.payload.total;
+      if (session.id !== activeSessionId) return;
+      if (wasConnecting) renderActiveSession();
+      else renderSendSessionDetail(session);
+    });
+
+    try {
+      const folders = buildWizardFoldersPayload(foldersForPayload);
+      const snapshotId = await invoke("share_snapshot_wizard", {
+        folders,
+        roomCode: device.room_id,
+        signalingUrl: `ws://${device.host}:${device.port}`,
+        requireAccept: true,
+        senderName: deviceName() || "Someone",
+      });
+      session.resultText = `Sent as ${snapshotId}`;
+      endSession(session, "done");
+      refreshReceivers();
+    } catch (err) {
+      session.errorText = String(err);
+      endSession(session, "error");
+    }
+    return;
+  }
+
   const session = newSession("send", null, folderLabels.join(", "));
   session.folders = sessionFolders;
   // Round 30 goal A: kept so Retry (retrySendSession, below) can redo just
@@ -1831,6 +2092,13 @@ async function performSendAttempt(session, mode, url, foldersForPayload, onRoomI
       folders,
       roomCode: info.room_id,
       signalingUrl: info.signaling_url,
+      // Round 37: only a discovery-initiated send (picking a device from
+      // the nearby-devices list - see sendToNearbyDevice) sets these to
+      // require the recipient's explicit Accept/Reject before anything is
+      // sent. A manually-entered room code doesn't need it - clicking
+      // Receive is already that person's own consent to this connection.
+      requireAccept: false,
+      senderName: "",
     });
     session.resultText = `Sent as ${snapshotId}`;
     endSession(session, "done");

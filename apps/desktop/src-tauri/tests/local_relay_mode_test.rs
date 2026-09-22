@@ -104,7 +104,7 @@ async fn local_mode_transfers_a_real_payload_over_the_real_lan_address() {
     let sender_task = tokio::spawn(async move {
         let state = sender_handle.state::<AppState>();
         let folders = vec![FolderPlanDto { path: project_path, dump: None }];
-        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url).await
+        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url, false, String::new()).await
     });
 
     let receiver_room = decoded.room_id.clone();
