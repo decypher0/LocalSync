@@ -2118,3 +2118,77 @@ be observed at all.
    specific round-trip has never actually been possible to observe before
    this round, since no version bump had ever existed.
 
+## Round 37 addendum: Local-network peer discovery (mDNS)
+
+New capability, scoped to Local network mode only (Remote relay/Cloud drop
+already work across networks LAN discovery can't reach): a receiver can
+opt in to being discoverable, and a sender picks them from a live
+nearby-devices list instead of exchanging a room code. Uses `mdns-sd`
+(actively-maintained, pure-Rust mDNS) rather than a hand-rolled UDP
+broadcast protocol.
+
+This does not change the trust model. Discovery only replaces the manual
+code-copy-paste step with a click - the discoverable device still sees an
+explicit "X wants to send you a project" request (a new
+`ControlMessage::ConnectionRequest`/`ConnectionResponse` exchange over the
+same control channel round 11's pull-requests already use) and must
+Accept before anything is sent, and the diff-review-then-Run gate from
+round 1 is completely unchanged.
+
+### What's already confirmed, without needing real hardware
+
+- A new same-box test (`crates/ls-net/tests/mdns_discovery_test.rs`)
+  proves announce + browse actually find each other over real multicast
+  sockets on this machine (not mocked) - passes both natively on Windows
+  and in WSL2, each in under a second.
+- `cargo build --workspace` and `cargo test --workspace` both pass in full
+  (WSL2, the established authoritative environment for this crate's
+  tests). This surfaced and fixed a real, pre-existing exhaustive `match`
+  over `ControlMessage` in `pull_request_no_payload_test.rs` (round 11's
+  own deliberate "a new variant must be consciously handled here" guard
+  rail) - it did exactly its job, catching that the two new variants
+  needed an explicit decision about payload-carrying (neither can carry
+  one, same as every existing variant).
+- `index.html`'s restructuring was checked for balanced, correctly nested
+  tags with a real HTML parser, and every `$(id)` reference in `app.js`
+  was checked to resolve to a real element - not just visual inspection.
+- `web/test-magic-link-logic.js` and
+  `apps/desktop/src/test-wizard-payload.js` both still pass unmodified -
+  this round's changes didn't touch either's own pure-logic code path.
+
+### What to check on real hardware
+
+1. **The actual new capability, across two real machines**: on device A,
+   set a device name (Settings) and turn on "Make this device
+   discoverable on Local network" (Receive tab). On device B, open the
+   Send wizard with Local network selected and confirm device A appears
+   in the nearby-devices list within a few seconds, with the name device A
+   set. Select it, pick a project, and send - confirm device A sees the
+   incoming connection-request banner naming device B, and that nothing
+   is received until Accept is clicked.
+2. **Manual code entry still works, unmodified**: with discoverability off
+   (or a device not selected), confirm a normal room-code send/receive on
+   Local network still works exactly as it always has - discovery is
+   additive, never a replacement.
+3. **A network that blocks multicast**: test on a network known or
+   suspected to restrict multicast traffic (corporate/guest Wi-Fi with
+   client isolation is the common real-world case; some VPN
+   configurations too). Confirm the nearby-devices list shows the "no
+   devices found - you can still enter a code manually" state rather than
+   looking broken, hanging, or implying something failed, and that manual
+   code entry still works normally on that same network.
+4. **Reject at the connection-request stage**: confirm clicking Decline on
+   the incoming connection-request banner cleanly fails the sender's send
+   attempt (a clear "declined" error, not a hang or a generic-looking
+   failure) and that nothing was received on the declining device.
+5. **Discoverability toggle off mid-session**: turn discoverability off
+   while genuinely idle (no pending request) and confirm the device stops
+   appearing in another machine's nearby-devices list within a few
+   seconds. Toggling off is not expected to gracefully interrupt a
+   request that's already showing its Accept/Decline banner on screen -
+   that in-flight request can still be answered normally.
+6. **Multiple discoverable devices at once**: with two or more machines
+   simultaneously discoverable on the same network, confirm all of them
+   show up in a third machine's nearby-devices list, each with its own
+   correct name, and that selecting one connects to the right device.
+
