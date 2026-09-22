@@ -492,6 +492,15 @@ pub struct FolderPlanDto {
 /// never has to distinguish the two once it has a path), then follows the
 /// exact same create → serialize → connect → send sequence `share_snapshot`
 /// does.
+///
+/// Round 37: `require_accept`/`sender_name` are what a discovery-initiated
+/// send (picking a device from the nearby-devices list) sets that a
+/// manually-entered room code never needs to - see `ControlMessage::
+/// ConnectionRequest`'s doc comment for why a discoverable receiver, unlike
+/// one who pasted a code and clicked Receive themselves, needs an explicit
+/// per-connection Accept/Reject before anything is sent. When
+/// `require_accept` is false (every existing call site), this is a no-op
+/// and behavior is byte-for-byte what it always was.
 #[tauri::command]
 pub async fn share_snapshot_wizard<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -499,6 +508,8 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
     folders: Vec<FolderPlanDto>,
     room_code: String,
     signaling_url: String,
+    require_accept: bool,
+    sender_name: String,
 ) -> Result<String, String> {
     log::info!(
         "share_snapshot_wizard: starting for {} folder(s), room={room_code}",
@@ -560,6 +571,24 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
         log::warn!("share_snapshot_wizard: connect_as_sender failed: {e}");
         e.to_string()
     })?;
+
+    if require_accept {
+        log::info!("share_snapshot_wizard: data channel open, requesting the recipient's consent");
+        ls_net::send_control(&conn, &ls_net::ControlMessage::ConnectionRequest { sender_name })
+            .await
+            .map_err(|e| e.to_string())?;
+        match ls_net::recv_control(&conn).await.map_err(|e| e.to_string())? {
+            ls_net::ControlMessage::ConnectionResponse { accepted: true } => {
+                log::info!("share_snapshot_wizard: recipient accepted the connection request");
+            }
+            ls_net::ControlMessage::ConnectionResponse { accepted: false } => {
+                log::info!("share_snapshot_wizard: recipient declined the connection request");
+                return Err("The recipient declined the connection request.".to_string());
+            }
+            other => return Err(format!("unexpected response while waiting for the recipient's decision: {other:?}")),
+        }
+    }
+
     log::info!(
         "share_snapshot_wizard: data channel open, sending payload ({} bytes)",
         bytes.len()
@@ -1119,6 +1148,252 @@ pub async fn stop_session(state: State<'_, AppState>, session_id: String) -> Res
         .ok_or_else(|| format!("no running session with id {session_id}"))?;
 
     ls_containers::stop_session(&session).await.map_err(|e| e.to_string())
+}
+
+// ---------- round 37: local-network peer discovery (mDNS) ----------
+//
+// Scoped to Local network mode only, per this round's own goal - Remote
+// relay and Cloud drop already work across networks LAN-broadcast discovery
+// can't reach. Two independent halves:
+//
+// - Receiver side (`set_discoverable`): opt-in, off by default. Hosts the
+//   exact same kind of ephemeral relay `start_send_session`'s local mode
+//   already hosts, announces it over mDNS, and waits in the background for
+//   a sender to connect - see `listen_for_discovery_connections`.
+// - Sender side (`start_discovery_browsing`/`list_nearby_devices`/
+//   `stop_discovery_browsing`): browses for other announcing instances,
+//   same "background task owns live state, a command polls a snapshot of
+//   it" shape `connected_receivers`/`list_connected_receivers` already
+//   uses.
+//
+// The two meet at `share_snapshot_wizard`'s `require_accept` gate
+// (`ConnectionRequest`/`ConnectionResponse`, see `ls_net::ControlMessage`) -
+// discovery only ever replaces the manual code-copy-paste step with a
+// click, the receiver still explicitly accepts the connection and still
+// reviews the diff before Run, unmodified from round 1.
+
+#[derive(Clone, Serialize)]
+pub struct ConnectionRequestNotice {
+    pub peer_id: String,
+    pub sender_name: String,
+}
+
+/// Turns this device's discoverability on Local network on or off.
+/// Idempotent-by-replacement: always tears down any previous
+/// announcement/listener first (covers both "turning off" and "re-enabling
+/// with a new nickname"), so there's never more than one live announcement
+/// per app instance. Clears any not-yet-answered `ConnectionRequest` too -
+/// there's no receiver-side UI left to answer it once discoverability itself
+/// is off.
+#[tauri::command]
+pub async fn set_discoverable<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    enabled: bool,
+    nickname: String,
+) -> Result<(), String> {
+    if let Some(session) = state.discovery.lock().map_err(|e| e.to_string())?.take() {
+        ls_net::stop_announcing(&session.daemon, &session.fullname);
+        session.relay_task.abort();
+        session.listen_task.abort();
+    }
+    state.pending_connection_requests.lock().map_err(|e| e.to_string())?.clear();
+
+    if !enabled {
+        log::info!("set_discoverable: off");
+        return Ok(());
+    }
+
+    let nickname = nickname.trim().to_string();
+    if nickname.is_empty() {
+        return Err("Enter a device name before turning on discoverability.".to_string());
+    }
+
+    let (port, relay_task) = ls_net::host_ephemeral_relay().await.map_err(|e| e.to_string())?;
+    let lan_ip = ls_net::detect_lan_ip().map_err(|e| e.to_string())?;
+    let room_id = ls_net::generate_room_id();
+    let (daemon, fullname) = ls_net::announce(&nickname, lan_ip, port, &room_id).map_err(|e| e.to_string())?;
+    log::info!("set_discoverable: on, nickname={nickname:?} room={room_id} relay=ws://{lan_ip}:{port}");
+
+    let signaling_url = format!("ws://{lan_ip}:{port}");
+    let listen_task = tauri::async_runtime::spawn(listen_for_discovery_connections(app, signaling_url, room_id.clone()));
+
+    *state.discovery.lock().map_err(|e| e.to_string())? =
+        Some(crate::state::DiscoverySession { daemon, fullname, relay_task, listen_task });
+    Ok(())
+}
+
+/// Background task (receiver side): waits for a sender to connect to this
+/// device's standing discovery room, handles its `ConnectionRequest`, then
+/// loops to wait for the next one - the relay's own room map is naturally
+/// reusable once a connection ends (see `ls_net::discovery`'s relay doc
+/// comment on why disconnecting drops the whole room entry), so a single
+/// announced room serves connections one at a time for as long as
+/// discoverability stays on. Ends when `set_discoverable(false)` (or a
+/// fresh `set_discoverable(true)`) aborts this task - an aborted task simply
+/// stops at its next `.await`, so nothing here needs its own cancellation
+/// flag.
+async fn listen_for_discovery_connections<R: tauri::Runtime>(app: AppHandle<R>, signaling_url: String, room_id: String) {
+    loop {
+        let conn = match ls_net::connect_as_receiver(&signaling_url, &room_id).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                log::debug!("discovery: waiting for a sender ended without one connecting: {e:#}");
+                continue;
+            }
+        };
+        match ls_net::recv_control(&conn).await {
+            Ok(ls_net::ControlMessage::ConnectionRequest { sender_name }) => {
+                log::info!("discovery: connection request from {sender_name:?}");
+                let state = app.state::<AppState>();
+                let Ok(mut pending) = state.pending_connection_requests.lock() else { return };
+                pending.insert(
+                    room_id.clone(),
+                    crate::state::PendingConnectionRequest { conn: std::sync::Arc::new(conn), sender_name: sender_name.clone() },
+                );
+                drop(pending);
+                let _ = app.emit("connection-request", ConnectionRequestNotice { peer_id: room_id.clone(), sender_name });
+            }
+            Ok(other) => {
+                log::warn!("discovery: unexpected control message before a ConnectionRequest: {other:?}");
+            }
+            Err(e) => {
+                log::debug!("discovery: connection ended before a ConnectionRequest arrived: {e:#}");
+            }
+        }
+    }
+}
+
+/// The receiver's response to a `connection-request` event - the actual
+/// consent gate discovery adds (see `ls_net::ControlMessage::
+/// ConnectionRequest`'s doc comment). On accept, receives the payload and
+/// runs it through the exact same `finalize_received_snapshot` pipeline
+/// every other transport uses (held, not auto-run - Run is still a separate,
+/// explicit click), then keeps the connection open under `outgoing_conn`
+/// exactly like `receive_snapshot` does, so "ask for update" works
+/// identically regardless of how the connection started.
+#[tauri::command]
+pub async fn respond_to_connection_request<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    peer_id: String,
+    accept: bool,
+) -> Result<Option<IncomingSnapshotInfo>, String> {
+    let conn = {
+        let mut pending = state.pending_connection_requests.lock().map_err(|e| e.to_string())?;
+        let entry = pending
+            .remove(&peer_id)
+            .ok_or_else(|| format!("no pending connection request from {peer_id}"))?;
+        entry.conn
+    };
+
+    ls_net::send_control(&conn, &ls_net::ControlMessage::ConnectionResponse { accepted: accept })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !accept {
+        log::info!("respond_to_connection_request: declined for peer_id={peer_id}");
+        return Ok(None);
+    }
+
+    let progress_session_id = peer_id.clone();
+    let bytes = ls_net::receive_payload(&conn, |received, total| {
+        let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let info = finalize_received_snapshot(&state, snapshot)?;
+    log::info!("respond_to_connection_request: accepted, id={}", info.snapshot_id);
+
+    *state.outgoing_conn.lock().map_err(|e| e.to_string())? = Some(conn.clone());
+    tauri::async_runtime::spawn(listen_for_pushed_updates(app, conn, peer_id));
+
+    Ok(Some(info))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NearbyDeviceDto {
+    pub fullname: String,
+    pub nickname: String,
+    pub host: String,
+    pub port: u16,
+    pub room_id: String,
+}
+
+impl From<&ls_net::DiscoveredPeer> for NearbyDeviceDto {
+    fn from(p: &ls_net::DiscoveredPeer) -> Self {
+        Self { fullname: p.fullname.clone(), nickname: p.nickname.clone(), host: p.host.to_string(), port: p.port, room_id: p.room_id.clone() }
+    }
+}
+
+/// Starts browsing for other discoverable LocalSync instances. Idempotent-
+/// by-replacement, same reasoning as `set_discoverable`. Safe to call every
+/// time the Send wizard's Local-network step is (re)entered.
+#[tauri::command]
+pub async fn start_discovery_browsing<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(session) = state.discovery_browse.lock().map_err(|e| e.to_string())?.take() {
+        ls_net::stop_browsing(&session.daemon);
+        session.task.abort();
+    }
+    state.nearby_devices.lock().map_err(|e| e.to_string())?.clear();
+
+    let (daemon, receiver) = ls_net::start_browsing().map_err(|e| e.to_string())?;
+    let task = tauri::async_runtime::spawn(watch_nearby_devices(app, receiver));
+    *state.discovery_browse.lock().map_err(|e| e.to_string())? = Some(crate::state::DiscoveryBrowseSession { daemon, task });
+    Ok(())
+}
+
+/// Background task (sender side): translates raw mDNS events into
+/// `AppState::nearby_devices` - a resolved service that's missing this app's
+/// own `name`/`room` properties (i.e. not a LocalSync instance) is silently
+/// skipped, see `ls_net::resolved_peer`'s own doc comment. Ends when the
+/// event channel closes, which happens once the daemon
+/// `stop_discovery_browsing`/a fresh `start_discovery_browsing` shuts down
+/// is dropped/shut down.
+async fn watch_nearby_devices<R: tauri::Runtime>(app: AppHandle<R>, receiver: ls_net::DiscoveryEvents) {
+    while let Ok(event) = receiver.recv_async().await {
+        let state = app.state::<AppState>();
+        let Ok(mut devices) = state.nearby_devices.lock() else { return };
+        match event {
+            ls_net::ServiceEvent::ServiceResolved(resolved) => {
+                if let Some(peer) = ls_net::resolved_peer(&resolved) {
+                    log::debug!("discovery: found nearby device {:?} ({})", peer.nickname, peer.fullname);
+                    devices.insert(peer.fullname.clone(), peer);
+                }
+            }
+            ls_net::ServiceEvent::ServiceRemoved(_ty_domain, fullname) => {
+                log::debug!("discovery: nearby device gone: {fullname}");
+                devices.remove(&fullname);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Snapshot of currently-known nearby devices - polled by the frontend on an
+/// interval while the Send wizard's Local-network step is visible, same
+/// polling shape `list_connected_receivers` already uses.
+#[tauri::command]
+pub fn list_nearby_devices(state: State<'_, AppState>) -> Result<Vec<NearbyDeviceDto>, String> {
+    let devices = state.nearby_devices.lock().map_err(|e| e.to_string())?;
+    let mut list: Vec<_> = devices.values().map(NearbyDeviceDto::from).collect();
+    list.sort_by(|a, b| a.nickname.cmp(&b.nickname));
+    Ok(list)
+}
+
+/// Stops browsing - called when the Send wizard leaves the Local-network
+/// step (or closes), so an idle wizard doesn't keep a browse daemon running
+/// forever.
+#[tauri::command]
+pub fn stop_discovery_browsing(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(session) = state.discovery_browse.lock().map_err(|e| e.to_string())?.take() {
+        ls_net::stop_browsing(&session.daemon);
+        session.task.abort();
+    }
+    state.nearby_devices.lock().map_err(|e| e.to_string())?.clear();
+    Ok(())
 }
 
 // ---------- round 23: Cloud drop transport (Google Drive) ----------

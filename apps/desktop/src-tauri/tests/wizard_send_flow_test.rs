@@ -124,7 +124,7 @@ async fn share_snapshot_wizard_bundles_multiple_folders_without_a_database() {
     let sender_url = url.clone();
     let sender_task = tokio::spawn(async move {
         let state = sender_handle.state::<AppState>();
-        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url).await
+        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url, false, String::new()).await
     });
 
     let receiver_room = room.clone();
@@ -355,7 +355,7 @@ async fn full_wizard_flow_against_a_real_local_mysql_instance() {
     let sender_url = url.clone();
     let sender_task = tokio::spawn(async move {
         let state = sender_handle.state::<AppState>();
-        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url).await
+        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url, false, String::new()).await
     });
     let receiver_room = room.clone();
     let receiver_url = url.clone();
@@ -462,7 +462,7 @@ services:
     let sender_url = url.clone();
     let sender_task = tokio::spawn(async move {
         let state = sender_handle.state::<AppState>();
-        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url).await
+        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url, false, String::new()).await
     });
     let receiver_room = room.clone();
     let receiver_url = url.clone();

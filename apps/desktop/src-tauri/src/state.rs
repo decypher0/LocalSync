@@ -33,6 +33,56 @@ pub struct CloudDropUpload {
     pub retention: ls_clouddrop::retention::Retention,
 }
 
+/// Receiver-side (round 37): this device's own mDNS presence, kept alive for
+/// as long as the "Make this device discoverable" toggle is on. Torn down
+/// (daemon unregistered/shut down, both tasks aborted) by
+/// `commands::set_discoverable(false, ..)`, or replaced wholesale by a fresh
+/// one if turned back on with a new nickname.
+pub struct DiscoverySession {
+    pub daemon: ls_net::ServiceDaemon,
+    pub fullname: String,
+    /// `abort()`ed on teardown - `ls_net::host_ephemeral_relay`'s own doc
+    /// comment notes its task is normally left detached (fine for a
+    /// one-per-send relay that dies with the process), but a standing,
+    /// explicitly-toggled-off discoverability session should actually stop
+    /// listening rather than linger.
+    pub relay_task: tokio::task::JoinHandle<()>,
+    // `tauri::async_runtime::spawn` (not plain `tokio::spawn`, unlike
+    // `relay_task` above) returns Tauri's own JoinHandle wrapper type, not
+    // `tokio::task::JoinHandle` - the two look interchangeable but aren't.
+    pub listen_task: tauri::async_runtime::JoinHandle<()>,
+}
+
+/// Receiver-side (round 37): one connection a sender opened via discovery,
+/// held here between `commands::listen_for_discovery_connections` surfacing
+/// a `connection-request` event and the frontend's
+/// `respond_to_connection_request` call - same "stash it because the
+/// frontend needs a moment to ask a human" shape as
+/// [`AppState::cloud_access_requests`], just holding the live connection
+/// itself (there's no `receive_snapshot`-style caller already holding it)
+/// rather than a string.
+///
+/// ponytail: keyed by the one standing discovery room id, so only one
+/// pending request is tracked at a time - a second sender connecting to the
+/// same discoverable device before the first request is answered overwrites
+/// this entry (the abandoned first connection is simply dropped). Matches
+/// this app's existing single-outgoing-connection-per-receiver boundary
+/// (see `AppState::outgoing_conn`'s doc comment); a real per-connection
+/// queue would need its own identifier scheme for what's expected to be a
+/// rare race in practice.
+pub struct PendingConnectionRequest {
+    pub conn: Arc<ls_net::DataChannelConn>,
+    pub sender_name: String,
+}
+
+/// Sender-side (round 37): a live mDNS browse session, kept alive for as
+/// long as the Send wizard's Local-network step is showing the
+/// nearby-devices list.
+pub struct DiscoveryBrowseSession {
+    pub daemon: ls_net::ServiceDaemon,
+    pub task: tauri::async_runtime::JoinHandle<()>,
+}
+
 /// App-wide state, held by Tauri and looked up by the ids handed back to the
 /// frontend from `receive_snapshot` / `run_snapshot`.
 ///
@@ -68,4 +118,22 @@ pub struct AppState {
     /// the control message that carried it is long gone by then. Keyed by
     /// `peer_id`, removed the moment it's responded to.
     pub cloud_access_requests: Mutex<HashMap<String, String>>,
+    /// Receiver-side (round 37): `Some` for as long as "Make this device
+    /// discoverable" is on. See [`DiscoverySession`].
+    pub discovery: Mutex<Option<DiscoverySession>>,
+    /// Receiver-side (round 37): a sender's `ConnectionRequest`, awaiting
+    /// this device's Accept/Reject. See [`PendingConnectionRequest`].
+    pub pending_connection_requests: Mutex<HashMap<String, PendingConnectionRequest>>,
+    /// Sender-side (round 37): `Some` for as long as the nearby-devices list
+    /// is being browsed for. See [`DiscoveryBrowseSession`].
+    pub discovery_browse: Mutex<Option<DiscoveryBrowseSession>>,
+    /// Sender-side (round 37): currently-resolved nearby devices, kept live
+    /// by a background task translating mDNS `ServiceEvent`s -
+    /// `commands::list_nearby_devices` just snapshots this rather than
+    /// talking to mDNS directly itself, the same "background task owns the
+    /// live state, a command polls a snapshot of it" shape
+    /// `connected_receivers`/`list_connected_receivers` already uses. Keyed
+    /// by the mDNS record's own fullname (stable per announcing instance,
+    /// unlike a nickname two devices could share).
+    pub nearby_devices: Mutex<HashMap<String, ls_net::DiscoveredPeer>>,
 }
