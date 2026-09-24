@@ -2159,7 +2159,7 @@ round 1 is completely unchanged.
 ### What to check on real hardware
 
 1. **The actual new capability, across two real machines**: on device A,
-   set a device name (Settings) and turn on "Make this device
+   confirm the pre-filled device name (defaults to the OS hostname; edit it if you like) and turn on "Make this device
    discoverable on Local network" (Receive tab). On device B, open the
    Send wizard with Local network selected and confirm device A appears
    in the nearby-devices list within a few seconds, with the name device A
