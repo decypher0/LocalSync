@@ -3589,6 +3589,7 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "flate2",
+ "gethostname",
  "log",
  "ls-clouddrop",
  "ls-containers",

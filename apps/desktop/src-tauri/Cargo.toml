@@ -83,7 +83,10 @@ log = { version = "0.4", features = ["std"] }
 # OS data-dir lookup for send_log.rs's log file - same crate + convention
 # ls-containers's ProvisioningLog uses for provisioning.log.
 dirs = "5"
-time = { version = "0.3", features = ["formatting"] }
+# Round 37: default device name for LAN discovery. Already in the tree
+# transitively (via mdns-sd), so this adds no new download.
+gethostname = "1"
+time ={ version = "0.3", features = ["formatting"] }
 # Already pulled in transitively by tauri itself (its async_runtime is a
 # tokio runtime) and already a dev-dependency below for the test harness -
 # promoted to a real dependency so run_snapshot's provisioning-log tailer

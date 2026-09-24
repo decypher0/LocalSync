@@ -235,15 +235,6 @@
       Remote relay URL
       <input id="relay-url" type="text" placeholder="ws://your-vps-ip:9090" />
     </label>
-    <!-- ---- Round 37: one device identity, used both when this device
-         announces itself as discoverable (Receive tab) and when it's the
-         one initiating a connection to a discovered device (Send wizard) -
-         a real device name, not two divergent settings for the same
-         concept. ---- -->
-    <label>
-      Device name (shown to nearby devices on Local network)
-      <input id="device-name" type="text" placeholder="e.g. Alice's Laptop" />
-    </label>
     <label>
       LOCALSYNC_DATA_DIR (informational — set as an env var before launch; see README)
       <input id="data-dir-display" type="text" disabled />
@@ -825,6 +816,13 @@
          sender who finds this device still has to pass before anything is
          sent. ---- -->
     <div id="discoverability-wrap" class="room-code-wrap">
+      <!-- One device identity: this same field is also the name sent along
+           when this device initiates a connection to a discovered device
+           (Send wizard). Pre-filled with the OS hostname (see app.js). -->
+      <label>
+        Device name (what nearby devices see)
+        <input id="device-name" type="text" />
+      </label>
       <label class="radio-label">
         <input type="checkbox" id="discoverable-toggle" />
         Make this device discoverable on Local network
