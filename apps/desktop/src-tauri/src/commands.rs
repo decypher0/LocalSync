@@ -930,8 +930,17 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     })?;
 
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let info = finalize_received_snapshot(&state, snapshot)?;
+    let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot)?;
     log::info!("receive_snapshot: done, id={}", info.snapshot_id);
+    // An armed session's next push landed - let the frontend route it to the
+    // existing tab. A fresh session needs no extra signal: the caller's own
+    // return value already carries `info` for that case.
+    if let crate::receiver_session_commands::ReceivedSessionOutcome::Updated(session_id) = &outcome {
+        let _ = app.emit(
+            "session-update-available",
+            crate::receiver_session_commands::SessionUpdateAvailable { session_id: session_id.clone(), info: info.clone() },
+        );
+    }
 
     let conn = std::sync::Arc::new(conn);
     *state.outgoing_conn.lock().map_err(|e| e.to_string())? = Some(conn.clone());
@@ -1034,6 +1043,27 @@ pub fn finalize_received_snapshot(
     state: &State<'_, AppState>,
     snapshot: ls_snapshot::Snapshot,
 ) -> Result<IncomingSnapshotInfo, String> {
+    let (info, _outcome) = finalize_received_snapshot_tracked(state, snapshot)?;
+    Ok(info)
+}
+
+/// Everything `finalize_received_snapshot` does, plus filing the push under
+/// the receiver-session model (`crate::receiver_session_commands`) and
+/// reporting whether that created a fresh `ReceivedSession` or updated an
+/// armed, already-existing one.
+///
+/// Split out as its own function - rather than changing
+/// `finalize_received_snapshot`'s own signature or `IncomingSnapshotInfo`'s
+/// fields - so every existing direct caller keeps compiling and behaving
+/// exactly as before: `tests/known_peer_test.rs` calls
+/// `finalize_received_snapshot` directly with no way to consume a second
+/// return value, and `main.rs`'s `preload_snapshot` constructs
+/// `IncomingSnapshotInfo` as a bare struct literal that would break if a
+/// field were added to it.
+pub fn finalize_received_snapshot_tracked(
+    state: &State<'_, AppState>,
+    snapshot: ls_snapshot::Snapshot,
+) -> Result<(IncomingSnapshotInfo, crate::receiver_session_commands::ReceivedSessionOutcome), String> {
     // Trust-on-first-use: empty trusted_keys accepts any signature that
     // checks out. Documented MVP behavior (crates/ls-security/src/verify.rs)
     // — a real keyring UI is out of scope here.
@@ -1061,13 +1091,19 @@ pub fn finalize_received_snapshot(
         }
     };
 
+    // Files this push under the receiver-session model (creates a fresh
+    // ReceivedSession, or updates one that was explicitly armed for it) -
+    // never affects the diff-review-then-Run gate below, only which session
+    // the eventual Run attaches to.
+    let outcome = crate::receiver_session_commands::track_received_snapshot(state, &manifest, &snapshot_id, &sender_pubkey_hex)?;
+
     state
         .verified
         .lock()
         .map_err(|e| e.to_string())?
         .insert(snapshot_id.clone(), verified);
 
-    Ok(IncomingSnapshotInfo { snapshot_id, manifest, diff, sender_pubkey_hex, recognized_peer })
+    Ok((IncomingSnapshotInfo { snapshot_id, manifest, diff, sender_pubkey_hex, recognized_peer }, outcome))
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -1421,8 +1457,14 @@ pub async fn respond_to_connection_request<R: tauri::Runtime>(
     .map_err(|e| e.to_string())?;
 
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let info = finalize_received_snapshot(&state, snapshot)?;
+    let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot)?;
     log::info!("respond_to_connection_request: accepted, id={}", info.snapshot_id);
+    if let crate::receiver_session_commands::ReceivedSessionOutcome::Updated(session_id) = &outcome {
+        let _ = app.emit(
+            "session-update-available",
+            crate::receiver_session_commands::SessionUpdateAvailable { session_id: session_id.clone(), info: info.clone() },
+        );
+    }
 
     *state.outgoing_conn.lock().map_err(|e| e.to_string())? = Some(conn.clone());
     tauri::async_runtime::spawn(listen_for_pushed_updates(app, conn, peer_id));
