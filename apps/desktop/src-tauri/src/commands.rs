@@ -1195,6 +1195,15 @@ pub async fn stop_session(state: State<'_, AppState>, session_id: String) -> Res
 // click, the receiver still explicitly accepts the connection and still
 // reviews the diff before Run, unmodified from round 1.
 
+/// The OS hostname, used to pre-fill the device-name field so discoverability
+/// works without anyone having to invent a name first. Never fails - an
+/// unreadable/non-UTF-8 hostname just falls back to a generic label.
+#[tauri::command]
+pub fn default_device_name() -> String {
+    let name = gethostname::gethostname().to_string_lossy().trim().to_string();
+    if name.is_empty() { "My device".to_string() } else { name }
+}
+
 #[derive(Clone, Serialize)]
 pub struct ConnectionRequestNotice {
     pub peer_id: String,
