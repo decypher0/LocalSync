@@ -4,7 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use localsync_desktop::{commands, send_log, session_commands, state::AppState};
+use localsync_desktop::{commands, compose_wizard, send_log, session_commands, state::AppState};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
@@ -284,6 +284,11 @@ fn main() {
             commands::start_discovery_browsing,
             commands::list_nearby_devices,
             commands::stop_discovery_browsing,
+            compose_wizard::compose_catalog,
+            compose_wizard::inspect_project,
+            compose_wizard::validate_compose_spec,
+            compose_wizard::preview_compose,
+            compose_wizard::test_run_compose,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");
