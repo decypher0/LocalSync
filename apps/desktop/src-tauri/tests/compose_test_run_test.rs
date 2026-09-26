@@ -196,7 +196,7 @@ CMD [\"sh\", \"-c\", \"echo STALE_DOCKERFILE_WAS_BUILT; exit 1\"]
     assert!(report.output_tail.contains("Serving HTTP"), "{}", report.output_tail);
     assert_nothing_left_running("tr-own-dockerfile");
 
-    // And what is sent carries both files side by side, the project's own one untouched.
+    // And what is sent carries the generated Dockerfile plus the project's own one, renamed.
     let verified = snapshot_as_sent(&dir, &spec);
     let payload = &verified.snapshot().payload;
     let decoded = zstd::stream::decode_all(&payload[..]).unwrap();
@@ -205,7 +205,7 @@ CMD [\"sh\", \"-c\", \"echo STALE_DOCKERFILE_WAS_BUILT; exit 1\"]
         names.push(entry.unwrap().path().unwrap().display().to_string());
     }
     assert!(names.iter().any(|n| n.ends_with("source/Dockerfile")), "{names:?}");
-    assert!(names.iter().any(|n| n.ends_with("source/Dockerfile.localsync")), "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with("source/Dockerfile.original")), "{names:?}");
 }
 
 #[tokio::test]
