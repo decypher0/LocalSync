@@ -9,6 +9,8 @@
 
 pub mod commands;
 pub mod project_session;
+pub mod received_session;
+pub mod receiver_session_commands;
 pub mod session_commands;
 pub mod send_log;
 pub mod session_history;

@@ -2293,3 +2293,84 @@ from rounds 8, 10, 11, 12, 25, 28 and 34.
 - **Legacy backend commands remain** (`share_snapshot_wizard`,
   `push_update`, roster, pull requests): unused by the UI, kept because
   existing tests exercise them - see the note at the top of `commands.rs`.
+
+## Receiver-side session model: persistent received Sessions, arm-for-update, run/stop with zero connection
+
+Follow-up to the sender-side session-model refactor above - a received
+project is now its own persistent Session (`ReceivedSession`, mirroring
+`ProjectSession`), not just an in-memory `state.verified` entry lost the
+moment the app closes. Built as two agents in parallel against a fixed
+contract (backend Rust, frontend JS); confirmed to actually match up during
+integration - one real gap was found and fixed (the saved-sessions history
+list was reading `entry.project` unconditionally, so a saved *receive*
+entry's detail line and Open/Delete buttons never rendered - it needed
+`entry.received` for `kind === "receive"`), plus one further real bug
+(a `session-update-available` push landing on a closed/saved armed session
+opened a fallback tab keyed by `snapshot_id`, not the real backend session
+id, so a later Run/Save on that tab would have failed with "no open
+received session" - fixed by threading the real `session_id` through).
+
+### What changed
+
+- **Receive → run → stop → session persists**: receiving now creates a
+  `ReceivedSession` (title, sender identity, last snapshot, work dir,
+  compose dir) the moment a payload is verified — independent of any
+  connection. Run/Stop (`run_received_session`/the existing, unmodified
+  `stop_session`) work against it with zero connection involved.
+- **Re-running after a restart needs no reconnect**: `run_received_session`
+  uses the already-unpacked, already-policy-rewritten project directory
+  directly (`ls_containers::run_existing`) when nothing is left in memory,
+  instead of requiring the original signed snapshot again. `db_cache_hit`
+  is honestly reported as `false` (unknown) in this path, since the
+  manifest needed to compute the real seed-hash-keyed volume name isn't
+  persisted — the actual volume reuse is unaffected either way, only this
+  one reporting field.
+- **Update-ready is explicit, per-session arming** (`arm_received_session_
+  for_update`/`disarm...`), not passive: a push only lands on an existing
+  session if it was explicitly armed first, matched by sender identity +
+  project title. This is real, structural: a session received via a pasted
+  code (no persistent device identity) can be armed, but nothing will ever
+  match it unless the sender's device also has a stable identity - i.e. the
+  sender found this receiver via Local-network discovery. The UI states
+  this plainly next to the toggle rather than leaving it to be discovered
+  the hard way.
+- **Save/discard reuses the exact sender-side mechanism** - same window
+  close-request hook, same `core:window:allow-destroy` permission, same
+  opt-in-only persistence file (`session-history.json`, `received` field
+  alongside `project`). The same cross-platform verification gap the
+  sender side already flagged applies here too: not yet click-tested on a
+  real Windows/macOS/Linux window, only that the build accepts the
+  permission and the logic is unit/integration-tested.
+- **A `snapshot_id` collision is real and handled**: two unarmed pushes of
+  an unchanged project produce the identical `snapshot_id`, but must become
+  two independent sessions (a user can legitimately receive the same
+  version twice). `ReceivedSession.id` is a fresh id, never the snapshot
+  id - confirmed by a test that deliberately reuses a `snapshot_id` across
+  two unarmed pushes and checks two distinct sessions result.
+
+### What to check on real hardware
+
+1. **Full lifecycle, no connection**: receive a project, review, Run,
+   confirm it's live, quit the app (or just close the tab and choose
+   Save), reopen the app, reopen the saved session from history, click Run
+   again - confirm it comes back up without any network activity at all.
+2. **Arm → push → same tab updates**: on the receiver, turn on Local-network
+   discoverability, receive once from a discovering sender, arm that
+   session for update, then have the sender push again to the same device -
+   confirm the *same* tab shows the new diff for review (not a second tab),
+   and that Run is still a separate, explicit click (never auto-applied).
+3. **Arm with a pasted-code receive**: arm a session that was received via
+   a pasted code (no discoverable identity involved) and confirm the UI's
+   own hint about this being unlikely to ever match a real push is honest
+   in practice - a resend from the same sender should NOT land on it
+   automatically.
+4. **Save/discard prompt on real windows**: closing a receive tab (and
+   quitting the app with one open) should show the same save/discard
+   dialog the send side already has, on Windows, macOS, and Linux - the
+   specific gap this and the sender-side round both flagged as unverified.
+5. **History list**: after saving both a send and a receive session,
+   confirm the history panel shows the right detail line and working
+   Open/Delete buttons for both kinds - this exact rendering path had a
+   real bug (reading the wrong field for a receive entry) caught and fixed
+   during this round's integration, worth a real look to confirm the fix
+   holds up visually, not just in code.

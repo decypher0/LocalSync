@@ -212,6 +212,29 @@ listen("snapshot-updated", (evt) => {
   if (session.id === activeSessionId) renderActiveSession();
 });
 
+// ---------- an armed session's next push (receiver-side) ----------
+// The counterpart to snapshot-updated above, but for a real, named, saved-
+// or-savable receive Session rather than the single-upstream-connection
+// heuristic that predates this round: the backend names exactly which
+// session_id the push landed on (only possible because that session was
+// explicitly armed - see the "Ready for update" toggle), so this always
+// routes to that tab and never guesses. Falls back to opening a fresh tab
+// from the event's own info exactly like startReceiveSessionFromInfo already
+// does for a cold push after a restart (the session was saved and closed, so
+// there's no open tab left to find) - this is precisely the case that
+// function exists for.
+listen("session-update-available", (evt) => {
+  const { session_id, info } = evt.payload;
+  const session = sessions.get(session_id);
+  if (!session) {
+    startReceiveSessionFromInfo(info, session_id);
+    return;
+  }
+  applyReviewInfoToSession(session, info);
+  renderSessionTabs();
+  if (session.id === activeSessionId) renderActiveSession();
+});
+
 // ---------- settings ----------
 $("settings-toggle").addEventListener("click", () => {
   $("settings-panel").classList.toggle("hidden");
@@ -316,17 +339,23 @@ function renderSessionHistoryList(entries) {
   $("session-history-empty").classList.toggle("hidden", sorted.length > 0);
   for (const entry of sorted) {
     const li = document.createElement("li");
-    const saved = entry.project;
+    const saved = entry.kind === "send" ? entry.project : entry.received;
+    // A receive-kind entry's saved shape (session_history.rs's `received`
+    // field, a ReceivedSession) is the same idea as a send's `project` but
+    // doesn't have a `devices` list to count - only a send is sent *to*
+    // devices.
     const detail = saved
-      ? `${saved.devices.length} device${saved.devices.length === 1 ? "" : "s"} � saved project`
+      ? entry.kind === "send"
+        ? `${saved.devices.length} device${saved.devices.length === 1 ? "" : "s"} · saved project`
+        : "saved project"
       : "older activity (details weren't saved)";
     li.innerHTML = `
       <span class="inline-row receivers-header">
         <span><svg class="icon"><use href="#${entry.kind === "send" ? "icon-send" : "icon-download"}"></use></svg>
           ${escapeHtml(entry.title)} <span class="hint-inline">${escapeHtml(detail)}</span></span>
         ${saved ? `<span class="inline-row">
-          <button class="ghost-btn" type="button" data-open-saved="${escapeHtml(entry.id)}">Open</button>
-          <button class="ghost-btn" type="button" data-delete-saved="${escapeHtml(entry.id)}">Delete</button>
+          <button class="ghost-btn" type="button" data-open-saved="${escapeHtml(entry.id)}" data-open-kind="${escapeHtml(entry.kind)}">Open</button>
+          <button class="ghost-btn" type="button" data-delete-saved="${escapeHtml(entry.id)}" data-delete-kind="${escapeHtml(entry.kind)}">Delete</button>
         </span>` : ""}
       </span>
     `;
@@ -341,10 +370,12 @@ $("session-history-list").addEventListener("click", async (e) => {
   $("session-history-error").textContent = "";
   try {
     if (open) {
-      await openSavedSession(open.dataset.openSaved);
+      if (open.dataset.openKind === "receive") await openSavedReceivedSession(open.dataset.openSaved);
+      else await openSavedSession(open.dataset.openSaved);
       $("session-history-panel").classList.add("hidden");
     } else {
-      await invoke("delete_saved_project_session", { sessionId: del.dataset.deleteSaved });
+      const isReceive = del.dataset.deleteKind === "receive";
+      await invoke(isReceive ? "delete_saved_received_session" : "delete_saved_project_session", { sessionId: del.dataset.deleteSaved });
       const open = sessions.get(del.dataset.deleteSaved);
       if (open) open.saved = false;
       renderSessionHistoryList(await invoke("load_session_history"));
@@ -854,6 +885,21 @@ function newSession(kind, id, title) {
     runInProgress: false,
     runLogText: "",
     runErrorText: "",
+    // Round: a received project is now a real, saveable Session (mirrors
+    // the send side's `saved`) - see the "closing a session" section below.
+    saved: false,
+    armed: false,
+    // Set once run_received_session has succeeded at least once - the
+    // gating condition for the "Ready for update" toggle (arming a session
+    // that was never even accepted doesn't mean anything).
+    hasRunBefore: false,
+    // Set by the Reject button - an explicit "no", distinct from just
+    // closing the tab, so closing afterwards never re-offers to save
+    // something that was already declined.
+    rejected: false,
+    gitCommit: null,
+    workDir: null,
+    lastReceivedAt: null,
   };
 }
 
@@ -1000,12 +1046,31 @@ function showSessionNotice(text) {
   $("session-notice").classList.toggle("hidden", !text);
 }
 
+/// Whether closing this tab should ask "save or discard?" at all. A send is
+/// always askable once unsaved; a receive only once there's actually
+/// something worth keeping (it's been reviewed - has a snapshotId) and it
+/// wasn't already explicitly declined via Reject (that's its own resolution,
+/// not a state closing the tab should re-litigate).
+function needsSaveChoice(session) {
+  if (session.saved) return false;
+  if (session.kind === "send") return true;
+  if (session.kind === "receive") return !!session.snapshotId && !session.rejected;
+  return false;
+}
+
 function releaseSession(session) {
   if (session.kind === "send") {
     for (const t of session.transfers) releaseTransfer(t);
     invoke("discard_project_session", { sessionId: session.id }).catch((err) => console.error("discard_project_session failed:", err));
-  } else if (session.progressUnlisten) {
-    session.progressUnlisten();
+  } else {
+    if (session.progressUnlisten) session.progressUnlisten();
+    // Only ever a real backend-side receive session once it's been
+    // reviewed (has a snapshotId); a tab that errored out before that (a
+    // bad room code, a declined Cloud drop request, ...) has nothing on
+    // the backend to discard. A Reject already tore this down itself.
+    if (session.kind === "receive" && session.snapshotId && !session.rejected) {
+      invoke("discard_received_session", { sessionId: session.id }).catch((err) => console.error("discard_received_session failed:", err));
+    }
   }
   sessions.delete(session.id);
   if (activeSessionId === session.id) {
@@ -1019,12 +1084,13 @@ function releaseSession(session) {
 async function requestCloseSession(id) {
   const session = sessions.get(id);
   if (!session) return true;
-  if (session.kind === "send" && !session.saved) {
+  if (needsSaveChoice(session)) {
     const choice = await promptSaveSession(session);
     if (choice === "cancel") return false;
     if (choice === "save") {
       try {
-        await invoke("save_project_session", { sessionId: session.id });
+        const cmd = session.kind === "send" ? "save_project_session" : "save_received_session";
+        await invoke(cmd, { sessionId: session.id });
       } catch (err) {
         // Never silently lose what they asked to keep.
         showSessionNotice(`Couldn't save this session, so it was left open: ${err}`);
@@ -1057,13 +1123,14 @@ function promptSaveSession(session, note) {
 /// Quitting the app: every unsaved send session gets the same explicit
 /// choice; cancelling any of them cancels the quit.
 async function confirmExitWithSessions() {
-  const unsaved = [...sessions.values()].filter((s) => s.kind === "send" && !s.saved);
+  const unsaved = [...sessions.values()].filter(needsSaveChoice);
   for (const [i, session] of unsaved.entries()) {
     const choice = await promptSaveSession(session, unsaved.length > 1 ? `Session ${i + 1} of ${unsaved.length}` : "");
     if (choice === "cancel") return false;
     if (choice === "save") {
       try {
-        await invoke("save_project_session", { sessionId: session.id });
+        const cmd = session.kind === "send" ? "save_project_session" : "save_received_session";
+        await invoke(cmd, { sessionId: session.id });
       } catch (err) {
         showSessionNotice(`Couldn't save "${session.title}", so the app was left open: ${err}`);
         return false;
@@ -1208,7 +1275,7 @@ function showWizardStep(id) {
 // ---------- round 20 goal 4: the wizard as a real modal overlay ----------
 
 // When set, the wizard is being used only to pick *where to send* for a
-// session that already exists ("Send to another device�"): the project and
+// session that already exists ("Send to another device�"): the project and
 // database are already prepared, so folder/database steps are skipped and
 // Step 1's button sends instead of continuing.
 let wizardTargetSession = null;
@@ -2399,6 +2466,21 @@ async function openSavedSession(sessionId) {
   addSession(session);
 }
 
+/// Reopens a saved receive session - the receive-side counterpart of
+/// openSavedSession. Lands straight in the resume panel (Run/Stop plus the
+/// arm toggle), never the diff review - it was already accepted before it
+/// was ever saved.
+async function openSavedReceivedSession(sessionId) {
+  const existing = sessions.get(sessionId);
+  if (existing) {
+    setActiveSession(existing.id);
+    return;
+  }
+  const session = receivedSessionFromView(await invoke("open_saved_received_session", { sessionId }));
+  addSession(session);
+  lastReceiveSessionId = session.id;
+}
+
 // ---------- receive ----------
 // Round 29: the receiver-side counterpart to send-btn's session model
 // above. `lastReceiveSessionId` exists only for `snapshot-updated` (a
@@ -2421,6 +2503,10 @@ function applyReviewInfoToSession(session, info) {
   session.title = info.manifest.project_name;
   session.status = "reviewing";
   session.errorText = "";
+  // A fresh diff to review is never a resolved state - re-arms the
+  // close-tab "save?" prompt if this session had previously been rejected
+  // or run to completion (e.g. an armed session's next push arriving).
+  session.rejected = false;
 }
 
 // Round 29 goal B1: paints the shared receive-detail DOM from one session
@@ -2444,10 +2530,47 @@ function renderReceiveSessionDetail(session) {
   $("receive-error").textContent = session.status === "error" ? session.errorText : "";
 
   $("review-panel").classList.toggle("hidden", session.status !== "reviewing");
+  $("resume-panel").classList.toggle("hidden", session.status !== "resuming");
   $("session-panel").classList.toggle("hidden", session.status !== "running");
 
   if (session.status === "reviewing") renderReviewPanel(session);
+  if (session.status === "resuming") renderResumePanel(session);
   if (session.status === "running") renderRunningPanel(session);
+
+  renderReceiveSaveControls(session);
+  renderReceiveArmControls(session);
+}
+
+/// The save/discard controls for a receive session - same idea as the send
+/// side's send-save-btn/send-forget-btn, just for `save_received_session`/
+/// `delete_saved_received_session`. Nothing to save before a receive has
+/// actually been reviewed (has a snapshotId), so the whole block stays
+/// hidden until then.
+function renderReceiveSaveControls(session) {
+  const saveable = !!session.snapshotId;
+  $("receive-save-wrap").classList.toggle("hidden", !saveable);
+  if (!saveable) return;
+  $("receive-save-status").textContent = session.saved
+    ? "Saved on this computer — reopen it later from Session history."
+    : "Not saved. Closing this tab discards it.";
+  $("receive-save-btn").classList.toggle("hidden", session.saved);
+  $("receive-forget-btn").classList.toggle("hidden", !session.saved);
+}
+
+/// The "Ready for update" toggle - gated on the session having actually run
+/// at least once (arming a session that was never even accepted doesn't
+/// mean anything - see hasRunBefore's own doc comment in newSession).
+function renderReceiveArmControls(session) {
+  const canArm = session.hasRunBefore || session.status === "running";
+  $("receive-arm-wrap").classList.toggle("hidden", !canArm);
+  if (!canArm) return;
+  $("receive-arm-toggle").checked = !!session.armed;
+  $("receive-arm-toggle").disabled = session.busy;
+  $("receive-arm-badge").classList.toggle("hidden", !session.armed);
+  const discoverable = $("discoverable-toggle").checked;
+  $("receive-arm-discoverable-hint").textContent = discoverable
+    ? "This device is discoverable, so arming will work."
+    : "This device isn't discoverable right now (Receive settings, above) - arming won't do anything until it is.";
 }
 
 function renderReviewPanel(session) {
@@ -2546,6 +2669,31 @@ function renderReviewPanel(session) {
   }
 }
 
+/// A reopened saved receive session - "resume", not "review again". There is
+/// no diff to show (it was already accepted before this session was ever
+/// saved); only enough to let Run/Stop and the arm toggle work.
+function renderResumePanel(session) {
+  $("resume-project").textContent = session.title;
+  $("resume-commit").textContent = session.gitCommit || "(unknown)";
+  $("resume-last-received").textContent = session.lastReceivedAt ? new Date(session.lastReceivedAt).toLocaleString() : "(unknown)";
+  if (!$("resume-work-dir").value) $("resume-work-dir").value = session.workDir || "/tmp/localsync-work";
+  $("resume-run-btn").disabled = session.busy;
+  // The view has no stoppable/runnable id for a session the backend already
+  // reports as running (see receivedSessionFromView's own doc comment) -
+  // this is a plain heads-up, not something Run/Stop below can act on yet.
+  $("resume-already-running-hint").classList.toggle("hidden", !session.reportedRunning);
+
+  $("resume-run-error").textContent = session.runErrorText || "";
+  const showRunProgress = session.runInProgress || !!session.runErrorText;
+  $("resume-run-progress-wrap").classList.toggle("hidden", !showRunProgress);
+  if (showRunProgress) {
+    $("resume-run-log").textContent = session.runLogText || "";
+    $("resume-run-log").classList.toggle("hidden", !session.runLogText);
+    document.querySelector("#resume-run-progress-wrap .spinner")?.classList.toggle("hidden", !session.runInProgress);
+    $("resume-run-progress-label").textContent = session.runInProgress ? "Starting containers…" : "Failed — see details below.";
+  }
+}
+
 function renderRunningPanel(session) {
   $("s-project").textContent = session.manifest.project_name;
   const cacheEl = $("s-cache");
@@ -2569,9 +2717,15 @@ function renderRunningPanel(session) {
 
 /// Creates a session straight from an already-resolved IncomingSnapshotInfo -
 /// used by the dev preload shortcut and by a pushed update that arrives with
-/// no known prior session to attach to (e.g. after a restart).
-function startReceiveSessionFromInfo(info) {
-  const session = newSession("receive", info.snapshot_id, info.manifest.project_name);
+/// no known prior session to attach to (e.g. after a restart). `sessionId`
+/// overrides the tab's id (falling back to `info.snapshot_id` when omitted,
+/// the pre-session-model behavior) - required for a "session-update-available"
+/// fallback (the armed session was closed, so there's no open tab to find),
+/// since the real backend ReceivedSession.id is never the same value as
+/// snapshot_id (see received_session.rs) - a tab keyed by the wrong id would
+/// make a later Run/Save/Arm call fail with "no open received session".
+function startReceiveSessionFromInfo(info, sessionId) {
+  const session = newSession("receive", sessionId || info.snapshot_id, info.manifest.project_name);
   applyReviewInfoToSession(session, info);
   addSession(session);
   lastReceiveSessionId = session.id;
@@ -2699,6 +2853,9 @@ $("reject-btn").addEventListener("click", async () => {
   $("reject-btn").disabled = true;
   try {
     await invoke("reject_snapshot", { snapshotId: session.snapshotId });
+    // An explicit "no" - closing this tab afterwards never re-offers to
+    // save what was just declined (see needsSaveChoice).
+    session.rejected = true;
     endSession(session, "done"); // also re-renders the active view
   } catch (err) {
     $("reject-error").textContent = String(err);
@@ -2727,25 +2884,31 @@ $("run-details-toggle").addEventListener("click", () => {
   setDetailsToggleExpanded(!expanded);
 });
 
-$("run-btn").addEventListener("click", async () => {
-  const session = activeSession();
-  const workDir = $("work-dir").value.trim();
-  if (!session || !session.snapshotId || !workDir) return;
-
+/// Runs a receive session against `workDir` - shared by the fresh-review
+/// run-btn (inside review-panel) and the resume panel's own run button
+/// (resume-run-btn), since both now drive the exact same
+/// `run_received_session` call keyed by the session's own id (not the
+/// snapshot id - a resumed session's snapshotId may be stale from before the
+/// app restarted, but its session id is the one persistent thing the
+/// backend actually tracks it under). `ids` names whichever set of DOM
+/// elements belongs to the panel that's currently showing this session.
+async function runReceiveSession(session, workDir, ids) {
   session.busy = true;
   session.runInProgress = true;
   session.runLogText = "";
   session.runErrorText = "";
-  $("run-btn").disabled = true;
-  $("run-error").textContent = "";
-  $("run-progress-wrap").classList.remove("hidden");
-  $("run-progress-label").textContent = "Starting containers…";
-  document.querySelector("#run-progress-wrap .spinner")?.classList.remove("hidden");
+  $(ids.btn).disabled = true;
+  $(ids.error).textContent = "";
+  $(ids.progressWrap).classList.remove("hidden");
+  $(ids.progressLabel).textContent = "Starting containers…";
+  document.querySelector(ids.spinnerSelector)?.classList.remove("hidden");
   // Fresh per attempt — retrying after a fixed environment problem
   // shouldn't show last attempt's log lines glued onto this one.
-  $("run-log").textContent = "";
-  $("run-log").classList.add("hidden");
-  setDetailsToggleExpanded(false);
+  if (ids.log) {
+    $(ids.log).textContent = "";
+    $(ids.log).classList.add("hidden");
+  }
+  if (ids.detailsToggle) setDetailsToggleExpanded(false);
 
   // Registered before invoke so no early line from the backend's tailer is
   // missed. Round 29: keyed by snapshot_id (see
@@ -2756,40 +2919,78 @@ $("run-btn").addEventListener("click", async () => {
   const unlistenRunProgress = await listen("run-progress", (evt) => {
     if (evt.payload.session_id !== session.snapshotId) return;
     session.runLogText += (session.runLogText ? "\n" : "") + evt.payload.line;
-    if (session.id !== activeSessionId) return;
-    const log = $("run-log");
+    if (session.id !== activeSessionId || !ids.log) return;
+    const log = $(ids.log);
     log.textContent = session.runLogText;
+    log.classList.remove("hidden");
     log.scrollTop = log.scrollHeight;
   });
 
   try {
     // The one call in this app that executes received code — only reachable
-    // from this explicit click, after the diff above has been shown.
-    const runInfo = await invoke("run_snapshot", { snapshotId: session.snapshotId, workDir });
+    // from this explicit click, after the diff above has been shown (or,
+    // for a resumed session, after it was already shown and accepted once
+    // before being saved).
+    const runInfo = await invoke("run_received_session", { sessionId: session.id, workDir });
     session.runningSessionId = runInfo.session_id;
     session.servicePorts = runInfo.service_ports;
     session.dbCacheHit = runInfo.db_cache_hit;
     session.status = "running";
     session.runInProgress = false;
+    session.hasRunBefore = true;
+    session.workDir = workDir;
     renderSessionTabs();
     if (session.id === activeSessionId) renderActiveSession();
   } catch (err) {
     session.runInProgress = false;
     session.runErrorText = String(err);
     if (session.id === activeSessionId) {
-      $("run-error").textContent = session.runErrorText;
-      $("run-progress-label").textContent = "Failed — see details below.";
-      document.querySelector("#run-progress-wrap .spinner")?.classList.add("hidden");
+      $(ids.error).textContent = session.runErrorText;
+      $(ids.progressLabel).textContent = "Failed — see details below.";
+      document.querySelector(ids.spinnerSelector)?.classList.add("hidden");
     }
-    // Round 12: deliberately does NOT hide #run-progress-wrap here - the
+    // Round 12: deliberately does NOT hide the progress wrap here - the
     // streamed log content is most useful right after a real failure,
     // since it likely explains why. Left visible until the next Run
-    // attempt clears it at the top of this handler.
+    // attempt clears it at the top of this function.
   } finally {
     session.busy = false;
     unlistenRunProgress();
-    if (session.id === activeSessionId) $("run-btn").disabled = false;
+    if (session.id === activeSessionId) $(ids.btn).disabled = false;
   }
+}
+
+const REVIEW_RUN_IDS = {
+  btn: "run-btn",
+  error: "run-error",
+  progressWrap: "run-progress-wrap",
+  progressLabel: "run-progress-label",
+  spinnerSelector: "#run-progress-wrap .spinner",
+  log: "run-log",
+  detailsToggle: true,
+};
+
+const RESUME_RUN_IDS = {
+  btn: "resume-run-btn",
+  error: "resume-run-error",
+  progressWrap: "resume-run-progress-wrap",
+  progressLabel: "resume-run-progress-label",
+  spinnerSelector: "#resume-run-progress-wrap .spinner",
+  log: "resume-run-log",
+};
+
+$("run-btn").addEventListener("click", () => {
+  const session = activeSession();
+  const workDir = $("work-dir").value.trim();
+  if (!session || !session.snapshotId || !workDir) return;
+  runReceiveSession(session, workDir, REVIEW_RUN_IDS);
+});
+
+$("resume-run-btn").addEventListener("click", () => {
+  const session = activeSession();
+  const workDir = $("resume-work-dir").value.trim();
+  if (!session || !workDir) return;
+  runReceiveSession(session, workDir, RESUME_RUN_IDS);
 });
 
 $("stop-btn").addEventListener("click", async () => {
@@ -2806,6 +3007,51 @@ $("stop-btn").addEventListener("click", async () => {
   } finally {
     session.busy = false;
     $("stop-btn").disabled = false;
+  }
+});
+
+// ---------- save/discard a receive session (mirrors send-save-btn/send-forget-btn) ----------
+$("receive-save-btn").addEventListener("click", async () => {
+  const session = activeSession();
+  if (!session) return;
+  try {
+    await invoke("save_received_session", { sessionId: session.id });
+    session.saved = true;
+    renderActiveSession();
+  } catch (err) {
+    $("receive-save-status").textContent = `Couldn't save: ${err}`;
+  }
+});
+
+$("receive-forget-btn").addEventListener("click", async () => {
+  const session = activeSession();
+  if (!session) return;
+  try {
+    await invoke("delete_saved_received_session", { sessionId: session.id });
+    session.saved = false;
+    renderActiveSession();
+  } catch (err) {
+    $("receive-save-status").textContent = `Couldn't remove the saved copy: ${err}`;
+  }
+});
+
+// ---------- "Ready for update": arm this receive session so a future push
+// from the same sender, over discovery, lands right back on it ----------
+$("receive-arm-toggle").addEventListener("change", async () => {
+  const session = activeSession();
+  if (!session) return;
+  const enabled = $("receive-arm-toggle").checked;
+  $("receive-arm-error").textContent = "";
+  $("receive-arm-toggle").disabled = true;
+  try {
+    await invoke(enabled ? "arm_received_session_for_update" : "disarm_received_session_for_update", { sessionId: session.id });
+    session.armed = enabled;
+    renderActiveSession();
+  } catch (err) {
+    $("receive-arm-error").textContent = String(err);
+    $("receive-arm-toggle").checked = !enabled; // the backend call failed - never show a state that isn't real
+  } finally {
+    $("receive-arm-toggle").disabled = false;
   }
 });
 
