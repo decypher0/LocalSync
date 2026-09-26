@@ -123,7 +123,7 @@ async fn a_session_is_created_once_reused_across_devices_and_retries_and_tracks_
     let builds = || sender.state::<AppState>().artifact_builds.load(Ordering::SeqCst);
 
     // ---- create once ----
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
     let view = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap();
     let sid = view.id.clone();
     assert_eq!(view.title, "session-project");
@@ -217,7 +217,7 @@ async fn a_session_is_created_once_reused_across_devices_and_retries_and_tracks_
     assert!(gone.is_err(), "a discarded, never-saved session cannot be reopened");
 
     // ---- ...and a saved one comes back whole, with its per-device markers ----
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
     let second = session_commands::create_project_session(sender.state::<AppState>(), folders, Some("My project".into())).await.unwrap();
     let sid2 = second.id.clone();
     let (sent_c, _) = send_to_receiver(&sender, &url, "roomC1", request(&sid2, None, "Carol", false)).await;

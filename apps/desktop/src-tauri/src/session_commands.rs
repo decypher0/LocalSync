@@ -19,7 +19,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::commands::{await_recipient_consent, plan_to_snapshot_inputs, FolderPlanDto, Progress, ReceiverJoined};
+use crate::commands::{await_recipient_consent, generated_files_for, plan_to_snapshot_inputs, FolderPlanDto, Progress, ReceiverJoined};
 use crate::project_session::{DeviceMarker, FolderCommit, ProjectSession};
 use crate::state::{AppState, CachedArtifact};
 
@@ -64,8 +64,9 @@ async fn build_artifact(
     parents: &[Option<String>],
 ) -> Result<CachedArtifact, String> {
     let (specs, dumps) = plan_to_snapshot_inputs(folders, parents)?;
+    let generated = generated_files_for(folders, &specs, None)?;
     state.artifact_builds.fetch_add(1, Ordering::SeqCst);
-    let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi(&specs, &dumps))
+    let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi_with(&specs, &dumps, &generated))
         .await
         .map_err(|e| format!("snapshot task panicked: {e}"))?
         .map_err(|e| format!("{e:#}"))?;
@@ -447,8 +448,8 @@ mod tests {
     #[test]
     fn a_default_title_names_the_folders() {
         let folders = vec![
-            FolderPlanDto { path: "/w/xusom-admin".into(), dump: None },
-            FolderPlanDto { path: "/w/xusom-api".into(), dump: None },
+            FolderPlanDto { path: "/w/xusom-admin".into(), dump: None, compose: None },
+            FolderPlanDto { path: "/w/xusom-api".into(), dump: None, compose: None },
         ];
         assert_eq!(default_title(&folders), "xusom-admin, xusom-api");
     }

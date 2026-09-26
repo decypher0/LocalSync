@@ -4,7 +4,7 @@ mod sign;
 mod types;
 
 pub use bundle::head_commit;
-pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, Manifest, PendingDump, ServiceDef, Snapshot};
+pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, GeneratedFiles, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};
 use std::fs::File;
@@ -79,6 +79,13 @@ pub struct FolderSpec {
 /// both named `app`), and both the manifest's `FolderInfo.name` and the
 /// payload tar's path prefix need to be unique or later folders would
 /// silently overwrite earlier ones' entries.
+/// The label each folder gets inside a multi-folder snapshot's payload (its
+/// basename, de-duplicated) - public so a caller generating files that refer
+/// to the payload layout (e.g. `../db-dumps/<label>`) uses the exact same one.
+pub fn folder_labels(folders: &[FolderSpec]) -> Vec<String> {
+    unique_folder_labels(folders)
+}
+
 fn unique_folder_labels(folders: &[FolderSpec]) -> Vec<String> {
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut labels = Vec::with_capacity(folders.len());
@@ -145,6 +152,17 @@ fn dump_file_extension(engine: &str) -> &'static str {
 /// services (if any) each individual folder's own `bundle_project` found,
 /// same as it would find for any single folder today.
 pub fn create_snapshot_multi(folders: &[FolderSpec], dumps: &[types::PendingDump]) -> Result<Snapshot> {
+    create_snapshot_multi_with(folders, dumps, &[])
+}
+
+/// [`create_snapshot_multi`] with optional per-folder [`GeneratedFiles`]
+/// (index-aligned with `folders`; missing or `None` entries mean "use the
+/// project's own compose file, if any" - i.e. unchanged behavior).
+pub fn create_snapshot_multi_with(
+    folders: &[FolderSpec],
+    dumps: &[types::PendingDump],
+    generated: &[Option<GeneratedFiles>],
+) -> Result<Snapshot> {
     anyhow::ensure!(!folders.is_empty(), "create_snapshot_multi requires at least one folder");
     for d in dumps {
         anyhow::ensure!(
@@ -163,8 +181,8 @@ pub fn create_snapshot_multi(folders: &[FolderSpec], dumps: &[types::PendingDump
     let mut seed_hashes = Vec::with_capacity(folders.len());
     let mut services = Vec::new();
 
-    for (f, label) in folders.iter().zip(&labels) {
-        let bundle = bundle::bundle_project(&f.path, f.parent_commit.as_deref())
+    for (i, (f, label)) in folders.iter().zip(&labels).enumerate() {
+        let bundle = bundle::bundle_project_with(&f.path, f.parent_commit.as_deref(), generated.get(i).and_then(Option::as_ref))
             .with_context(|| format!("bundling {}", f.path.display()))?;
 
         let build_dirs: Vec<std::path::PathBuf> = bundle
@@ -768,5 +786,63 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("out of range"));
+    }
+
+    /// Generated compose/Dockerfile ship where the receiver's Run looks for
+    /// them - the compose at the folder's top level, extra files under
+    /// `source/` - without anything having to exist in (or be committed to)
+    /// the sender's folder, which must be left untouched.
+    #[test]
+    fn generated_files_are_bundled_without_touching_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("no-compose-app");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.py"), "print('hi')
+").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "-A"],
+            vec!["-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "-q", "-m", "init"],
+        ] {
+            assert!(std::process::Command::new("git").args(&args).current_dir(&root).status().unwrap().success());
+        }
+        let generated = GeneratedFiles {
+            compose_yaml: "services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.localsync
+    ports:
+      - \"8080:8080\"
+".to_string(),
+            files: vec![("Dockerfile.localsync".to_string(), b"FROM scratch
+".to_vec())],
+        };
+        let snap = create_snapshot_multi_with(
+            &[FolderSpec { path: root.clone(), parent_commit: None }],
+            &[],
+            &[Some(generated.clone())],
+        )
+        .unwrap();
+
+        let files = unpack(&snap.payload);
+        assert_eq!(
+            String::from_utf8_lossy(files.get("no-compose-app/docker-compose.yml").expect("compose ships at the folder's top level")),
+            generated.compose_yaml
+        );
+        assert_eq!(
+            files.get("no-compose-app/source/Dockerfile.localsync").expect("the Dockerfile ships under source/"),
+            b"FROM scratch
+"
+        );
+        assert!(files.contains_key("no-compose-app/source/main.py"), "the project's own committed files still ship");
+        assert_eq!(snap.manifest.services.len(), 1, "the manifest learns the generated service");
+        assert_eq!(snap.manifest.services[0].name, "app");
+        assert!(!root.join("docker-compose.yml").exists(), "the sender's folder must not be modified");
+        assert!(!root.join("Dockerfile.localsync").exists(), "the sender's folder must not be modified");
+
+        // And with nothing generated, behavior is what it always was: no compose.
+        let plain = create_snapshot_multi(&[FolderSpec { path: root, parent_commit: None }], &[]).unwrap();
+        assert!(!unpack(&plain.payload).contains_key("no-compose-app/docker-compose.yml"));
     }
 }
