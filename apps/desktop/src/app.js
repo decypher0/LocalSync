@@ -439,9 +439,28 @@ const DEVICE_NAME_KEY = "localsync.deviceName";
 function deviceName() {
   return $("device-name").value.trim();
 }
+// Saved name if someone already chose one, else the OS hostname - so the
+// field is never empty and discoverability works with zero setup.
+async function fillDefaultDeviceName() {
+  try {
+    $("device-name").value = await invoke("default_device_name");
+  } catch (err) {
+    console.error("default_device_name failed:", err);
+  }
+}
 $("device-name").value = localStorage.getItem(DEVICE_NAME_KEY) || "";
+if (!deviceName()) fillDefaultDeviceName();
 $("device-name").addEventListener("input", () => {
   localStorage.setItem(DEVICE_NAME_KEY, deviceName());
+});
+// "change" fires on blur/Enter, not every keystroke - so an edit made while
+// discoverable is already on re-announces once, with the final name.
+$("device-name").addEventListener("change", async () => {
+  if (!deviceName()) {
+    localStorage.removeItem(DEVICE_NAME_KEY);
+    await fillDefaultDeviceName();
+  }
+  if ($("discoverable-toggle").checked) $("discoverable-toggle").dispatchEvent(new Event("change"));
 });
 
 // ---------- round 37 goal 1: opt-in discoverability (receiving side) ----------

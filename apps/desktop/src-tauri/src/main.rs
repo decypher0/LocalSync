@@ -272,6 +272,7 @@ fn main() {
             commands::request_cloud_drop_access,
             commands::load_session_history,
             commands::record_session_history_entry,
+            commands::default_device_name,
             commands::set_discoverable,
             commands::respond_to_connection_request,
             commands::start_discovery_browsing,
