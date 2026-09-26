@@ -6,6 +6,7 @@ use ls_containers::RunningSession;
 use ls_security::VerifiedSnapshot;
 
 use crate::project_session::{FolderCommit, ProjectSession};
+use crate::received_session::ReceivedSession;
 
 /// One receiver whose connection was kept open past the initial
 /// `share_snapshot` exchange (round 11), so the sender can push a targeted
@@ -169,4 +170,18 @@ pub struct AppState {
     /// test prove a retry/second device reuses the artifact instead of
     /// rebuilding it.
     pub artifact_builds: AtomicUsize,
+    /// Receiver-side (session-model refactor): every received session
+    /// currently open, keyed by its own id - the receiving counterpart to
+    /// `project_sessions`. See [`ReceivedSession`].
+    pub received_sessions: Mutex<HashMap<String, ReceivedSession>>,
+    /// Receiver-side (session-model refactor): explicit "I'm ready for the
+    /// next push to land on this session" arming - **not** persisted (reset
+    /// every app start, by design: explicit, not passive - a session that
+    /// was armed before a restart is not silently still armed after one).
+    /// Keyed `"<sender_pubkey_hex>|<project title>"` so a push is matched to
+    /// the right armed session by who sent it and what project it is, not by
+    /// connection identity (a fresh ephemeral connection every time has
+    /// none - see `receiver_session_commands`'s doc comment). Value is the
+    /// `ReceivedSession::id` to update.
+    pub armed_updates: Mutex<HashMap<String, String>>,
 }
