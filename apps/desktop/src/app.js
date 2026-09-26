@@ -825,6 +825,13 @@ function newSession(kind, id, title) {
     progressUnlisten: null,
     progressBytes: 0,
     progressTotal: 0,
+    // Goal 4: set true the moment a "receiver-connecting" event fires (the
+    // WebRTC handshake finished - a real peer is there), independent of
+    // progressBytes/progressTotal above which only start moving once
+    // send_payload's own callback fires. See renderSendSessionDetail's
+    // send-receiver-status-wrap.
+    receiverJoined: false,
+    receiverJoinedUnlisten: null,
     folders: [], // [{ path, dump: {schema, engine} | null }]
     cloudDrop: false,
     // Round 30 goal A: the exact folder/database plan (Rust-shaped payload,
@@ -898,6 +905,10 @@ function endSession(session, status) {
     session.progressUnlisten();
     session.progressUnlisten = null;
   }
+  if (session.receiverJoinedUnlisten) {
+    session.receiverJoinedUnlisten();
+    session.receiverJoinedUnlisten = null;
+  }
   recordSessionHistory(session);
   renderSessionTabs();
   if (session.id === activeSessionId) renderActiveSession();
@@ -906,6 +917,7 @@ function endSession(session, status) {
 function closeSessionTab(id) {
   const session = sessions.get(id);
   if (session && session.progressUnlisten) session.progressUnlisten();
+  if (session && session.receiverJoinedUnlisten) session.receiverJoinedUnlisten();
   sessions.delete(id);
   if (activeSessionId === id) {
     setActiveSession(null);
@@ -1783,6 +1795,17 @@ function renderSendSessionDetail(session) {
   $("send-room-code-display").textContent = session.roomCode || "";
   renderSendCodeExpiry(session);
 
+  // Goal 4: shown the moment a receiver's handshake completes
+  // (receiverJoined, set by the "receiver-connecting" listener above) and
+  // for as long as the send is still actively in flight - once it's
+  // "done"/"error"/"expired" the result/error text below already says what
+  // happened, so this earlier-stage status line steps aside rather than
+  // lingering alongside it.
+  $("send-receiver-status-wrap").classList.toggle(
+    "hidden",
+    !(session.receiverJoined && (session.status === "connecting" || session.status === "active"))
+  );
+
   const showProgress = !session.cloudDrop && (session.status === "active" || (session.status === "done" && session.progressTotal > 0));
   $("send-progress-wrap").classList.toggle("hidden", !showProgress);
   if (showProgress) {
@@ -2072,6 +2095,7 @@ async function performSendAttempt(session, mode, url, foldersForPayload, onRoomI
     session.resultText = "";
     session.progressBytes = 0;
     session.progressTotal = 0;
+    session.receiverJoined = false; // Goal 4: a retry starts a fresh handshake - clear the prior attempt's signal
     session.endedAt = null; // clears a prior attempt's terminal state, if any, so endSession() below isn't a no-op
     onRoomIdKnown(info);
     idAssigned = true;
@@ -2096,6 +2120,23 @@ async function performSendAttempt(session, mode, url, foldersForPayload, onRoomI
       // tick on an already-active session only needs the progress bar.
       if (wasConnecting) renderActiveSession();
       else renderSendSessionDetail(session);
+    });
+
+    // Goal 4: fires as soon as ls_net::connect_as_sender's data channel
+    // opens - a real peer finished the WebRTC handshake - well before
+    // "share-progress" above ever fires (that only starts once send_payload
+    // begins moving bytes, which for a large snapshot can be noticeably
+    // later). This is the earliest, most direct "someone is actually
+    // connecting right now" signal the backend has; see
+    // send-receiver-status-wrap in renderSendSessionDetail for where it's
+    // shown. Same session_id-filtering and prior-listener-teardown
+    // reasoning as share-progress above.
+    if (session.receiverJoinedUnlisten) session.receiverJoinedUnlisten();
+    session.receiverJoinedUnlisten = await listen("receiver-connecting", (evt) => {
+      if (evt.payload.session_id !== session.id) return;
+      session.receiverJoined = true;
+      if (session.id !== activeSessionId) return;
+      renderSendSessionDetail(session);
     });
 
     // Round 22 found `engine` silently dropped here; round 25 found

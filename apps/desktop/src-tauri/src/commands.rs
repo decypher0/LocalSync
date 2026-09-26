@@ -33,6 +33,22 @@ pub struct Progress {
     pub total: usize,
 }
 
+/// Fired once, right after `ls_net::connect_as_sender` returns an open data
+/// channel - i.e. a real peer has joined the room and completed the WebRTC
+/// handshake - but *before* `send_payload` starts moving any bytes. Until
+/// this event, `state.connected_receivers` (what `list_connected_receivers`
+/// reads) has nothing in it for this session: that map is only populated
+/// after the transfer already finished, so it can't answer "is anyone
+/// connecting right now" during the handshake/transfer window, which is
+/// exactly the moment a developer watching the send wants to see. This event
+/// fills that gap without touching `connected_receivers`'s own after-the-
+/// fact roster purpose (still populated the same way, for `push_update`/
+/// pull-request targeting).
+#[derive(Clone, Serialize)]
+pub struct ReceiverJoined {
+    pub session_id: String,
+}
+
 /// One `run-progress` event = one new line tailed live from
 /// `ls_containers::ProvisioningLog`'s file while `run_snapshot` is in
 /// flight. See `tail_provisioning_log` below. Round 29: `session_id` for
@@ -256,6 +272,10 @@ pub async fn share_snapshot<R: tauri::Runtime>(
             e.to_string()
         })?;
     log::info!("share_snapshot: data channel open, sending payload ({} bytes)", bytes.len());
+    // The data channel is open, meaning a real peer just finished the WebRTC
+    // handshake - surface that immediately, well before send_payload below
+    // (which can take a while for a large snapshot) reaches completion.
+    let _ = app.emit("receiver-connecting", ReceiverJoined { session_id: room_code.clone() });
 
     let progress_session_id = room_code.clone();
     ls_net::send_payload(&conn, &bytes, |sent, total| {
@@ -593,6 +613,9 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
         "share_snapshot_wizard: data channel open, sending payload ({} bytes)",
         bytes.len()
     );
+    // See the matching comment in share_snapshot: real peer connected, well
+    // before the transfer itself (started right below) finishes.
+    let _ = app.emit("receiver-connecting", ReceiverJoined { session_id: room_code.clone() });
 
     let progress_session_id = room_code.clone();
     ls_net::send_payload(&conn, &bytes, |sent, total| {
