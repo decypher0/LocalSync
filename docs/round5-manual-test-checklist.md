@@ -2293,3 +2293,28 @@ from rounds 8, 10, 11, 12, 25, 28 and 34.
 - **Legacy backend commands remain** (`share_snapshot_wizard`,
   `push_update`, roster, pull requests): unused by the UI, kept because
   existing tests exercise them - see the note at the top of `commands.rs`.
+
+## Addendum: compose wizard (project without docker-compose.yml)
+
+On a real desktop build with Podman available:
+
+1. Send > pick ONE git folder with commits but no `docker-compose.yml`. The
+   wizard should add "App setup", "Services & environment" and "Review &
+   test run" steps. A folder that already has a compose file must behave
+   exactly as before.
+2. A folder that is not a git repo (or has no commits) must show a message on
+   the folders step instead of continuing.
+3. Runtime -> version and build-tool dropdowns follow the runtime; Java asks
+   for the built jar path (e.g. `target/*.jar`); a run command is required.
+4. Enter a port below 1024: the message must explain rootless Podman.
+5. Test run with a deliberately broken run command (e.g. `python nosuchfile.py`):
+   the real container error must appear, Back returns to App setup with
+   answers intact, and Continue stays blocked until a test run succeeds.
+6. Test run with your dev server already on the app's port: it should still
+   succeed on another port and say so.
+7. After a successful test run, send it; on the receiver, Run should behave
+   the same as the test run did. Nothing is written into the sender's folder.
+
+Known limits: Node has no build step (put it in the run command); Gradle's
+`build/libs/*.jar` can match a `-plain.jar` too (set an exact name); a MongoDB
+dump is not restored automatically; single-folder projects only.
