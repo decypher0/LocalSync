@@ -8,6 +8,7 @@
 //! own copies.
 
 pub mod commands;
+pub mod compose_wizard;
 pub mod project_session;
 pub mod session_commands;
 pub mod send_log;
