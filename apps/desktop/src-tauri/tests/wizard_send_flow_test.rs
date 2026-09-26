@@ -525,3 +525,132 @@ services:
 
     assert!(reachable, "busybox httpd on port 18080 never accepted a TCP connection within the timeout");
 }
+
+/// Realistic-looking MySQL dump text of roughly `target_bytes` - many
+/// distinct INSERT rows (so it compresses like real SQL rather than
+/// collapsing to nothing), written straight to `path` in bounded chunks.
+fn write_sql_dump(path: &Path, target_bytes: u64) {
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    writeln!(f, "-- MySQL dump\nCREATE TABLE `users` (`id` INT PRIMARY KEY, `email` VARCHAR(255), `note` TEXT);").unwrap();
+    let mut written = 0u64;
+    let mut i = 0u64;
+    while written < target_bytes {
+        let line = format!(
+            "INSERT INTO `users` VALUES ({i}, 'user{i}@example.com', 'row {i} {}');\n",
+            i.wrapping_mul(2654435761) % 1_000_003
+        );
+        f.write_all(line.as_bytes()).unwrap();
+        written += line.len() as u64;
+        i += 1;
+    }
+    f.flush().unwrap();
+}
+
+fn sha256_of_file(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = file.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A wizard send of a project *with a real SQL dump*, carried all the way
+/// through Run. Every other Run test in this file sends `dump: None`, and
+/// the dump tests stop at "the snapshot contains the right bytes" - so
+/// nothing exercised unpacking a real dump on the receiving side, which is
+/// exactly where a real "failed to unpack .../db-dumps/<folder>/<schema>.sql"
+/// was reported. Dump size defaults small; `LS_DUMP_TEST_MB` scales it up
+/// for reproducing size-dependent failures.
+#[tokio::test]
+async fn a_wizard_send_with_a_real_sql_dump_can_actually_be_run() {
+    if !podman_stack_available() {
+        eprintln!("podman/podman-compose not on PATH - skipping a_wizard_send_with_a_real_sql_dump_can_actually_be_run");
+        return;
+    }
+    let dump_mb: u64 = std::env::var("LS_DUMP_TEST_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+
+    let _home = isolate_sender_home();
+    let base = tempfile::tempdir().unwrap();
+    let compose_yaml = r#"
+services:
+  web:
+    image: docker.io/library/busybox:latest
+    command: ["httpd", "-f", "-p", "80", "-h", "/tmp"]
+    ports:
+      - "18081:80"
+"#;
+    // Folder and schema names mirror the real report: the dump lands in the
+    // payload at `db-dumps/xusom-admin/xusom.sql`.
+    let project = make_git_folder(base.path(), "xusom-admin", &[("docker-compose.yml", compose_yaml)]);
+    let dump_path = base.path().join("xusom.sql");
+    write_sql_dump(&dump_path, dump_mb * 1024 * 1024);
+    let dump_size = std::fs::metadata(&dump_path).unwrap().len();
+    let dump_hash = sha256_of_file(&dump_path);
+
+    let (url, _server) = signaling_url(8130).await;
+    let room = format!("wizard-dump-run-{}", std::process::id());
+
+    let sender_app = tauri::test::mock_app();
+    sender_app.manage(AppState::default());
+    let sender_handle = sender_app.handle().clone();
+    let receiver_app = tauri::test::mock_app();
+    receiver_app.manage(AppState::default());
+    let receiver_handle = receiver_app.handle().clone();
+
+    let folders = vec![commands::FolderPlanDto {
+        path: project.display().to_string(),
+        dump: Some(commands::DumpPlanDto {
+            schema: "xusom".to_string(),
+            file_path: dump_path.display().to_string(),
+            engine: "mysql".to_string(),
+        }),
+    }];
+
+    let sender_room = room.clone();
+    let sender_url = url.clone();
+    let sender_task = tokio::spawn(async move {
+        let state = sender_handle.state::<AppState>();
+        commands::share_snapshot_wizard(sender_handle.clone(), state, folders, sender_room, sender_url, false, String::new()).await
+    });
+    let receiver_room = room.clone();
+    let receiver_url = url.clone();
+    let receive_handle = receiver_handle.clone();
+    let receiver_task = tokio::spawn(async move {
+        let state = receive_handle.state::<AppState>();
+        commands::receive_snapshot(receive_handle.clone(), state, receiver_room, receiver_url).await
+    });
+    sender_task.await.unwrap().expect("share_snapshot_wizard should succeed");
+    let info = receiver_task.await.unwrap().expect("receive_snapshot should succeed");
+    assert_eq!(info.manifest.database_dumps.len(), 1);
+    assert_eq!(info.manifest.database_dumps[0].dump_file, "db-dumps/xusom-admin/xusom.sql");
+
+    // ---- The step that was reported failing: Run -> unpack the payload. ----
+    let work_dir = tempfile::tempdir().unwrap();
+    let run_state = receiver_app.state::<AppState>();
+    let run_info = commands::run_snapshot(
+        receiver_handle.clone(),
+        run_state,
+        info.snapshot_id.clone(),
+        work_dir.path().display().to_string(),
+    )
+    .await
+    .expect("run_snapshot should unpack and bring up a project sent with a real SQL dump");
+
+    // Not just "no error": the dump on the receiver's disk is the exact file
+    // that was sent.
+    let unpacked_root = std::fs::read_dir(work_dir.path()).unwrap().next().unwrap().unwrap().path();
+    let unpacked_dump = unpacked_root.join("db-dumps/xusom-admin/xusom.sql");
+    assert_eq!(std::fs::metadata(&unpacked_dump).unwrap().len(), dump_size, "unpacked dump has the wrong size");
+    assert_eq!(sha256_of_file(&unpacked_dump), dump_hash, "unpacked dump's content differs from what was sent");
+
+    let stop_state = receiver_app.state::<AppState>();
+    let stop_result = commands::stop_session(stop_state, run_info.session_id.clone()).await;
+    assert!(stop_result.is_ok(), "stop_session should tear the project down: {stop_result:?}");
+}
