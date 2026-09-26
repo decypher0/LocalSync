@@ -42,7 +42,7 @@ pub use discovery::{
     decode_room_code, detect_lan_ip, encode_room_code, generate_room_id, host_ephemeral_relay,
 };
 pub use mdns_discovery::{
-    announce, resolved_peer, start_browsing, stop_announcing, stop_browsing, DiscoveredPeer, DiscoveryEvents, SERVICE_TYPE,
+    announce, announce_with_id, resolved_peer, start_browsing, stop_announcing, stop_browsing, DiscoveredPeer, DiscoveryEvents, SERVICE_TYPE,
 };
 // Re-exported rather than making the desktop crate depend on mdns-sd
 // directly - same boundary this crate already keeps for webrtc/
