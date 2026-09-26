@@ -26,11 +26,24 @@ jobs:
   # non-colliding identifier (date + short commit SHA) rather than reusing
   # a fixed name that would silently overwrite a previous manual release's
   # assets. A tag push just uses the pushed tag, unchanged.
+  #
+  # `version` above is only the release's *name*. `app_version` is the real
+  # X.Y.Z stamped into tauri.conf.json / Cargo.toml / package.json before
+  # every build (see .github/actions/apply-app-version) - the updater
+  # compares that number, so it has to be a valid semver that goes up on
+  # every run without anyone editing files by hand:
+  #   - tag push vX.Y.Z: exactly that tag's number.
+  #   - anything else: the repo's current MAJOR.MINOR (from tauri.conf.json,
+  #     so bumping it by hand to 0.3.0 still works as a deliberate minor
+  #     bump) plus this workflow's run number as the patch - e.g. 0.2.57.
+  #     Run numbers only ever increase, so each new run beats the last one.
   determine-version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      app_version: ${{ steps.version.outputs.app_version }}
     steps:
+      - uses: actions/checkout@v4
       - id: version
         run: |
           if [ "${{ github.ref_type }}" = "tag" ]; then
@@ -38,16 +51,31 @@ jobs:
           else
             version="local-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
           fi
+
+          tag_number="${version#v}"
+          if [ "${{ github.ref_type }}" = "tag" ] && echo "$tag_number" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            app_version="$tag_number"
+          else
+            base=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
+            app_version="${base%.*}.${GITHUB_RUN_NUMBER}"
+          fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Release version for this run: $version"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "Release name for this run: $version"
+          echo "App version for this run: $app_version"
 
   # ------------------------------------------------------------
   # Windows: NSIS only, deliberately - see the comment on --bundles below.
   # ------------------------------------------------------------
   build-windows:
+    needs: determine-version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/apply-app-version
+        with:
+          version: ${{ needs.determine-version.outputs.app_version }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -197,9 +225,13 @@ jobs:
   # on purpose - see the comment below.
   # ------------------------------------------------------------
   build-linux:
+    needs: determine-version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/apply-app-version
+        with:
+          version: ${{ needs.determine-version.outputs.app_version }}
 
       - name: Install Linux build dependencies
         # Same package list scripts/setup-linux-deps.sh already documents
@@ -470,9 +502,13 @@ jobs:
   # same build, not a second copy of it that could drift.
   # ------------------------------------------------------------
   build-macos:
+    needs: determine-version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/apply-app-version
+        with:
+          version: ${{ needs.determine-version.outputs.app_version }}
 
       # Round 16, part B (corrected): real signing+notarization needs a
       # real Apple Developer Program enrollment - see docs/code-signing.md.
@@ -623,16 +659,16 @@ jobs:
       - name: Generate latest.json (update manifest)
         # Round 16 part A: the file tauri.conf.json's updater.endpoints
         # points at (see its own comment). "version" here is the app's real
-        # semver from tauri.conf.json - deliberately NOT
-        # needs.determine-version.outputs.version, which for a manual
+        # semver - needs.determine-version.outputs.app_version, the exact
+        # same X.Y.Z the three build jobs stamped into the app before
+        # building (see .github/actions/apply-app-version) - deliberately
+        # NOT needs.determine-version.outputs.version, which for a manual
         # workflow_dispatch run is `local-<date>-<sha>` (not valid semver -
-        # the updater's own version comparison needs a real X.Y.Z). That
-        # also means two manual builds in a row currently produce the same
-        # manifest version (this project doesn't yet auto-bump
-        # tauri.conf.json's version per release) - the updater correctly
-        # won't see a "new" update between them until a real version bump
-        # happens; expected, not a bug, and worth knowing before assuming
-        # two dev builds should update each other.
+        # the updater's own version comparison needs a real X.Y.Z). This
+        # job's own checkout is never stamped, so reading tauri.conf.json
+        # here would publish the repo's stale version instead of what was
+        # actually built. Every run gets a new app_version, so each release
+        # is a real update over the previous one.
         #
         # Only one macOS entry - darwin-aarch64 - since build-macos runs on
         # macos-latest (Apple Silicon) with no explicit --target, so no
@@ -695,7 +731,7 @@ jobs:
         # requirement would.
         id: manifest
         run: |
-          app_version=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
+          app_version="${{ needs.determine-version.outputs.app_version }}"
           tag="${{ needs.determine-version.outputs.version }}"
           repo="${{ github.repository }}"
           pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
