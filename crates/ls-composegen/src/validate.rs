@@ -248,8 +248,8 @@ mod tests {
 
     #[test]
     fn bad_runtime_version() {
-        let m = only(&ComposeSpec { runtime_version: "8".into(), ..java() }, "runtime_version");
-        assert!(m.contains("17") && m.contains("21"), "{m}");
+        let m = only(&ComposeSpec { runtime_version: "7".into(), ..java() }, "runtime_version");
+        assert!(["8", "11", "17", "21"].iter().all(|v| m.contains(v)), "{m}");
     }
 
     #[test]
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn several_problems_are_all_returned_at_once() {
         let s = ComposeSpec {
-            runtime_version: "8".into(),
+            runtime_version: "7".into(),
             build_tool: BuildTool::Npm,
             run_command: " ".into(),
             port: 80,
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn every_message_is_non_empty_and_catalog_messages_list_the_allowed_values() {
         let s = ComposeSpec {
-            runtime_version: "8".into(),
+            runtime_version: "7".into(),
             build_tool: BuildTool::Npm,
             database: db(DbEngine::Mongodb, "5", "app"),
             extras: vec![extra(ExtraKind::Redis, "5")],
