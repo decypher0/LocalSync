@@ -26,6 +26,72 @@ function applyView(session, view) {
   Object.assign(session, pickView(view));
 }
 
+// A RECEIVE session mirrors the backend's `ReceivedSessionView`
+// (id, title, sender_pubkey_hex, snapshot_id, git_commit, work_dir,
+// created_at, last_received_at, saved, armed, running). Unlike a send, it
+// starts life from a plain receive (no backend-owned view at all - see
+// newSession in app.js) and only ever meets this shape once it's been saved
+// and is being reopened, or a fresh receive is later saved. These two
+// helpers are the receive-side counterpart of pickView/applyView above.
+
+/** The fields the backend owns for a saved receive session - replaced wholesale, never merged. */
+function pickReceivedView(view) {
+  return {
+    title: view.title,
+    senderPubkeyHex: view.sender_pubkey_hex,
+    snapshotId: view.snapshot_id,
+    gitCommit: view.git_commit,
+    workDir: view.work_dir,
+    lastReceivedAt: view.last_received_at,
+    saved: view.saved,
+    armed: view.armed,
+  };
+}
+
+/**
+ * Builds a session tab from a *reopened* saved receive session. This is
+ * "resume", not "review again" - the diff was already accepted before, so
+ * there is no manifest/diff to hold, only what's needed to show the resume
+ * panel and let Run/Stop and the arm toggle work. `reportedRunning` is kept
+ * separate from `status` because the view has no runnable/stoppable id for
+ * an already-running session (see app.js's own note on this gap) - it only
+ * ever drives a hint in the UI, never which panel renders.
+ */
+function receivedSessionFromView(view) {
+  return {
+    id: view.id,
+    kind: "receive",
+    status: "resuming",
+    startedAt: view.created_at,
+    endedAt: null,
+    errorText: "",
+    resultText: "",
+    busy: false,
+    progressUnlisten: null,
+    progressBytes: 0,
+    progressTotal: 0,
+    manifest: null,
+    diff: null,
+    recognizedPeer: null,
+    runningSessionId: null,
+    servicePorts: null,
+    dbCacheHit: null,
+    runInProgress: false,
+    runLogText: "",
+    runErrorText: "",
+    // A saved session was, by definition, accepted and run at least once -
+    // otherwise there'd have been nothing worth saving.
+    hasRunBefore: true,
+    rejected: false,
+    reportedRunning: view.running,
+    ...pickReceivedView(view),
+  };
+}
+
+function applyReceivedView(session, view) {
+  Object.assign(session, pickReceivedView(view));
+}
+
 /**
  * The one status a tab shows. A send session has no status of its own - it
  * is derived from its transfers, so there is nothing to keep in sync.
@@ -61,5 +127,15 @@ function deviceKeyFor(device) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { pickView, sendSessionFromView, applyView, displayStatus, sameFolderPlan, deviceKeyFor };
+  module.exports = {
+    pickView,
+    sendSessionFromView,
+    applyView,
+    displayStatus,
+    sameFolderPlan,
+    deviceKeyFor,
+    pickReceivedView,
+    receivedSessionFromView,
+    applyReceivedView,
+  };
 }
