@@ -2221,3 +2221,75 @@ systems), permission-denied, and truncated/corrupt data.
    disk: `df -h /tmp` (the UI's default work directory is
    `/tmp/localsync-work`). Point the Work directory field at a real disk
    with room for the project *and* its uncompressed dump.
+
+## Session-model refactor: one project session, ephemeral connections
+
+Sending is now built on a **project session** (`project_session.rs`,
+`session_commands.rs`): a persistent workspace for one project holding its
+folders + database plan, the built artifact, and a history of every device it
+has been sent to with **each device's own last-received marker**. A
+connection is never held open - every transfer connects, sends, disconnects.
+Pushing an update opens the session, picks devices from its history, and for
+each connects fresh and sends a snapshot whose reviewed diff is against *that
+device's* marker. Saving is opt-in ("Save this session?"), stored in the
+round-29 history file. This replaced the separate tab/retry/mode/roster logic
+from rounds 8, 10, 11, 12, 25, 28 and 34.
+
+### What's already confirmed, without needing real hardware
+
+- Same-box transfers (`project_session_flow_test.rs`): a session is created
+  once and its artifact reused across a failed attempt + retry and a second
+  device (build count stays 1); each device keeps its own marker; a push to A
+  diffs against A's marker, not B's, and moves only A's; an up-to-date device
+  is not connected to at all; nothing is left registered as an open
+  connection; a never-saved session leaves nothing behind while a saved one
+  reopens whole.
+- The model, persistence and device-id logic have their own unit tests
+  (`project_session`, `session_history`, `session_commands`), and the pure
+  frontend logic is tested in `test-session-model.js`.
+- The real `index.html` + `app.js` were driven in headless Chrome against a
+  mocked backend (52 checks): first send, second device on the same tab,
+  retry in place, push update, discovered-device consent path, save/discard
+  prompt on tab close and on quit, reopening a saved session.
+
+### What to check on real hardware
+
+1. **Push to a discoverable device**: send a project to a second machine
+   (with "Make this device discoverable" on), commit a change, open the
+   session tab, tick that device and **Push update**. Confirm the receiver is
+   asked to accept, and its review screen's diff shows only what changed
+   since *its* last version - and that the bytes on the wire are still the
+   whole project (there is no wire-level delta; see below).
+2. **Two devices at different versions**: send v1 to A, commit, send v2 to B,
+   commit again, then push to both. Each should review a diff relative to its
+   own last version.
+3. **Push to a device that isn't discoverable**: it should get a fresh code
+   from this end (with the note saying why), not fail.
+4. **Retry** after letting a code expire: the same transfer card gets a new
+   code; no second card or tab; no rebuild pause.
+5. **Save / discard**: close an unsaved session tab and quit the app with one
+   open - both should ask, with the one-line explanation. "Don't save" must
+   leave nothing in the saved-sessions list after a restart; "Save" must
+   bring it back (folders, database plan, devices) via the menu's saved
+   sessions. **Quit-time prompt only** - confirm the window actually waits
+   for the answer on Windows, macOS and Linux (uses the window close-request
+   hook and a new `core:window:allow-destroy` permission).
+
+### Known gaps, flagged rather than papered over
+
+- **No wire-level delta.** The snapshot payload is always the full
+  `git archive HEAD`; a device's marker changes the *diff shown for review*
+  (`diff_stat.json`/`diff.patch`), not how many bytes are sent. A real delta
+  needs a new payload kind and a receiver that keeps the previous version to
+  apply it onto - new transfer-protocol work, out of scope here.
+- **Receiver-initiated "Ask for update" / pull requests are gone** from the
+  UI: they need the sender to hold a connection open, which is exactly what
+  the new model removes.
+- **Devices reached by pasted code have no identity.** Each such send is
+  filed as its own device ("Device via code"); only a discoverable device
+  (which announces a persistent id) is recognized across sends.
+- **Cloud drop stays outside the model**: it uploads the first folder itself
+  and records no device or marker.
+- **Legacy backend commands remain** (`share_snapshot_wizard`,
+  `push_update`, roster, pull requests): unused by the UI, kept because
+  existing tests exercise them - see the note at the top of `commands.rs`.

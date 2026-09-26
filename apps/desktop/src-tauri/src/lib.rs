@@ -8,6 +8,8 @@
 //! own copies.
 
 pub mod commands;
+pub mod project_session;
+pub mod session_commands;
 pub mod send_log;
 pub mod session_history;
 pub mod state;

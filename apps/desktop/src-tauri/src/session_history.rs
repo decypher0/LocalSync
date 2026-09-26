@@ -1,41 +1,44 @@
-//! Round 29 goal B2: session history, persisted across restarts via the
-//! same "OS data dir + JSON file" convention this project already uses
-//! everywhere else (`ls_security::peers`'s `known_peers.json`,
-//! `ls_clouddrop::store`'s `google_tokens.json`) - not an in-memory list
-//! that resets on restart, which is exactly what the round's own goal calls
-//! out as insufficient.
+//! Saved sessions, persisted across restarts via the same "OS data dir + JSON
+//! file" convention this project already uses everywhere else
+//! (`ls_security::peers`'s `known_peers.json`, `ls_clouddrop::store`'s
+//! `google_tokens.json`). Originally round 29's automatic session history.
 //!
-//! The frontend owns *when* an entry is written (it already tracks every
-//! session's kind/title/timestamps for the tab UI - see app.js's `sessions`
-//! map) - this module is purely storage: load the whole list, or upsert one
-//! entry by id. Upsert, not append-only: a session's `ended_at` is `None`
-//! while active and gets filled in once it finishes, and re-recording the
-//! same session id should update that one entry in place, not accumulate a
-//! second row for the same session.
+//! Session-model refactor: nothing is written here automatically any more.
+//! An entry exists only because the user explicitly chose "Save this
+//! session" - and an entry that carries a `project` is a whole saved
+//! [`ProjectSession`] (folders + database plan + per-device history) that can
+//! be opened again later. This module is purely storage: load the whole
+//! list, upsert one entry by id, or delete one. Upsert, not append-only:
+//! saving the same session again updates its one entry in place.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::project_session::ProjectSession;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionHistoryEntry {
-    /// The same id the frontend's `sessions` map already uses for this
-    /// session (a room code for send/receive sessions) - what makes upsert
-    /// possible without a second identifier scheme.
+    /// The session's own id - what makes upsert possible without a second
+    /// identifier scheme.
     pub id: String,
     /// "send" | "receive" - kept as a plain string rather than a Rust enum
-    /// since this crosses the IPC boundary as a DTO and the frontend is the
-    /// only thing that ever constructs one; a typo here just shows up as a
-    /// slightly wrong label in the history list, not a security or
-    /// correctness issue anything downstream depends on.
+    /// since this crosses the IPC boundary as a DTO; a typo here just shows
+    /// up as a slightly wrong label in the history list, not a correctness
+    /// issue anything downstream depends on.
     pub kind: String,
-    /// Human-readable summary - project name(s) for a send, or the sending
-    /// peer's project name once known for a receive.
+    /// Human-readable summary - the project's name(s).
     pub title: String,
     /// RFC3339. Set once, when the session starts.
     pub started_at: String,
-    /// RFC3339, `None` while the session is still active. Set once the
-    /// session ends (stopped, disconnected, or completed).
+    /// RFC3339, `None` while the session is still active. Entries written
+    /// before the session-model refactor use this; a saved project session
+    /// leaves it `None` (a workspace has no end).
     pub ended_at: Option<String>,
+    /// The saved session itself, for an entry the user explicitly saved.
+    /// `#[serde(default)]` so every entry written before this existed (title
+    /// and timestamps only) still loads, as `None`.
+    #[serde(default)]
+    pub project: Option<ProjectSession>,
 }
 
 const FILE_NAME: &str = "session-history.json";
@@ -59,6 +62,21 @@ pub fn upsert(entry: SessionHistoryEntry) -> Result<(), String> {
     upsert_in(&default_dir()?, entry)
 }
 
+pub fn remove(id: &str) -> Result<(), String> {
+    remove_in(&default_dir()?, id)
+}
+
+/// The saved session stored under `id`, if the user saved one.
+pub fn find_project(id: &str) -> Result<Option<ProjectSession>, String> {
+    find_project_in(&default_dir()?, id)
+}
+
+/// "Save this session": stores the whole session (folders, database plan,
+/// per-device history) so it can be opened again later.
+pub fn save_project(session: &ProjectSession) -> Result<(), String> {
+    save_project_in(&default_dir()?, session)
+}
+
 fn load_in(dir: &Path) -> Result<Vec<SessionHistoryEntry>, String> {
     let path = dir.join(FILE_NAME);
     match std::fs::read(&path) {
@@ -66,6 +84,36 @@ fn load_in(dir: &Path) -> Result<Vec<SessionHistoryEntry>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("reading {}: {e}", path.display())),
     }
+}
+
+fn save_project_in(dir: &Path, session: &ProjectSession) -> Result<(), String> {
+    upsert_in(
+        dir,
+        SessionHistoryEntry {
+            id: session.id.clone(),
+            kind: "send".to_string(),
+            title: session.title.clone(),
+            started_at: session.created_at.clone(),
+            ended_at: None,
+            project: Some(session.clone()),
+        },
+    )
+}
+
+fn find_project_in(dir: &Path, id: &str) -> Result<Option<ProjectSession>, String> {
+    Ok(load_in(dir)?.into_iter().find(|e| e.id == id).and_then(|e| e.project))
+}
+
+fn remove_in(dir: &Path, id: &str) -> Result<(), String> {
+    let mut entries = load_in(dir)?;
+    let before = entries.len();
+    entries.retain(|e| e.id != id);
+    if entries.len() == before {
+        return Ok(());
+    }
+    let path = dir.join(FILE_NAME);
+    let bytes = serde_json::to_vec_pretty(&entries).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 fn upsert_in(dir: &Path, entry: SessionHistoryEntry) -> Result<(), String> {
@@ -88,6 +136,8 @@ fn upsert_in(dir: &Path, entry: SessionHistoryEntry) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::FolderPlanDto;
+    use crate::project_session::{DeviceMarker, FolderCommit};
 
     fn entry(id: &str, ended: bool) -> SessionHistoryEntry {
         SessionHistoryEntry {
@@ -96,7 +146,27 @@ mod tests {
             title: "sample-project".to_string(),
             started_at: "2026-01-01T00:00:00Z".to_string(),
             ended_at: if ended { Some("2026-01-01T00:05:00Z".to_string()) } else { None },
+            project: None,
         }
+    }
+
+    fn project_session(id: &str) -> ProjectSession {
+        let mut s = ProjectSession::new(
+            id.to_string(),
+            "xusom-admin".to_string(),
+            vec![FolderPlanDto { path: "/work/xusom-admin".to_string(), dump: None }],
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        s.record_send(
+            "dev-a",
+            "Alice",
+            DeviceMarker {
+                snapshot_id: "xusom-admin@abc".to_string(),
+                commits: vec![FolderCommit { path: "/work/xusom-admin".to_string(), commit: "abc".to_string() }],
+                sent_at: "2026-01-01T00:01:00Z".to_string(),
+            },
+        );
+        s
     }
 
     #[test]
@@ -146,5 +216,64 @@ mod tests {
         // newest (room-{MAX_ENTRIES+9}) should have survived.
         assert!(!loaded.iter().any(|e| e.id == "room-0"));
         assert!(loaded.iter().any(|e| e.id == format!("room-{}", MAX_ENTRIES + 9)));
+    }
+
+    #[test]
+    fn nothing_is_stored_unless_the_user_saves() {
+        // "Discard" is simply never calling save: the file must not exist and
+        // nothing may be recoverable afterwards.
+        let dir = tempfile::tempdir().unwrap();
+        let _session = project_session("s1"); // created, used, then discarded
+        assert!(load_in(dir.path()).unwrap().is_empty());
+        assert!(!dir.path().join(FILE_NAME).exists());
+        assert!(find_project_in(dir.path(), "s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_saved_session_comes_back_whole_with_its_device_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = project_session("s1");
+        save_project_in(dir.path(), &session).unwrap();
+        // A fresh read (as after an app restart) returns the same session.
+        assert_eq!(find_project_in(dir.path(), "s1").unwrap(), Some(session));
+    }
+
+    #[test]
+    fn saving_again_replaces_the_saved_copy_rather_than_duplicating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = project_session("s1");
+        save_project_in(dir.path(), &session).unwrap();
+        session.record_send(
+            "dev-b",
+            "Bob",
+            DeviceMarker { snapshot_id: "x@def".into(), commits: vec![], sent_at: "2026-01-02T00:00:00Z".into() },
+        );
+        save_project_in(dir.path(), &session).unwrap();
+        assert_eq!(load_in(dir.path()).unwrap().len(), 1);
+        assert_eq!(find_project_in(dir.path(), "s1").unwrap().unwrap().devices.len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_saved_session_removes_it_and_leaves_others() {
+        let dir = tempfile::tempdir().unwrap();
+        save_project_in(dir.path(), &project_session("s1")).unwrap();
+        save_project_in(dir.path(), &project_session("s2")).unwrap();
+        remove_in(dir.path(), "s1").unwrap();
+        assert!(find_project_in(dir.path(), "s1").unwrap().is_none());
+        assert!(find_project_in(dir.path(), "s2").unwrap().is_some());
+        remove_in(dir.path(), "does-not-exist").unwrap(); // not an error
+    }
+
+    #[test]
+    fn a_history_entry_written_before_saved_sessions_existed_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            r#"[{"id":"old","kind":"send","title":"t","started_at":"2026-01-01T00:00:00Z","ended_at":null}]"#,
+        )
+        .unwrap();
+        let loaded = load_in(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].project.is_none());
     }
 }

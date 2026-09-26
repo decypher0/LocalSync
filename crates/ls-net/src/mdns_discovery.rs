@@ -38,6 +38,13 @@ pub struct DiscoveredPeer {
     pub host: Ipv4Addr,
     pub port: u16,
     pub room_id: String,
+    /// The announcing device's own persistent identity (see
+    /// [`announce_with_id`]) - what lets a sender recognize "the same
+    /// device as last time" across restarts and renames, unlike `nickname`
+    /// (editable, not unique) or `fullname`/`room_id` (regenerated every
+    /// time discoverability is switched on). `None` for a peer running a
+    /// build that predates this field.
+    pub device_id: Option<String>,
 }
 
 /// Starts advertising this device's presence. Returns the daemon (must be
@@ -45,6 +52,19 @@ pub struct DiscoveredPeer {
 /// down stops the advertisement) and the service's fullname (needed to
 /// unregister it later, via [`stop_announcing`]).
 pub fn announce(nickname: &str, host: Ipv4Addr, port: u16, room_id: &str) -> Result<(ServiceDaemon, String)> {
+    announce_with_id(nickname, host, port, room_id, None)
+}
+
+/// [`announce`], plus a persistent `device_id` carried in the record's `id`
+/// property so browsers can tell this exact device apart from any other
+/// that happens to share its nickname, across restarts.
+pub fn announce_with_id(
+    nickname: &str,
+    host: Ipv4Addr,
+    port: u16,
+    room_id: &str,
+    device_id: Option<&str>,
+) -> Result<(ServiceDaemon, String)> {
     let daemon = ServiceDaemon::new().context("failed to start the mDNS daemon")?;
     // The room id (already a short, per-session-random alnum id - see
     // generate_room_id) doubles as a cheap, good-enough-for-one-LAN unique
@@ -56,6 +76,9 @@ pub fn announce(nickname: &str, host: Ipv4Addr, port: u16, room_id: &str) -> Res
     let mut properties = HashMap::new();
     properties.insert("name".to_string(), nickname.to_string());
     properties.insert("room".to_string(), room_id.to_string());
+    if let Some(id) = device_id {
+        properties.insert("id".to_string(), id.to_string());
+    }
     let service = ServiceInfo::new(SERVICE_TYPE, &instance_name, &host_name, IpAddr::V4(host), port, properties)
         .context("failed to build the mDNS service record")?;
     let fullname = service.get_fullname().to_string();
@@ -116,5 +139,6 @@ pub fn resolved_peer(resolved: &mdns_sd::ResolvedService) -> Option<DiscoveredPe
     let nickname = resolved.get_property_val_str("name")?.to_string();
     let room_id = resolved.get_property_val_str("room")?.to_string();
     let host = resolved.get_addresses_v4().into_iter().next()?;
-    Some(DiscoveredPeer { fullname: resolved.fullname.clone(), nickname, host, port: resolved.port, room_id })
+    let device_id = resolved.get_property_val_str("id").map(str::to_string);
+    Some(DiscoveredPeer { fullname: resolved.fullname.clone(), nickname, host, port: resolved.port, room_id, device_id })
 }
