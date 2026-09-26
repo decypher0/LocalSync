@@ -207,7 +207,7 @@ mod tests {
         let mut s = ProjectSession::new(
             id.to_string(),
             "xusom-admin".to_string(),
-            vec![FolderPlanDto { path: "/work/xusom-admin".to_string(), dump: None }],
+            vec![FolderPlanDto { path: "/work/xusom-admin".to_string(), dump: None, compose: None }],
             "2026-01-01T00:00:00Z".to_string(),
         );
         s.record_send(
