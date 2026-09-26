@@ -1138,7 +1138,13 @@ pub async fn run_snapshot<R: tauri::Runtime>(
                 .lock()
                 .map_err(|e| e.to_string())?
                 .insert(snapshot_id, verified);
-            return Err(e.to_string());
+            // `{e:#}`, not `.to_string()`: anyhow's plain Display shows only
+            // the outermost message, which for a failed unpack is just
+            // "failed to unpack `<file>`" - the actual reason (disk full,
+            // permissions, ...) sits further down the chain and was being
+            // thrown away before it ever reached the UI. Same fix round 18
+            // made for the db-wizard commands.
+            return Err(format!("{e:#}"));
         }
     };
 
