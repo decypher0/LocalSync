@@ -7,6 +7,7 @@ members = [
     "crates/ls-containers",
     "crates/ls-dbsource",
     "crates/ls-clouddrop",
+    "crates/ls-composegen",
     "apps/desktop/src-tauri",
 ]
 
