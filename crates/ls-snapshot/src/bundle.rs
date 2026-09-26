@@ -173,7 +173,7 @@ pub fn bundle_project_with(
     let mut tb = tar::Builder::new(zstd);
 
     let archive_bytes = git_bytes(project_root, &["archive", "--format=tar", "HEAD"])?;
-    append_git_archive(&mut tb, &archive_bytes, "source")?;
+    append_git_archive(&mut tb, &archive_bytes, "source", generated.is_some())?;
     if let Some(g) = generated {
         for (rel, bytes) in &g.files {
             append_bytes(&mut tb, &format!("source/{rel}"), bytes)?;
@@ -496,7 +496,19 @@ fn append_dump_source<W: Write>(tb: &mut tar::Builder<W>, path: &str, source: &c
 /// Re-homes every entry from a `git archive --format=tar` output under
 /// `prefix/` in our own tar builder, so the caller's payload can combine it
 /// with sibling entries (diff_stat.json, docker-compose.yml, ...).
-fn append_git_archive<W: Write>(tb: &mut tar::Builder<W>, archive_bytes: &[u8], prefix: &str) -> Result<()> {
+///
+/// With `shadow_build_files`, the project's own top-level `Dockerfile` /
+/// `Containerfile` (any letter case) are stored as `<name>.original`, because
+/// a generated Dockerfile is about to be added and build tools pick a default-
+/// named file from the context - some (podman-compose on Windows) ignoring the
+/// compose file's `dockerfile:` entirely - so a second candidate could be
+/// built silently instead.
+fn append_git_archive<W: Write>(
+    tb: &mut tar::Builder<W>,
+    archive_bytes: &[u8],
+    prefix: &str,
+    shadow_build_files: bool,
+) -> Result<()> {
     let mut archive = tar::Archive::new(archive_bytes);
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -504,7 +516,14 @@ fn append_git_archive<W: Write>(tb: &mut tar::Builder<W>, archive_bytes: &[u8], 
         if has_noise_component(&path) {
             continue;
         }
-        let new_path = Path::new(prefix).join(&path);
+        let mut new_path = Path::new(prefix).join(&path);
+        if shadow_build_files && path.components().count() == 1 {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if matches!(name.to_ascii_lowercase().as_str(), "dockerfile" | "containerfile") {
+                    new_path = Path::new(prefix).join(format!("{name}.original"));
+                }
+            }
+        }
         let mut header = entry.header().clone();
         tb.append_data(&mut header, &new_path, &mut entry)
             .with_context(|| format!("adding {} to payload", new_path.display()))?;

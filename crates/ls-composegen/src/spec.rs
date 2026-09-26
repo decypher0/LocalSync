@@ -13,10 +13,14 @@ use serde::{Deserialize, Serialize};
 /// Name of the app's service in the generated compose file.
 pub const APP_SERVICE: &str = "app";
 
-/// The generated Dockerfile's path relative to the project root. Fixed, and
-/// deliberately not `Dockerfile`, so it can never collide with (or silently
-/// replace) a Dockerfile the project already has.
-pub const DOCKERFILE_NAME: &str = "Dockerfile.localsync";
+/// The generated Dockerfile's path relative to the project root. It is named
+/// `Dockerfile` on purpose - the name every build tool falls back to - because
+/// `dockerfile:` in the compose file cannot be relied on: podman-compose on
+/// Windows silently ignores it (see `ls-containers/tests/
+/// generated_dockerfile_wins.rs`). The project's own default-named build files
+/// are renamed out of the way when the snapshot is bundled
+/// (`ls_snapshot::bundle`), so exactly one candidate exists.
+pub const DOCKERFILE_NAME: &str = "Dockerfile";
 
 /// Credentials for generated database containers. Throwaway values, like the
 /// sample projects': the database only ever runs on the receiver's own
