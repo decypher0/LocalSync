@@ -37,10 +37,13 @@ pub struct RunningSession {
     /// for a round-17+ wizard send with exactly one folder, since
     /// `create_snapshot_multi` nests every folder's files under its own
     /// label unconditionally (see `run_snapshot`'s own comment on
-    /// `compose_root`). Not part of the public contract data-wise, but
-    /// `stop_session` needs it as the cwd for `podman-compose down` to find
-    /// the same project.
-    compose_dir: PathBuf,
+    /// `compose_root`). `stop_session` needs it as the cwd for
+    /// `podman-compose down` to find the same project. `pub` (receiver-
+    /// session-model round): a `ReceivedSession` persists this value as its
+    /// own `compose_dir` so a later `run_existing` call - after an app
+    /// restart, with no `VerifiedSnapshot` in memory - knows where to run
+    /// `podman-compose up` again without re-unpacking anything.
+    pub compose_dir: PathBuf,
 }
 
 /// Unpack `verified`'s payload into a fresh subdirectory of `work_dir`,
@@ -125,8 +128,6 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
     let rewritten = compose::apply_policy(&original_yaml, &policy, &database_services, &db_volume)?;
     tokio::fs::write(&compose_path, &rewritten).await?;
 
-    let service_ports = compose::parse_service_ports(&rewritten)?;
-
     // Cache-hit check has to happen before `up` creates/touches the volume.
     let db_cache_hit = if database_services.is_empty() {
         false
@@ -134,17 +135,92 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
         podman::volume_exists(&db_volume).await.unwrap_or(false)
     };
 
-    let compose_project_name = compose_project_name(&manifest.project_name, &manifest.git_commit);
+    bring_up(&compose_root, &manifest.project_name, &manifest.git_commit, db_cache_hit, log.as_ref()).await
+}
+
+/// Brings up an already-unpacked, already-policy-rewritten project directory
+/// (the `compose_dir`/`compose_root` a prior [`run_snapshot`] produced)
+/// without re-unpacking or re-verifying anything - what re-running a
+/// `ReceivedSession` after an app restart needs, since the original signed
+/// snapshot bytes are never persisted (only what was already unpacked to disk
+/// the first time is). `project_name`/`git_commit` are only used to derive
+/// the same deterministic `compose_project_name` `run_snapshot` used, so
+/// `stop_session` (and a second `run_existing`/`run_snapshot` of the exact
+/// same version) target the same podman-compose project.
+///
+/// `db_cache_hit` on the returned [`RunningSession`] is always `false` here,
+/// not a real cache-hit check - unlike `run_snapshot`, this function never
+/// has the original `Manifest` (it isn't persisted; only the unpacked,
+/// already-rewritten `docker-compose.yml` is), so it can't compute
+/// `db_volume_name` from `manifest.db_seed_hash` the way `run_snapshot` does.
+/// The compose file at `compose_root` already has its database service's
+/// named volume pinned to the right (deterministic) volume from the original
+/// run - `podman-compose up` reuses it exactly as before regardless of what
+/// this field reports - so the only cost is this one informational field
+/// being unable to distinguish "reused the seeded volume" from "seeded it
+/// fresh" on a re-run. Reporting a wrong `true`/`false` guess would be worse
+/// than an honestly-unknown `false`, so it's documented here rather than
+/// guessed.
+pub async fn run_existing(compose_root: &Path, project_name: &str, git_commit: &str) -> Result<RunningSession> {
+    // Checked before any podman preflight (which can be slow, and on
+    // Windows/macOS can actually try to provision Podman) - a missing
+    // directory is a deterministic, immediate, and much more likely cause
+    // of failure here than an environment problem, and callers/tests
+    // shouldn't need a working Podman install just to see this error.
+    anyhow::ensure!(
+        tokio::fs::try_exists(compose_root).await.unwrap_or(false),
+        "{} no longer exists - this session's files aren't on disk any more, so it can't be \
+         re-run without receiving it again",
+        compose_root.display()
+    );
+
+    let log = match ProvisioningLog::open_default() {
+        Ok(log) => {
+            provisioning::ensure_podman_ready(&log).await?;
+            Some(log)
+        }
+        Err(e) => {
+            eprintln!("provisioning log unavailable ({e:#}), continuing without one");
+            anyhow::ensure!(
+                podman::podman_available() && podman::podman_compose_available(),
+                "podman/podman-compose not found on PATH — run scripts/setup-linux-deps.sh"
+            );
+            None
+        }
+    };
+
+    bring_up(compose_root, project_name, git_commit, false, log.as_ref()).await
+}
+
+/// Shared tail of [`run_snapshot`] and [`run_existing`]: read the (already
+/// policy-rewritten) compose file at `compose_root`, bring it up, and return
+/// the resulting [`RunningSession`]. `db_cache_hit` is passed in rather than
+/// computed here since only `run_snapshot` has the manifest needed to
+/// compute it - see `run_existing`'s own doc comment on why it can't.
+async fn bring_up(
+    compose_root: &Path,
+    project_name: &str,
+    git_commit: &str,
+    db_cache_hit: bool,
+    log: Option<&ProvisioningLog>,
+) -> Result<RunningSession> {
+    let compose_path = compose_root.join("docker-compose.yml");
+    let rewritten = tokio::fs::read_to_string(&compose_path)
+        .await
+        .with_context(|| format!("reading the already-rewritten docker-compose.yml at {}", compose_path.display()))?;
+    let service_ports = compose::parse_service_ports(&rewritten)?;
+
+    let compose_project_name = compose_project_name(project_name, git_commit);
     // podman-compose resolves docker-compose.yml (and any relative `build:`
     // context inside it) from its own current directory, not from an
     // explicit -f flag - compose_root, not the unpacked payload's own root,
     // is what must be passed here (and to compose_down, via
     // RunningSession.compose_dir below) whenever a single folder's own
     // files live nested one level down.
-    podman::compose_up(&compose_root, &compose_project_name, log.as_ref()).await?;
+    podman::compose_up(compose_root, &compose_project_name, log).await?;
 
     Ok(RunningSession {
-        project_name: manifest.project_name.clone(),
+        project_name: project_name.to_string(),
         compose_project_name,
         service_ports,
         db_cache_hit,
@@ -152,7 +228,7 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
         // must `cd` to the exact same directory compose_up just did, or
         // podman-compose down would look for docker-compose.yml (and this
         // run's own project state) in the wrong place.
-        compose_dir: compose_root,
+        compose_dir: compose_root.to_path_buf(),
     })
 }
 
@@ -250,7 +326,13 @@ fn sanitize(s: &str) -> String {
     }
 }
 
-fn compose_project_name(project_name: &str, git_commit: &str) -> String {
+/// `pub` (receiver-session-model round): the desktop app's receiver-side
+/// commands need to compute this same deterministic name from a
+/// `ReceivedSession`'s `title`/`git_commit` alone (with no `RunningSession`
+/// in hand) to check whether a session's compose project is currently
+/// tracked in `AppState::sessions` - the exact key `run_snapshot`/
+/// `run_existing` both already insert under.
+pub fn compose_project_name(project_name: &str, git_commit: &str) -> String {
     let short_commit = &git_commit[..git_commit.len().min(12)];
     format!(
         "localsync-{}-{}",
@@ -309,20 +391,77 @@ mod tests {
             .expect("stop_session should tear the project down");
     }
 
+    /// The actual point of `run_existing`: after `run_snapshot` has already
+    /// unpacked + policy-rewritten + brought a project up once, a second
+    /// bring-up against the exact same on-disk directory - with no
+    /// `VerifiedSnapshot` at all, simulating "the app restarted and the
+    /// original signed bytes are gone" - must succeed the same way.
+    #[tokio::test]
+    async fn run_existing_brings_up_an_already_unpacked_project_with_no_verified_snapshot_in_hand() {
+        if !podman::podman_available() || !podman::podman_compose_available() {
+            eprintln!(
+                "skipping run_existing_brings_up_an_already_unpacked_project_with_no_verified_snapshot_in_hand: \
+                 podman/podman-compose not found on PATH"
+            );
+            return;
+        }
+
+        // A distinct project name/port from `run_and_stop_a_real_snapshot`'s
+        // own fixture (both `#[tokio::test]`s in this same binary run
+        // concurrently by default) - otherwise the two race for the same
+        // host port and the same compose project name.
+        let verified = build_verified_snapshot_with("run-existing-demo", "cafef00d", "18080:80");
+        let work_dir = tempfile::tempdir().unwrap();
+
+        let first = run_snapshot(&verified, work_dir.path()).await.expect("first run_snapshot should bring the project up");
+        let compose_root = first.compose_dir.clone();
+        stop_session(&first).await.expect("stop_session should tear the first run down");
+
+        // Nothing from `verified`/`first` is used past this point - only the
+        // directory `run_snapshot` already unpacked and rewrote to disk.
+        let second = run_existing(&compose_root, "run-existing-demo", "cafef00d")
+            .await
+            .expect("run_existing should bring the same on-disk project back up without a VerifiedSnapshot");
+
+        assert_eq!(second.project_name, "run-existing-demo");
+        assert_eq!(second.compose_project_name, first.compose_project_name, "same project+commit must map to the same compose project");
+        assert!(second.service_ports.iter().any(|(svc, port)| svc == "web" && port == "18080:80"));
+
+        stop_session(&second).await.expect("stop_session should tear the re-run down");
+    }
+
+    /// `run_existing` must fail clearly, not panic or hang, when the
+    /// directory it's asked to re-run no longer exists on disk (e.g. the
+    /// user deleted the work dir between runs).
+    #[tokio::test]
+    async fn run_existing_fails_clearly_when_the_compose_dir_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("never-existed");
+        let result = run_existing(&gone, "demo", "deadbeef").await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("run_existing against a missing directory should not succeed"),
+        };
+        assert!(format!("{err:#}").contains("no longer exists"), "{err:#}");
+    }
+
     fn build_verified_snapshot() -> VerifiedSnapshot {
+        build_verified_snapshot_with("demo", "deadbeef", "8080:80")
+    }
+
+    /// Same fixture, parameterized so tests that run concurrently in this
+    /// same binary (Rust's default `#[tokio::test]` behavior) don't race for
+    /// the same host port or the same deterministic compose project name.
+    fn build_verified_snapshot_with(project_name: &str, git_commit: &str, port_mapping: &str) -> VerifiedSnapshot {
         use ed25519_dalek::{Signer, SigningKey};
         use ls_snapshot::{Manifest, ServiceDef, Snapshot};
         use rand::rngs::OsRng;
         use sha2::{Digest, Sha256};
         use std::io::Write;
 
-        let compose_yaml = r#"
-services:
-  web:
-    image: docker.io/library/nginx:alpine
-    ports:
-      - "8080:80"
-"#;
+        let compose_yaml = format!(
+            "services:\n  web:\n    image: docker.io/library/nginx:alpine\n    ports:\n      - \"{port_mapping}\"\n"
+        );
 
         let mut builder = tar::Builder::new(Vec::new());
         let data = compose_yaml.as_bytes();
@@ -340,15 +479,15 @@ services:
 
         let signing_key = SigningKey::generate(&mut OsRng);
         let manifest = Manifest {
-            project_name: "demo".into(),
-            git_commit: "deadbeef".into(),
+            project_name: project_name.into(),
+            git_commit: git_commit.into(),
             git_parent_commit: None,
             dependency_lock_hash: "0".repeat(64),
             db_seed_hash: "0".repeat(64),
             services: vec![ServiceDef {
                 name: "web".into(),
                 image_or_build: "image:nginx:alpine".into(),
-                ports: vec!["8080:80".into()],
+                ports: vec![port_mapping.into()],
                 depends_on: vec![],
             }],
             sender_pubkey: signing_key.verifying_key().to_bytes(),
