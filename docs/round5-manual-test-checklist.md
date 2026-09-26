@@ -2192,3 +2192,32 @@ round 1 is completely unchanged.
    show up in a third machine's nearby-devices list, each with its own
    correct name, and that selecting one connects to the right device.
 
+## Dump-unpack failure investigation: Run failed with "failed to unpack .../db-dumps/<folder>/<schema>.sql"
+
+Reported as a regression from round 36's zstd change ("compressed on send,
+not decompressed on receive"). Investigated by reproducing rather than
+assuming, and **that theory did not hold**: every path speaks zstd (bundle,
+merge, diff, unpack), and a project sent through the real wizard command
+with a real SQL dump now has a test that carries it all the way through
+**Run** and checks the unpacked dump is byte-identical
+(`a_wizard_send_with_a_real_sql_dump_can_actually_be_run`, 64 MB by default,
+`LS_DUMP_TEST_MB` scales it). Extraction is also proven byte-exact at 400 MB
+and when unpacked twice into the same directory (what a retried Run does),
+and `tar` encodes >8 GiB sizes correctly.
+
+What *was* provably wrong: the message shown was only tar's outer wrapper
+(`failed to unpack <file>`); the real reason (disk full, permission denied,
+corrupt stream) is nested underneath and `run_snapshot` discarded it with
+`e.to_string()`. Fixed: the full cause now reaches the UI, with a plain-
+language hint for disk-full (notes that `/tmp` is RAM-backed on some Linux
+systems), permission-denied, and truncated/corrupt data.
+
+### What to check on real hardware
+
+1. **Re-run the failing project** (the `xusom-admin` send). If Run still
+   fails, the error now says *why* - that line is the actual root cause; send
+   it along. If it succeeds, the earlier failure was environmental.
+2. **Free space at the work directory**, if the message mentions a full
+   disk: `df -h /tmp` (the UI's default work directory is
+   `/tmp/localsync-work`). Point the Work directory field at a real disk
+   with room for the project *and* its uncompressed dump.
