@@ -811,11 +811,11 @@ mod tests {
   app:
     build:
       context: .
-      dockerfile: Dockerfile.localsync
+      dockerfile: Dockerfile
     ports:
       - \"8080:8080\"
 ".to_string(),
-            files: vec![("Dockerfile.localsync".to_string(), b"FROM scratch
+            files: vec![("Dockerfile".to_string(), b"FROM scratch
 ".to_vec())],
         };
         let snap = create_snapshot_multi_with(
@@ -831,7 +831,7 @@ mod tests {
             generated.compose_yaml
         );
         assert_eq!(
-            files.get("no-compose-app/source/Dockerfile.localsync").expect("the Dockerfile ships under source/"),
+            files.get("no-compose-app/source/Dockerfile").expect("the Dockerfile ships under source/"),
             b"FROM scratch
 "
         );
@@ -839,10 +839,57 @@ mod tests {
         assert_eq!(snap.manifest.services.len(), 1, "the manifest learns the generated service");
         assert_eq!(snap.manifest.services[0].name, "app");
         assert!(!root.join("docker-compose.yml").exists(), "the sender's folder must not be modified");
-        assert!(!root.join("Dockerfile.localsync").exists(), "the sender's folder must not be modified");
+        assert!(!root.join("Dockerfile").exists(), "the sender's folder must not be modified");
 
         // And with nothing generated, behavior is what it always was: no compose.
         let plain = create_snapshot_multi(&[FolderSpec { path: root, parent_commit: None }], &[]).unwrap();
         assert!(!unpack(&plain.payload).contains_key("no-compose-app/docker-compose.yml"));
+    }
+
+    #[test]
+    fn a_projects_own_default_named_build_files_are_renamed_when_a_dockerfile_is_generated() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("own-dockerfile-app");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        for (name, body) in [
+            ("Dockerfile", "FROM openjdk:8-jdk"),
+            ("containerfile", "FROM busybox"),
+            ("sub/Dockerfile", "FROM nested"),
+            ("Dockerfile.prod", "FROM prod"),
+            ("main.py", "print('hi')"),
+        ] {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "-A"],
+            vec!["-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "-q", "-m", "init"],
+        ] {
+            assert!(std::process::Command::new("git").args(&args).current_dir(&root).status().unwrap().success());
+        }
+        let folders = [FolderSpec { path: root.clone(), parent_commit: None }];
+        let generated = GeneratedFiles {
+            compose_yaml: "services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+".to_string(),
+            files: vec![("Dockerfile".to_string(), b"FROM generated".to_vec())],
+        };
+        let files = unpack(&create_snapshot_multi_with(&folders, &[], &[Some(generated)]).unwrap().payload);
+        let at = |p: &str| files.get(&format!("own-dockerfile-app/source/{p}")).map(|b| String::from_utf8_lossy(b).to_string());
+
+        assert_eq!(at("Dockerfile").as_deref(), Some("FROM generated"), "the only default-named file is the generated one");
+        assert_eq!(at("Dockerfile.original").as_deref(), Some("FROM openjdk:8-jdk"));
+        assert_eq!(at("containerfile"), None, "a lowercase Containerfile would also be picked up by podman");
+        assert_eq!(at("containerfile.original").as_deref(), Some("FROM busybox"));
+        assert_eq!(at("sub/Dockerfile").as_deref(), Some("FROM nested"), "only the build context's top level matters");
+        assert_eq!(at("Dockerfile.prod").as_deref(), Some("FROM prod"), "not a default name, so left alone");
+
+        // Without generated files (the project has its own compose) nothing is renamed.
+        let plain = unpack(&create_snapshot_multi(&folders, &[]).unwrap().payload);
+        assert_eq!(plain.get("own-dockerfile-app/source/Dockerfile").map(|b| b.as_slice()), Some(&b"FROM openjdk:8-jdk"[..]));
+        assert!(!plain.contains_key("own-dockerfile-app/source/Dockerfile.original"));
     }
 }
