@@ -10,3 +10,11 @@ license.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+
+# Only for the round-trip test in generate.rs, which compiles ls-containers'
+# compose.rs (a private module there) straight into the test build.
+[dev-dependencies]
+ls-security = { path = "../ls-security" }
+ls-snapshot = { path = "../ls-snapshot" }
+anyhow = "1"
+time = { version = "0.3", features = ["formatting"] }

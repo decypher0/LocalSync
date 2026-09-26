@@ -3665,9 +3665,13 @@ dependencies = [
 name = "ls-composegen"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "ls-security",
+ "ls-snapshot",
  "serde",
  "serde_json",
  "serde_yaml",
+ "time",
 ]
 
 [[package]]
