@@ -10,6 +10,19 @@
 //! `VerifiedSnapshot` that `receive_snapshot` already checked, and only once
 //! the frontend has shown the user a diff and they clicked Run.
 
+//! **Legacy: the keep-open-connection send path.** The app now sends through
+//! `session_commands` (a project session; each transfer connects, sends, and
+//! disconnects - see `project_session`). The commands below that predate it
+//! keep a connection open after sending, in `AppState::connected_receivers`,
+//! and build on that: `share_snapshot`, `share_snapshot_wizard`,
+//! `list_connected_receivers`, `push_update`, `respond_to_pull_request`,
+//! `send_pull_request`, plus the receive-side `outgoing_conn` /
+//! `listen_for_pushed_updates`. Nothing in the frontend calls them any more;
+//! they remain only because existing tests (and the `ls-net`
+//! `PullRequest`/`IncomingUpdate` control messages) still exercise them.
+//! Remove them together, and those tests with them, rather than one at a
+//! time - they only make sense as a set.
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -484,7 +497,7 @@ pub async fn export_db_tables(details: ConnectionDetailsDto, tables: Vec<String>
 /// (`export_db_tables`'s own output file, used exactly the same way as a
 /// supplied one from here — the wizard's "package the result" step doesn't
 /// need to know or care which).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DumpPlanDto {
     pub schema: String,
     pub file_path: String,
@@ -497,10 +510,71 @@ pub struct DumpPlanDto {
     pub engine: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FolderPlanDto {
     pub path: String,
     pub dump: Option<DumpPlanDto>,
+}
+
+/// Turns the wizard's folder/database plan into the inputs
+/// `ls_snapshot::create_snapshot_multi` takes. `parents` optionally gives,
+/// per folder in order, the commit to diff that folder against (a device's
+/// last-received marker - see `project_session`); empty means "no parent"
+/// for every folder.
+///
+/// No `fs::read` of a dump here - a real database dump can be multi-GB, and
+/// reading it fully into memory just to hand it on is what once produced a
+/// real `out of memory` failure. `DumpSource::FilePath` keeps the file on
+/// disk, streamed in bounded chunks only when bundling actually needs its
+/// bytes. Fails fast here if the path doesn't exist/isn't a regular file,
+/// rather than surfacing that deep inside a blocking task with a less
+/// obvious message.
+pub(crate) fn plan_to_snapshot_inputs(
+    folders: &[FolderPlanDto],
+    parents: &[Option<String>],
+) -> Result<(Vec<ls_snapshot::FolderSpec>, Vec<ls_snapshot::PendingDump>), String> {
+    let mut folder_specs = Vec::with_capacity(folders.len());
+    let mut pending_dumps = Vec::new();
+    for (i, f) in folders.iter().enumerate() {
+        folder_specs.push(ls_snapshot::FolderSpec {
+            path: PathBuf::from(&f.path),
+            parent_commit: parents.get(i).cloned().flatten(),
+        });
+        if let Some(dump) = &f.dump {
+            let meta = std::fs::metadata(&dump.file_path)
+                .map_err(|e| format!("reading dump file {}: {e}", dump.file_path))?;
+            if !meta.is_file() {
+                return Err(format!("reading dump file {}: not a regular file", dump.file_path));
+            }
+            pending_dumps.push(ls_snapshot::PendingDump {
+                folder_index: i,
+                schema: dump.schema.clone(),
+                source: ls_snapshot::DumpSource::FilePath(PathBuf::from(&dump.file_path)),
+                engine: dump.engine.clone(),
+            });
+        }
+    }
+    Ok((folder_specs, pending_dumps))
+}
+
+/// The discovery-initiated consent gate (see `ControlMessage::
+/// ConnectionRequest`): tell the recipient who's asking, then wait for their
+/// explicit Accept/Reject before a single payload byte is sent.
+pub(crate) async fn await_recipient_consent(conn: &ls_net::DataChannelConn, sender_name: String) -> Result<(), String> {
+    ls_net::send_control(conn, &ls_net::ControlMessage::ConnectionRequest { sender_name })
+        .await
+        .map_err(|e| e.to_string())?;
+    match ls_net::recv_control(conn).await.map_err(|e| e.to_string())? {
+        ls_net::ControlMessage::ConnectionResponse { accepted: true } => {
+            log::info!("recipient accepted the connection request");
+            Ok(())
+        }
+        ls_net::ControlMessage::ConnectionResponse { accepted: false } => {
+            log::info!("recipient declined the connection request");
+            Err("The recipient declined the connection request.".to_string())
+        }
+        other => Err(format!("unexpected response while waiting for the recipient's decision: {other:?}")),
+    }
 }
 
 /// Wizard step "package the result" + send — generalizes `share_snapshot`
@@ -539,38 +613,7 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
         return Err("at least one folder is required".to_string());
     }
 
-    let mut folder_specs = Vec::with_capacity(folders.len());
-    let mut pending_dumps = Vec::new();
-    for (i, f) in folders.iter().enumerate() {
-        folder_specs.push(ls_snapshot::FolderSpec {
-            path: PathBuf::from(&f.path),
-            parent_commit: None,
-        });
-        if let Some(dump) = &f.dump {
-            // Round: no `fs::read` here anymore — a real database dump can
-            // be multi-GB, and reading it fully into memory just to hand it
-            // to `create_snapshot_multi` a moment later (which used to
-            // `.clone()` it again besides) is exactly what produced a real
-            // `out of memory` failure. `DumpSource::FilePath` lets the file
-            // stay on disk, opened and streamed in bounded chunks only when
-            // `create_snapshot_multi`/`merge_folder_payloads` actually need
-            // its bytes (hashing, then tar-appending). Fail fast here if the
-            // path doesn't exist/isn't readable, rather than surfacing that
-            // error deep inside a spawn_blocking task with a less obvious
-            // message.
-            let meta = std::fs::metadata(&dump.file_path)
-                .map_err(|e| format!("reading dump file {}: {e}", dump.file_path))?;
-            if !meta.is_file() {
-                return Err(format!("reading dump file {}: not a regular file", dump.file_path));
-            }
-            pending_dumps.push(ls_snapshot::PendingDump {
-                folder_index: i,
-                schema: dump.schema.clone(),
-                source: ls_snapshot::DumpSource::FilePath(PathBuf::from(&dump.file_path)),
-                engine: dump.engine.clone(),
-            });
-        }
-    }
+    let (folder_specs, pending_dumps) = plan_to_snapshot_inputs(&folders, &[])?;
 
     let snapshot =
         tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi(&folder_specs, &pending_dumps))
@@ -594,19 +637,7 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
 
     if require_accept {
         log::info!("share_snapshot_wizard: data channel open, requesting the recipient's consent");
-        ls_net::send_control(&conn, &ls_net::ControlMessage::ConnectionRequest { sender_name })
-            .await
-            .map_err(|e| e.to_string())?;
-        match ls_net::recv_control(&conn).await.map_err(|e| e.to_string())? {
-            ls_net::ControlMessage::ConnectionResponse { accepted: true } => {
-                log::info!("share_snapshot_wizard: recipient accepted the connection request");
-            }
-            ls_net::ControlMessage::ConnectionResponse { accepted: false } => {
-                log::info!("share_snapshot_wizard: recipient declined the connection request");
-                return Err("The recipient declined the connection request.".to_string());
-            }
-            other => return Err(format!("unexpected response while waiting for the recipient's decision: {other:?}")),
-        }
+        await_recipient_consent(&conn, sender_name).await?;
     }
 
     log::info!(
@@ -1250,7 +1281,12 @@ pub async fn set_discoverable<R: tauri::Runtime>(
     let (port, relay_task) = ls_net::host_ephemeral_relay().await.map_err(|e| e.to_string())?;
     let lan_ip = ls_net::detect_lan_ip().map_err(|e| e.to_string())?;
     let room_id = ls_net::generate_room_id();
-    let (daemon, fullname) = ls_net::announce(&nickname, lan_ip, port, &room_id).map_err(|e| e.to_string())?;
+    // This device's own persistent id, so a sender's sessions recognize it
+    // again across restarts and renames. A failure to read/create it isn't
+    // worth refusing discoverability over - it just announces without one.
+    let device_id = crate::session_commands::device_id().ok();
+    let (daemon, fullname) =
+        ls_net::announce_with_id(&nickname, lan_ip, port, &room_id, device_id.as_deref()).map_err(|e| e.to_string())?;
     log::info!("set_discoverable: on, nickname={nickname:?} room={room_id} relay=ws://{lan_ip}:{port}");
 
     let signaling_url = format!("ws://{lan_ip}:{port}");
@@ -1358,11 +1394,21 @@ pub struct NearbyDeviceDto {
     pub host: String,
     pub port: u16,
     pub room_id: String,
+    /// The device's persistent id, when it announces one - what a session
+    /// files its per-device history under.
+    pub device_id: Option<String>,
 }
 
 impl From<&ls_net::DiscoveredPeer> for NearbyDeviceDto {
     fn from(p: &ls_net::DiscoveredPeer) -> Self {
-        Self { fullname: p.fullname.clone(), nickname: p.nickname.clone(), host: p.host.to_string(), port: p.port, room_id: p.room_id.clone() }
+        Self {
+            fullname: p.fullname.clone(),
+            nickname: p.nickname.clone(),
+            host: p.host.to_string(),
+            port: p.port,
+            room_id: p.room_id.clone(),
+            device_id: p.device_id.clone(),
+        }
     }
 }
 
@@ -1864,7 +1910,3 @@ pub fn load_session_history() -> Result<Vec<crate::session_history::SessionHisto
     crate::session_history::load()
 }
 
-#[tauri::command]
-pub fn record_session_history_entry(entry: crate::session_history::SessionHistoryEntry) -> Result<(), String> {
-    crate::session_history::upsert(entry)
-}

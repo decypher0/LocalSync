@@ -4,7 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use localsync_desktop::{commands, send_log, state::AppState};
+use localsync_desktop::{commands, send_log, session_commands, state::AppState};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
@@ -271,7 +271,13 @@ fn main() {
             commands::respond_to_cloud_access_request,
             commands::request_cloud_drop_access,
             commands::load_session_history,
-            commands::record_session_history_entry,
+            session_commands::create_project_session,
+            session_commands::refresh_project_session,
+            session_commands::send_project_session,
+            session_commands::save_project_session,
+            session_commands::discard_project_session,
+            session_commands::delete_saved_project_session,
+            session_commands::open_saved_project_session,
             commands::default_device_name,
             commands::set_discoverable,
             commands::respond_to_connection_request,
