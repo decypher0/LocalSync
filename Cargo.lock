@@ -3681,6 +3681,7 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "ed25519-dalek",
+ "ls-composegen",
  "ls-security",
  "ls-snapshot",
  "rand 0.8.8",
