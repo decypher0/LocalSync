@@ -3,6 +3,7 @@ mod hash;
 mod sign;
 mod types;
 
+pub use bundle::head_commit;
 pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};

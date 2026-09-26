@@ -493,6 +493,14 @@ fn append_git_archive<W: Write>(tb: &mut tar::Builder<W>, archive_bytes: &[u8], 
     Ok(())
 }
 
+/// The commit `project_root` is at right now (`git rev-parse HEAD`), through
+/// the same hardened git runner bundling uses (no pager, no stdin, timeout,
+/// no console window on Windows). Lets a caller cheaply ask "has this
+/// project moved since I built its snapshot?" without bundling it again.
+pub fn head_commit(project_root: &Path) -> Result<String> {
+    Ok(git_text(project_root, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
 fn git_text(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(git_bytes(root, args)?)?)
 }

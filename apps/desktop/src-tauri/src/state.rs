@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use ls_containers::RunningSession;
 use ls_security::VerifiedSnapshot;
+
+use crate::project_session::{FolderCommit, ProjectSession};
 
 /// One receiver whose connection was kept open past the initial
 /// `share_snapshot` exchange (round 11), so the sender can push a targeted
@@ -83,6 +86,21 @@ pub struct DiscoveryBrowseSession {
     pub task: tauri::async_runtime::JoinHandle<()>,
 }
 
+/// A built, compressed, signed snapshot, serialized and ready to send -
+/// the "prepared artifact" a [`ProjectSession`] holds so that sending to
+/// another device, or retrying a failed/expired send, never rebuilds the
+/// project. Valid only while the folders' commits still equal `commits`;
+/// see `session_commands::ensure_artifact`.
+pub struct CachedArtifact {
+    pub snapshot_id: String,
+    /// The snapshot, serialized exactly as it goes over the wire.
+    pub bytes: Vec<u8>,
+    /// The commit each of the session's folders was at when this was built.
+    pub commits: Vec<FolderCommit>,
+    /// RFC3339.
+    pub built_at: String,
+}
+
 /// App-wide state, held by Tauri and looked up by the ids handed back to the
 /// frontend from `receive_snapshot` / `run_snapshot`.
 ///
@@ -136,4 +154,19 @@ pub struct AppState {
     /// by the mDNS record's own fullname (stable per announcing instance,
     /// unlike a nickname two devices could share).
     pub nearby_devices: Mutex<HashMap<String, ls_net::DiscoveredPeer>>,
+    /// Sender-side (session-model refactor): every project session currently
+    /// open, keyed by its id - the single owner of "what is being sent, and
+    /// to whom it has been sent". See [`ProjectSession`]. A connection is
+    /// never stored here (or anywhere): each send connects, transfers, and
+    /// disconnects.
+    pub project_sessions: Mutex<HashMap<String, ProjectSession>>,
+    /// Built artifacts, keyed `"<session id>|<per-folder parent commits>"` -
+    /// `-` for "no parent", so the plain full-diff artifact used for a first
+    /// send/retry is the `-` key and each device that needs a diff against
+    /// its own marker gets its own entry.
+    pub artifacts: Mutex<HashMap<String, Arc<CachedArtifact>>>,
+    /// How many times a session's snapshot has actually been built - lets a
+    /// test prove a retry/second device reuses the artifact instead of
+    /// rebuilding it.
+    pub artifact_builds: AtomicUsize,
 }

@@ -754,3 +754,16 @@ button:disabled { opacity: 0.5; cursor: default; }
 #session-history-panel { display: flex; flex-direction: column; }
 #session-history-list li { display: flex; align-items: center; gap: var(--space-2); }
 .settings-panel { box-shadow: var(--shadow-sm); }
+
+/* ---- Session model: one card per transfer inside a send session. Same
+   tokens as the rest of the app - a transfer is a short-lived thing shown
+   inside its session, not a new kind of surface. ---- */
+.transfer-card {
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+.transfer-card .room-code-wrap { margin-top: var(--space-2); }
+.transfer-card .progress-wrap { margin-top: var(--space-2); }
