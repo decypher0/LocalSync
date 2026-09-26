@@ -514,6 +514,13 @@ pub struct DumpPlanDto {
 pub struct FolderPlanDto {
     pub path: String,
     pub dump: Option<DumpPlanDto>,
+    /// For a project with no `docker-compose.yml` of its own: what the
+    /// compose wizard collected. The compose file and Dockerfile are
+    /// *generated from this* whenever a snapshot is built (and never written
+    /// into the folder), so a saved session regenerates them identically.
+    /// `None` for a project that ships its own compose file.
+    #[serde(default)]
+    pub compose: Option<ls_composegen::ComposeSpec>,
 }
 
 /// Turns the wizard's folder/database plan into the inputs
@@ -555,6 +562,41 @@ pub(crate) fn plan_to_snapshot_inputs(
         }
     }
     Ok((folder_specs, pending_dumps))
+}
+
+/// For each folder that carries a compose wizard spec, the compose file and
+/// Dockerfile generated from it (index-aligned with `folders`; `None` for a
+/// folder that ships its own compose file). `host_port` overrides the
+/// published host port - only the wizard's test-run uses that.
+pub(crate) fn generated_files_for(
+    folders: &[FolderPlanDto],
+    specs: &[ls_snapshot::FolderSpec],
+    host_port: Option<u16>,
+) -> Result<Vec<Option<ls_snapshot::GeneratedFiles>>, String> {
+    let labels = ls_snapshot::folder_labels(specs);
+    folders
+        .iter()
+        .zip(&labels)
+        .map(|(f, label)| {
+            let Some(spec) = &f.compose else { return Ok(None) };
+            let dump = f.dump.as_ref().and_then(|d| {
+                let engine = match d.engine.as_str() {
+                    "mysql" => ls_composegen::DbEngine::Mysql,
+                    "postgres" => ls_composegen::DbEngine::Postgres,
+                    "mongodb" => ls_composegen::DbEngine::Mongodb,
+                    _ => return None,
+                };
+                let ext = if engine == ls_composegen::DbEngine::Mongodb { "tar.gz" } else { "sql" };
+                Some(ls_composegen::DumpInfo { engine, file_name: format!("{}.{ext}", d.schema) })
+            });
+            let ctx = ls_composegen::GenerateContext { folder_label: label.clone(), dump, host_port };
+            let generated = ls_composegen::generate(spec, &ctx).map_err(|e| e.to_string())?;
+            Ok(Some(ls_snapshot::GeneratedFiles {
+                compose_yaml: generated.compose_yaml,
+                files: generated.files.into_iter().map(|g| (g.path, g.contents.into_bytes())).collect(),
+            }))
+        })
+        .collect()
 }
 
 /// The discovery-initiated consent gate (see `ControlMessage::
@@ -614,9 +656,10 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
     }
 
     let (folder_specs, pending_dumps) = plan_to_snapshot_inputs(&folders, &[])?;
+    let generated = generated_files_for(&folders, &folder_specs, None)?;
 
     let snapshot =
-        tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi(&folder_specs, &pending_dumps))
+        tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi_with(&folder_specs, &pending_dumps, &generated))
             .await
             .map_err(|e| format!("snapshot task panicked: {e}"))?
             .map_err(|e| {

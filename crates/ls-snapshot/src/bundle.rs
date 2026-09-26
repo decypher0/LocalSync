@@ -129,6 +129,18 @@ pub struct GitBundle {
 }
 
 pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Result<GitBundle> {
+    bundle_project_with(project_root, parent_commit, None)
+}
+
+/// [`bundle_project`], optionally with [`GeneratedFiles`] standing in for a
+/// compose file the project doesn't have. When `generated` is given its
+/// compose YAML is used instead of reading `docker-compose.yml` from disk,
+/// and its extra files are added under `source/`.
+pub fn bundle_project_with(
+    project_root: &Path,
+    parent_commit: Option<&str>,
+    generated: Option<&crate::types::GeneratedFiles>,
+) -> Result<GitBundle> {
     log::info!("bundling started: project_root={}", project_root.display());
     let git_commit = git_text(project_root, &["rev-parse", "HEAD"])?
         .trim()
@@ -143,7 +155,9 @@ pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Resul
     };
 
     let compose_path = project_root.join("docker-compose.yml");
-    let compose_bytes = if compose_path.is_file() {
+    let compose_bytes = if let Some(g) = generated {
+        Some(g.compose_yaml.as_bytes().to_vec())
+    } else if compose_path.is_file() {
         Some(fs::read(&compose_path).with_context(|| format!("reading {}", compose_path.display()))?)
     } else {
         None
@@ -160,6 +174,11 @@ pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Resul
 
     let archive_bytes = git_bytes(project_root, &["archive", "--format=tar", "HEAD"])?;
     append_git_archive(&mut tb, &archive_bytes, "source")?;
+    if let Some(g) = generated {
+        for (rel, bytes) in &g.files {
+            append_bytes(&mut tb, &format!("source/{rel}"), bytes)?;
+        }
+    }
 
     append_bytes(&mut tb, "diff_stat.json", &diff_stat_json)?;
     append_bytes(&mut tb, "diff.patch", diff_patch.as_bytes())?;
