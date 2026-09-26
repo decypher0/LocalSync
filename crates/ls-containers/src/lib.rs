@@ -174,12 +174,58 @@ async fn unpack_payload(payload: &[u8], dest: &Path) -> Result<()> {
         // Round 36: matches ls-snapshot's own switch from gzip to zstd.
         let zstd = zstd::stream::read::Decoder::new(payload.as_slice())
             .context("initializing zstd decoder for snapshot payload")?;
-        tar::Archive::new(zstd).unpack(&dest)?;
+        tar::Archive::new(zstd)
+            .unpack(&dest)
+            .map_err(|e| anyhow::anyhow!(describe_unpack_error(&e, &dest)))?;
         Ok(())
     })
     .await
     .context("unpack task panicked")??;
     Ok(())
+}
+
+/// `tar` reports every extraction failure as only "failed to unpack `<path>`"
+/// - the real reason (disk full, permission denied, a corrupt/cut-off
+/// stream) is nested one or two errors down, and shown alone that message
+/// gives the person nothing to act on. This walks the whole chain, reports
+/// the root cause, and adds a hint for the causes that have an obvious fix.
+fn describe_unpack_error(e: &(dyn std::error::Error + 'static), dest: &Path) -> String {
+    let mut root: &(dyn std::error::Error + 'static) = e;
+    let mut kind = None;
+    let mut cur = Some(e);
+    while let Some(err) = cur {
+        root = err;
+        cur = match err.downcast_ref::<std::io::Error>() {
+            // io::Error::source() skips the error it wraps (it returns that
+            // error's own source), so descend via get_ref() to visit every
+            // layer instead of stepping over one.
+            Some(io) => {
+                kind = Some(io.kind());
+                io.get_ref().map(|inner| inner as &(dyn std::error::Error + 'static)).or_else(|| err.source())
+            }
+            None => err.source(),
+        };
+    }
+    let hint = match kind {
+        Some(std::io::ErrorKind::StorageFull) => {
+            " - the disk is full. On some Linux systems /tmp is RAM-backed and small: set the              work directory to a folder on a disk with room for the project and its database dump."
+        }
+        Some(std::io::ErrorKind::PermissionDenied) => {
+            " - LocalSync isn't allowed to write there, or a file from an earlier run belongs              to another user. Choose a different work directory, or delete that folder."
+        }
+        Some(std::io::ErrorKind::UnexpectedEof) | Some(std::io::ErrorKind::InvalidData) => {
+            " - the received project data looks corrupted or cut off. Ask the sender to send it again."
+        }
+        _ => "",
+    };
+    // tar's own outer message is what names the file that failed; the root
+    // cause says why. Both, unless they're the same text.
+    let (outer, root) = (e.to_string(), root.to_string());
+    if outer == root {
+        format!("couldn't unpack the project into {}: {root}{hint}", dest.display())
+    } else {
+        format!("couldn't unpack the project into {}: {outer}: {root}{hint}", dest.display())
+    }
 }
 
 /// Filesystem-path- and compose-project-name-safe: manifest fields are
@@ -324,5 +370,107 @@ services:
             payload,
         };
         ls_security::verify(snapshot, &[]).expect("test snapshot should verify")
+    }
+
+    /// Unpacking a payload that carries a real SQL dump, built by the real
+    /// `create_snapshot_multi` (not a hand-rolled tar), byte-exact - and a
+    /// second unpack into the same directory, which is what a retried Run
+    /// does (the snapshot is put back after a failed Run, then unpacked into
+    /// the same `<project>-<commit>` dir again). Dump size is
+    /// `LS_DUMP_TEST_MB` (default small) so size-dependent problems can be
+    /// reproduced without editing the test.
+    #[tokio::test]
+    async fn unpack_payload_extracts_a_real_sql_dump_exactly_and_can_rerun_into_the_same_dir() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        use std::process::Command;
+
+        let mb: u64 = std::env::var("LS_DUMP_TEST_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("xusom-admin");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("docker-compose.yml"), "services: {}
+").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "-A"],
+            vec!["-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init"],
+        ] {
+            assert!(Command::new("git").args(&args).current_dir(&project).status().unwrap().success());
+        }
+
+        let dump_path = base.path().join("xusom.sql");
+        {
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&dump_path).unwrap());
+            let (mut written, mut i) = (0u64, 0u64);
+            while written < mb * 1024 * 1024 {
+                let line = format!("INSERT INTO `users` VALUES ({i}, 'user{i}@example.com', 'row {}');
+", i.wrapping_mul(2654435761) % 1_000_003);
+                f.write_all(line.as_bytes()).unwrap();
+                written += line.len() as u64;
+                i += 1;
+            }
+        }
+        let expected = Sha256::digest(std::fs::read(&dump_path).unwrap());
+
+        let snapshot = ls_snapshot::create_snapshot_multi(
+            &[ls_snapshot::FolderSpec { path: project.clone(), parent_commit: None }],
+            &[ls_snapshot::PendingDump {
+                folder_index: 0,
+                schema: "xusom".to_string(),
+                source: ls_snapshot::DumpSource::FilePath(dump_path.clone()),
+                engine: "mysql".to_string(),
+            }],
+        )
+        .expect("create_snapshot_multi");
+
+        let dest = base.path().join("work").join("xusom-admin-abc");
+        for attempt in 1..=2 {
+            unpack_payload(&snapshot.payload, &dest)
+                .await
+                .unwrap_or_else(|e| panic!("unpack attempt {attempt} failed: {e:#}"));
+            let unpacked = dest.join("db-dumps/xusom-admin/xusom.sql");
+            assert_eq!(
+                Sha256::digest(std::fs::read(&unpacked).unwrap()),
+                expected,
+                "unpacked dump differs from the original after attempt {attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_unpack_error_reports_the_root_cause_and_a_hint_not_just_tars_wrapper() {
+        // tar nests the real io error inside its own wrappers; any nesting
+        // reproduces the shape.
+        let leaf = std::io::Error::new(std::io::ErrorKind::StorageFull, "No space left on device (os error 28)");
+        let wrapped = std::io::Error::other(std::io::Error::other(leaf));
+        let msg = describe_unpack_error(&wrapped, Path::new("/tmp/localsync-work/p-abc"));
+        assert!(msg.contains("/tmp/localsync-work/p-abc"), "{msg}");
+        assert!(msg.contains("No space left on device"), "root cause missing: {msg}");
+        assert!(msg.contains("disk is full"), "hint missing: {msg}");
+    }
+
+    #[tokio::test]
+    async fn unpack_failure_surfaces_the_underlying_cause() {
+        // A directory squatting where the dump file has to go makes tar's
+        // extraction fail for a real, non-space reason. The message must
+        // say why - not just name the file.
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dest.path().join("db-dumps/xusom-admin/xusom.sql/blocker")).unwrap();
+        let mut tb = tar::Builder::new(zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap());
+        let data = b"INSERT INTO t VALUES (1);";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        tb.append_data(&mut header, "db-dumps/xusom-admin/xusom.sql", &data[..]).unwrap();
+        let payload = tb.into_inner().unwrap().finish().unwrap();
+
+        let err = unpack_payload(&payload, dest.path()).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("xusom.sql"), "{msg}");
+        assert!(
+            msg.matches(':').count() >= 2 && !msg.trim_end().ends_with("xusom.sql"),
+            "message names the file but not why it failed: {msg}"
+        );
     }
 }
