@@ -171,6 +171,43 @@ async fn python_project_boots_and_the_same_snapshot_runs_like_a_receiver_would()
     assert_nothing_left_running("tr-py-ok");
 }
 
+/// The project ships its own `Dockerfile` (but no docker-compose.yml, which
+/// is what triggers the wizard). The compose file must name the generated
+/// Dockerfile explicitly, or Podman would silently build the project's own
+/// file - here one whose container fails on purpose, so building it can't pass.
+#[tokio::test]
+async fn a_projects_own_dockerfile_is_never_built_instead_of_the_generated_one() {
+    if !podman_stack_available() {
+        return;
+    }
+    let stale = "FROM docker.io/library/busybox
+CMD [\"sh\", \"-c\", \"echo STALE_DOCKERFILE_WAS_BUILT; exit 1\"]
+";
+    let (_base, dir) = make_project(
+        "tr-own-dockerfile",
+        &[("Dockerfile", stale), ("index.html", "<h1>generated one</h1>")],
+    );
+    let spec = spec(Runtime::Python, "3.12", BuildTool::Pip, "python -m http.server 18106", 18106);
+
+    let (report, _) = test_run(plan(&dir, spec.clone())).await;
+    assert!(report.ok, "test run failed: {:?}
+{}", report.error, report.output_tail);
+    assert!(!report.output_tail.contains("STALE_DOCKERFILE_WAS_BUILT"), "{}", report.output_tail);
+    assert!(report.output_tail.contains("Serving HTTP"), "{}", report.output_tail);
+    assert_nothing_left_running("tr-own-dockerfile");
+
+    // And what is sent carries both files side by side, the project's own one untouched.
+    let verified = snapshot_as_sent(&dir, &spec);
+    let payload = &verified.snapshot().payload;
+    let decoded = zstd::stream::decode_all(&payload[..]).unwrap();
+    let mut names = Vec::new();
+    for entry in tar::Archive::new(&decoded[..]).entries().unwrap() {
+        names.push(entry.unwrap().path().unwrap().display().to_string());
+    }
+    assert!(names.iter().any(|n| n.ends_with("source/Dockerfile")), "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with("source/Dockerfile.localsync")), "{names:?}");
+}
+
 #[tokio::test]
 async fn node_project_boots() {
     if !podman_stack_available() {

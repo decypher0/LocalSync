@@ -20,7 +20,7 @@ pub struct RuntimeInfo {
 }
 
 pub const RUNTIMES: &[RuntimeInfo] = &[
-    RuntimeInfo { runtime: Runtime::Java, label: "Java", versions: &["17", "21"], build_tools: &[BuildTool::Maven, BuildTool::Gradle] },
+    RuntimeInfo { runtime: Runtime::Java, label: "Java", versions: &["8", "11", "17", "21"], build_tools: &[BuildTool::Maven, BuildTool::Gradle] },
     RuntimeInfo { runtime: Runtime::Node, label: "Node.js", versions: &["18", "20", "22"], build_tools: &[BuildTool::Npm, BuildTool::Yarn, BuildTool::Pnpm] },
     RuntimeInfo { runtime: Runtime::Python, label: "Python", versions: &["3.10", "3.11", "3.12"], build_tools: &[BuildTool::Pip] },
     RuntimeInfo { runtime: Runtime::Go, label: "Go", versions: &["1.21", "1.22"], build_tools: &[BuildTool::GoBuild] },
