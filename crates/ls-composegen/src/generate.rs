@@ -426,6 +426,28 @@ mod tests {
         assert_eq!(g.host_port, 8080);
     }
 
+    /// The chosen version is what ends up in every Java image tag - never a
+    /// default - and no image is the deprecated `openjdk` one.
+    #[test]
+    fn every_java_version_and_tool_puts_its_version_in_the_image_tags() {
+        for v in crate::catalog::runtime_info(Runtime::Java).versions {
+            for tool in [BuildTool::Maven, BuildTool::Gradle] {
+                let mut sp = java_maven();
+                sp.runtime_version = (*v).into();
+                sp.build_tool = tool;
+                let g = gen(&sp, &ctx());
+                let d = dockerfile_of(&g);
+                assert!(!d.contains("openjdk"), "{d}");
+                assert!(d.contains(&format!("FROM docker.io/library/eclipse-temurin:{v}-jre")), "{d}");
+                let build_tag = if tool == BuildTool::Gradle { format!("gradle:8-jdk{v} ") } else { format!("eclipse-temurin-{v} ") };
+                assert!(d.contains(&build_tag), "{tool:?} {v}: {d}");
+                for other in crate::catalog::runtime_info(Runtime::Java).versions.iter().filter(|o| *o != v) {
+                    assert!(!d.contains(&format!("temurin:{other}-")) && !d.contains(&format!("temurin-{other} ")), "{v} leaked {other}: {d}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn java_gradle_uses_the_gradle_image_command_and_its_own_artifact_path() {
         let mut sp = java_maven();
