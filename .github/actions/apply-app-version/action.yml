@@ -1,0 +1,45 @@
+name: Apply app version
+description: >-
+  Stamps one semver version into the three files that carry the app version
+  (tauri.conf.json, Cargo.toml, package.json) before a build, so a release
+  never ships the same version as the previous one. Edits the working copy
+  only - nothing is committed back.
+
+inputs:
+  version:
+    description: Semver version to apply, e.g. 0.2.57
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Stamp version into tauri.conf.json, Cargo.toml and package.json
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.version }}
+      run: |
+        node - <<'EOF'
+        const fs = require("fs");
+        const version = process.env.APP_VERSION;
+        if (!/^\d+\.\d+\.\d+$/.test(version)) {
+          console.error("Not a plain X.Y.Z version: " + JSON.stringify(version));
+          process.exit(1);
+        }
+        // Regex-replace the first match rather than parse+rewrite, so each
+        // file keeps its exact existing formatting. A missing match is a hard
+        // failure - a silently unstamped file would ship the old version.
+        const targets = [
+          ["apps/desktop/src-tauri/tauri.conf.json", /("version"\s*:\s*")[^"]*(")/],
+          ["apps/desktop/package.json", /("version"\s*:\s*")[^"]*(")/],
+          ["apps/desktop/src-tauri/Cargo.toml", /^(version\s*=\s*")[^"]*(")/m],
+        ];
+        for (const [file, re] of targets) {
+          const before = fs.readFileSync(file, "utf8");
+          if (!re.test(before)) {
+            console.error("No version field found in " + file);
+            process.exit(1);
+          }
+          fs.writeFileSync(file, before.replace(re, (m, open, close) => open + version + close));
+          console.log("Stamped " + version + " into " + file);
+        }
+        EOF
