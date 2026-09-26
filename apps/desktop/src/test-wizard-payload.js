@@ -77,3 +77,25 @@ test("buildWizardFoldersPayload", async (t) => {
     assert.deepEqual(buildWizardFoldersPayload([]), []);
   });
 });
+
+test("buildWizardFoldersPayload: compose", async (t) => {
+  const spec = { runtime: "node", runtime_version: "22", build_tool: "npm", run_command: "npm start", port: 3000, artifact_path: null, database: null, db_env_preset: "standard", extras: [], env: [] };
+
+  await t.test("a folder with a compose spec carries it, unchanged, as `compose`", () => {
+    const payload = buildWizardFoldersPayload([{ path: "/p", needsDb: false, dump: null, compose: spec }]);
+    assert.deepEqual(Object.keys(payload[0]).sort(), ["compose", "dump", "path"]);
+    assert.deepEqual(payload[0].compose, spec);
+    assert.equal(payload[0].dump, null);
+  });
+
+  await t.test("a folder without one has no `compose` key at all", () => {
+    const payload = buildWizardFoldersPayload([{ path: "/p", needsDb: false, dump: null }, { path: "/q", needsDb: false, dump: null, compose: undefined }]);
+    for (const p of payload) assert.deepEqual(Object.keys(p).sort(), RUST_FOLDER_FIELDS);
+  });
+
+  await t.test("compose and a dump together", () => {
+    const payload = buildWizardFoldersPayload([{ path: "/p", needsDb: true, dump: { schema: "s", filePath: "/d.sql", engine: "mysql" }, compose: spec }]);
+    assert.equal(payload[0].dump.file_path, "/d.sql");
+    assert.equal(payload[0].compose, spec);
+  });
+});

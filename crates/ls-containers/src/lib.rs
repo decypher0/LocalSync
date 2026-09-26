@@ -12,6 +12,7 @@ mod compose;
 mod podman;
 mod provisioning;
 
+pub use podman::ServiceState;
 pub use provisioning::{ensure_podman_ready, ProvisioningLog};
 
 use anyhow::{Context, Result};
@@ -44,6 +45,8 @@ pub struct RunningSession {
     /// restart, with no `VerifiedSnapshot` in memory - knows where to run
     /// `podman-compose up` again without re-unpacking anything.
     pub compose_dir: PathBuf,
+    /// Every service `up` is expected to start (those without `profiles:`).
+    pub started_by_default: Vec<String>,
 }
 
 /// Unpack `verified`'s payload into a fresh subdirectory of `work_dir`,
@@ -217,7 +220,15 @@ async fn bring_up(
     // is what must be passed here (and to compose_down, via
     // RunningSession.compose_dir below) whenever a single folder's own
     // files live nested one level down.
-    podman::compose_up(compose_root, &compose_project_name, log).await?;
+    // `up` can fail after creating some containers/the network. Nothing holds
+    // a RunningSession for the caller to stop, so clean up here rather than
+    // leave them running.
+    if let Err(e) = podman::compose_up(compose_root, &compose_project_name, log).await {
+        if let Err(down_err) = podman::compose_down(compose_root, &compose_project_name, log).await {
+            eprintln!("cleanup after a failed `up` also failed: {down_err:#}");
+        }
+        return Err(e);
+    }
 
     Ok(RunningSession {
         project_name: project_name.to_string(),
@@ -229,6 +240,7 @@ async fn bring_up(
         // podman-compose down would look for docker-compose.yml (and this
         // run's own project state) in the wrong place.
         compose_dir: compose_root.to_path_buf(),
+        started_by_default: default_services(&rewritten),
     })
 }
 
@@ -240,6 +252,54 @@ pub async fn stop_session(session: &RunningSession) -> Result<()> {
     // `run_snapshot` already uses above).
     let log = ProvisioningLog::open_default().ok();
     podman::compose_down(&session.compose_dir, &session.compose_project_name, log.as_ref()).await
+}
+
+/// Services of `yaml` that `up` starts by default (not behind a `profiles:` opt-in).
+fn default_services(yaml: &str) -> Vec<String> {
+    serde_yaml::from_str::<serde_yaml::Value>(yaml)
+        .ok()
+        .and_then(|doc| doc.get("services").and_then(|s| s.as_mapping()).cloned())
+        .map(|services| {
+            services
+                .iter()
+                .filter(|(_, def)| def.get("profiles").is_none())
+                .filter_map(|(name, _)| name.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Services that have no started container right now.
+///
+/// `run_snapshot` succeeding does not mean everything is up: podman-compose
+/// (1.0.x) exits 0 even when an image build failed or a container couldn't be
+/// created/started (a taken port, an unpullable image), so callers that need
+/// to know - the compose wizard's test run - check with this. (Not enforced
+/// inside `run_snapshot`: that would change what a receiver's Run reports.)
+pub async fn services_not_started(session: &RunningSession) -> Vec<String> {
+    let mut missing = Vec::new();
+    for name in &session.started_by_default {
+        // A `podman ps` hiccup must not condemn a fine run: only a definite
+        // Missing/NotStarted counts.
+        if let Ok(ServiceState::Missing | ServiceState::NotStarted) =
+            podman::service_state(&session.compose_project_name, name).await
+        {
+            missing.push(name.clone());
+        }
+    }
+    missing
+}
+
+/// What the given service's container in `session` is doing. Lets a caller
+/// notice "the app crashed" instead of waiting on a port that will never open.
+pub async fn service_state(session: &RunningSession, service: &str) -> Result<ServiceState> {
+    podman::service_state(&session.compose_project_name, service).await
+}
+
+/// The last `tail` lines of `service`'s container output (stdout then
+/// stderr) - the real reason an app that started but isn't reachable failed.
+pub async fn service_logs(session: &RunningSession, service: &str, tail: usize) -> Result<String> {
+    podman::service_logs(&session.compose_project_name, service, tail).await
 }
 
 async fn unpack_payload(payload: &[u8], dest: &Path) -> Result<()> {
@@ -453,15 +513,25 @@ mod tests {
     /// same binary (Rust's default `#[tokio::test]` behavior) don't race for
     /// the same host port or the same deterministic compose project name.
     fn build_verified_snapshot_with(project_name: &str, git_commit: &str, port_mapping: &str) -> VerifiedSnapshot {
+        let compose_yaml = format!(
+            "services:\n  web:\n    image: docker.io/library/nginx:alpine\n    ports:\n      - \"{port_mapping}\"\n"
+        );
+        build_verified_snapshot_from_yaml(project_name, git_commit, port_mapping, &compose_yaml)
+    }
+
+    /// Like `build_verified_snapshot_with`, but with the whole compose file
+    /// given (for failures a plain nginx service can't produce).
+    fn build_verified_snapshot_from_yaml(
+        project_name: &str,
+        git_commit: &str,
+        port_mapping: &str,
+        compose_yaml: &str,
+    ) -> VerifiedSnapshot {
         use ed25519_dalek::{Signer, SigningKey};
         use ls_snapshot::{Manifest, ServiceDef, Snapshot};
         use rand::rngs::OsRng;
         use sha2::{Digest, Sha256};
         use std::io::Write;
-
-        let compose_yaml = format!(
-            "services:\n  web:\n    image: docker.io/library/nginx:alpine\n    ports:\n      - \"{port_mapping}\"\n"
-        );
 
         let mut builder = tar::Builder::new(Vec::new());
         let data = compose_yaml.as_bytes();
@@ -575,6 +645,73 @@ mod tests {
                 "unpacked dump differs from the original after attempt {attempt}"
             );
         }
+    }
+
+    /// When `up` really fails (podman-compose exits nonzero), the error carries
+    /// podman-compose's own explanation - not just "exit status: 1" - and
+    /// nothing is left behind. (A missing build context is one of the few
+    /// failures podman-compose 1.0.x reports with a nonzero exit; its
+    /// build/start failures exit 0, see `services_not_started`.)
+    #[tokio::test]
+    async fn a_failed_up_reports_podman_composes_real_reason_and_leaves_nothing() {
+        if !podman::podman_available() || !podman::podman_compose_available() {
+            eprintln!("skipping a_failed_up_reports...: podman/podman-compose not found on PATH");
+            return;
+        }
+        let yaml = r#"
+services:
+  a:
+    image: docker.io/library/nginx:alpine
+  b:
+    build: ./no-such-directory
+    depends_on: [a]
+"#;
+        let verified = build_verified_snapshot_from_yaml("failed-up-cleanup", "deadbeef", "8080:80", yaml);
+        let work_dir = tempfile::tempdir().unwrap();
+        let err = match run_snapshot(&verified, work_dir.path()).await {
+            Ok(session) => {
+                let _ = stop_session(&session).await;
+                panic!("run_snapshot must fail: b's build context does not exist");
+            }
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("podman-compose up failed"), "{err}");
+        assert!(err.contains("Dockerfile not found"), "podman-compose's real reason is missing: {err}");
+        assert!(podman_ps_names("localsync-failed-up-cleanup-deadbeef").is_empty(), "containers left behind");
+    }
+
+    /// The other half: `up` exits 0 although service `b` never started (its
+    /// image can't be pulled). `run_snapshot` still returns Ok - unchanged
+    /// behavior - and `services_not_started` is how a caller finds out.
+    #[tokio::test]
+    async fn services_not_started_finds_a_service_podman_compose_silently_failed_to_start() {
+        if !podman::podman_available() || !podman::podman_compose_available() {
+            eprintln!("skipping services_not_started...: podman/podman-compose not found on PATH");
+            return;
+        }
+        let yaml = r#"
+services:
+  a:
+    image: docker.io/library/nginx:alpine
+  b:
+    image: localhost/localsync-definitely-not-here:1
+    depends_on: [a]
+"#;
+        let verified = build_verified_snapshot_from_yaml("silent-start-failure", "deadbeef", "8080:80", yaml);
+        let work_dir = tempfile::tempdir().unwrap();
+        let session = run_snapshot(&verified, work_dir.path()).await.expect("podman-compose exits 0 here");
+        let missing = services_not_started(&session).await;
+        stop_session(&session).await.unwrap();
+        assert_eq!(missing, vec!["b".to_string()]);
+        assert!(podman_ps_names("localsync-silent-start-failure-deadbeef").is_empty(), "stop_session left containers behind");
+    }
+
+    fn podman_ps_names(project: &str) -> Vec<String> {
+        let out = std::process::Command::new("podman")
+            .args(["ps", "-a", "--filter", &format!("label=io.podman.compose.project={project}"), "--format", "{{.Names}}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect()
     }
 
     #[test]

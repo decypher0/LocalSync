@@ -144,7 +144,7 @@ async fn receiver_session_model_end_to_end() {
     receiver_app.manage(AppState::default());
     let receiver = receiver_app.handle().clone();
 
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
     let view = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap();
     let sid = view.id.clone();
 

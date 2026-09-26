@@ -3591,6 +3591,7 @@ dependencies = [
  "gethostname",
  "log",
  "ls-clouddrop",
+ "ls-composegen",
  "ls-containers",
  "ls-dbsource",
  "ls-net",
@@ -3658,6 +3659,19 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "ls-composegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ls-security",
+ "ls-snapshot",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "time",
 ]
 
 [[package]]
