@@ -693,6 +693,20 @@ button:disabled { opacity: 0.5; cursor: default; }
   font-weight: var(--weight-semibold);
 }
 .badge-expired .icon { width: 16px; height: 16px; }
+
+/* Goal 4: the "a receiver has joined and is connecting/sending" status line
+   in the main send-session view - reuses the same success green
+   (--added-text) as everywhere else in the app that reports a good outcome
+   (.result, .cache-hit, the "done" tab status), so this reads as "good news"
+   at a glance rather than needing its own new color language. */
+.badge-connected {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--added-text);
+  font-weight: var(--weight-semibold);
+}
+.badge-connected .icon { width: 16px; height: 16px; }
 .session-tab-close {
   display: inline-flex;
   align-items: center;
