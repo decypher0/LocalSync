@@ -58,6 +58,10 @@
   <path d="M9 13h6" />
   <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
     </symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24">
+      <path d="M5 12h14" />
+      <path d="M12 5v14" />
+    </symbol>
     <symbol id="icon-x" viewBox="0 0 24 24">
       <path d="M18 6 6 18" />
   <path d="m6 6 12 12" />
@@ -641,6 +645,50 @@
         <button id="wiz-folders-next-btn" class="primary-btn" type="button">Next <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
       </div>
 
+      <!-- Compose wizard step 1: a project with no docker-compose.yml is
+           described here instead. Every dropdown is filled from the
+           backend's compose_catalog (app.js); nothing is listed in this
+           markup. Each .field-error[data-slot] is where a validation error
+           for that field is shown. -->
+      <div id="wiz-step-compose-app" class="wizard-step hidden" data-cw-step="app">
+        <h3>Set up your app</h3>
+        <p class="hint">
+          This project has no <code>docker-compose.yml</code>, so we'll build one for you from a few
+          choices. It's test-run on this computer before anything is sent.
+        </p>
+        <label>Runtime
+          <select id="cw-runtime"></select>
+        </label>
+        <p class="error field-error" data-slot="runtime"></p>
+        <label>Version
+          <select id="cw-runtime-version"></select>
+        </label>
+        <p class="error field-error" data-slot="runtime_version"></p>
+        <label>Build tool
+          <select id="cw-build-tool"></select>
+        </label>
+        <p class="error field-error" data-slot="build_tool"></p>
+        <div id="cw-artifact-wrap" class="hidden">
+          <label>Where the build leaves the app (relative to the project folder)
+            <input id="cw-artifact-path" type="text" />
+          </label>
+          <p class="error field-error" data-slot="artifact_path"></p>
+        </div>
+        <label>Command that starts the app
+          <input id="cw-run-command" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <p id="cw-run-command-hint" class="hint"></p>
+        <p class="error field-error" data-slot="run_command"></p>
+        <label>Port the app listens on
+          <input id="cw-port" type="number" min="1" max="65535" step="1" inputmode="numeric" />
+        </label>
+        <p class="error field-error" data-slot="port"></p>
+        <p class="error field-error" data-slot="_general"></p>
+        <p id="cw-app-error" class="error"></p>
+        <button id="cw-app-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
+        <button id="cw-app-next-btn" class="primary-btn" type="button">Next <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+      </div>
+
       <!-- Step: needs database? (asked once) -->
       <div id="wiz-step-needs-db" class="wizard-step hidden">
         <h3><svg class="icon"><use href="#icon-database"></use></svg> Does this project need database access?</h3>
@@ -793,6 +841,56 @@
         <button id="wiz-db-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
       </div>
 
+      <!-- Compose wizard step 3: what runs alongside the app. -->
+      <div id="wiz-step-compose-services" class="wizard-step hidden" data-cw-step="services">
+        <h3>Services &amp; environment</h3>
+        <div id="cw-db-wrap" class="hidden">
+          <p class="hint">
+            Database: <strong id="cw-db-engine"></strong>, database name <code id="cw-db-name"></code>
+            (from the database step).
+          </p>
+          <label>Database container version
+            <select id="cw-db-version"></select>
+          </label>
+          <p class="error field-error" data-slot="database.version"></p>
+          <label>How does your app read its database connection?
+            <select id="cw-db-preset"></select>
+          </label>
+          <p class="error field-error" data-slot="database.database"></p>
+          <p class="error field-error" data-slot="database"></p>
+        </div>
+        <h4>Other services your app uses</h4>
+        <ul id="cw-extras-list" class="cw-rows"></ul>
+        <h4>Environment variables</h4>
+        <p class="hint">Extra settings your app reads from its environment. Leave empty if it needs none.</p>
+        <ul id="cw-env-list" class="cw-rows"></ul>
+        <p class="error field-error" data-slot="env"></p>
+        <button id="cw-env-add-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-plus"></use></svg> Add variable</button>
+        <p class="error field-error" data-slot="_general"></p>
+        <br />
+        <button id="cw-services-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
+        <button id="cw-services-next-btn" class="primary-btn" type="button">Review <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+      </div>
+
+      <!-- Compose wizard step 4: what will be generated, then the test run
+           that must pass before the send can go ahead. -->
+      <div id="wiz-step-compose-review" class="wizard-step hidden">
+        <h3>Review &amp; test run</h3>
+        <p id="cw-review-status" class="hint-inline"></p>
+        <div id="cw-preview"></div>
+        <p class="hint">
+          Test run builds and starts your app in Podman on this computer. It can take a minute or two.
+          You can only continue to Send after a test run succeeds. To abandon, use Cancel above.
+        </p>
+        <button id="cw-test-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-play"></use></svg> Test run</button>
+        <pre id="cw-test-progress" class="cw-log hidden"></pre>
+        <div id="cw-test-result"></div>
+        <br />
+        <button id="cw-review-back-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back</button>
+        <button id="cw-fix-btn" class="ghost-btn hidden" type="button"><svg class="icon"><use href="#icon-arrow-left"></use></svg> Back — fix my answers</button>
+        <button id="cw-continue-btn" class="primary-btn" type="button" disabled>Continue <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+      </div>
+
       <!-- Final step: summary + the actual Send -->
       <div id="wiz-step-ready" class="wizard-step hidden">
         <h3>Ready to send</h3>
@@ -872,6 +970,7 @@
        same as every other script here (no bundler, no modules). -->
   <script src="wizard-payload.js"></script>
   <script src="session-model.js"></script>
+  <script src="compose-wizard.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
