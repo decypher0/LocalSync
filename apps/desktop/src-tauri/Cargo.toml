@@ -100,6 +100,7 @@ ls-security = { path = "../../../crates/ls-security" }
 ls-containers = { path = "../../../crates/ls-containers" }
 ls-dbsource = { path = "../../../crates/ls-dbsource" }
 ls-clouddrop = { path = "../../../crates/ls-clouddrop" }
+ls-composegen = { path = "../../../crates/ls-composegen" }
 # Only for hashing a freshly-exported dump file (round 17) - already a
 # dependency two crates down the graph (ls-snapshot, ls-security); promoted
 # to a direct dependency here too rather than reaching through them.

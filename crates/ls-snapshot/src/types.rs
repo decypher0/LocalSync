@@ -121,6 +121,22 @@ pub struct DatabaseDumpEntry {
     pub engine: String,
 }
 
+/// Files LocalSync itself generated for a project that shipped without a
+/// `docker-compose.yml` (the compose wizard). Bundled *instead of* looking for
+/// them in the project: the sender's folder is never modified, and nothing
+/// generated has to be committed to git to reach the receiver.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GeneratedFiles {
+    /// The whole `docker-compose.yml`. Shipped where a project's own compose
+    /// file would be, so the receiver's Run path finds it unchanged.
+    pub compose_yaml: String,
+    /// Extra files (a Dockerfile, ...), as (path relative to the project
+    /// root, bytes). Shipped under `source/` - i.e. exactly where they would
+    /// sit if they had been committed - so a compose `build:` context of "."
+    /// finds them.
+    pub files: Vec<(String, Vec<u8>)>,
+}
+
 /// Where a [`PendingDump`]'s content actually lives.
 ///
 /// A real database dump can be multi-GB — reading one fully into memory just

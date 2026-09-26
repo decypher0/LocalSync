@@ -1257,13 +1257,31 @@ const WIZARD_PHASES = [
   { step: "wiz-step-db-folder", label: "Database setup" },
   { step: "wiz-step-ready", label: "Ready to send" },
 ];
-const WIZARD_PHASE_COUNT = new Set(WIZARD_PHASES.map((p) => p.label)).size;
+
+// A single folder with no docker-compose.yml of its own gets three extra
+// phases (see the compose wizard section below): app setup before the
+// database steps, services and the review/test run after them.
+const WIZARD_PHASES_COMPOSE = [
+  { step: "wiz-step-mode", label: "Transfer mode" },
+  { step: "wiz-step-folders", label: "Project folder(s)" },
+  { step: "wiz-step-compose-app", label: "App setup" },
+  { step: "wiz-step-needs-db", label: "Database setup" },
+  { step: "wiz-step-shared-db", label: "Database setup" },
+  { step: "wiz-step-db-folder", label: "Database setup" },
+  { step: "wiz-step-compose-services", label: "Services & environment" },
+  { step: "wiz-step-compose-review", label: "Review & test run" },
+  { step: "wiz-step-ready", label: "Ready to send" },
+];
+let composeActive = false; // true while the wizard is running the compose steps for the one selected folder
+let composeState = null; // see the compose wizard section below
 
 function updateWizardProgress(id) {
-  const entry = WIZARD_PHASES.find((p) => p.step === id);
+  const phases = composeActive ? WIZARD_PHASES_COMPOSE : WIZARD_PHASES;
+  const entry = phases.find((p) => p.step === id);
   if (!entry) return;
-  const phaseNumber = new Set(WIZARD_PHASES.slice(0, WIZARD_PHASES.indexOf(entry) + 1).map((p) => p.label)).size;
-  $("wizard-progress-label").textContent = `Step ${phaseNumber} of ${WIZARD_PHASE_COUNT}: ${entry.label}`;
+  const phaseNumber = new Set(phases.slice(0, phases.indexOf(entry) + 1).map((p) => p.label)).size;
+  const phaseCount = new Set(phases.map((p) => p.label)).size;
+  $("wizard-progress-label").textContent = `Step ${phaseNumber} of ${phaseCount}: ${entry.label}`;
 }
 
 function showWizardStep(id) {
@@ -1352,20 +1370,47 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
 
 $("wiz-folders-back-btn").addEventListener("click", () => showWizardStep("wiz-step-mode"));
 
-$("wiz-folders-next-btn").addEventListener("click", () => {
+$("wiz-folders-next-btn").addEventListener("click", async () => {
   if (wizardFolders.length === 0) {
     $("wiz-folders-error").textContent = "Select at least one project folder.";
     return;
   }
   $("wiz-folders-error").textContent = "";
+  composeActive = false;
+  for (const f of wizardFolders) delete f.compose;
+  // Exactly one folder without a docker-compose.yml of its own: describe how
+  // to run it instead (compose wizard). Anything else is the normal wizard.
+  if (wizardFolders.length === 1) {
+    const path = wizardFolders[0].path;
+    $("wiz-folders-next-btn").disabled = true;
+    try {
+      const info = await invoke("inspect_project", { folderPath: path });
+      if (wizardFolders.length !== 1 || wizardFolders[0].path !== path) return; // the list changed meanwhile
+      if (!info.has_compose) {
+        if (!info.is_git_repo || !info.has_commits) {
+          $("wiz-folders-error").textContent =
+            (info.is_git_repo ? "This folder has no commits yet" : "This folder isn't a git repository") +
+            " and has no docker-compose.yml. LocalSync builds what it sends from git, so commit the project's files first (git init, git add, git commit), then try again.";
+          return;
+        }
+        await enterComposeWizard(path);
+        return;
+      }
+    } catch (err) {
+      $("wiz-folders-error").textContent = `Couldn't check this folder: ${err}`;
+      return;
+    } finally {
+      $("wiz-folders-next-btn").disabled = false;
+    }
+  }
   showWizardStep("wiz-step-needs-db");
 });
 
-$("wiz-needs-db-back-btn").addEventListener("click", () => showWizardStep("wiz-step-folders"));
+$("wiz-needs-db-back-btn").addEventListener("click", () => showWizardStep(composeActive ? "wiz-step-compose-app" : "wiz-step-folders"));
 
 $("wiz-needs-db-no-btn").addEventListener("click", () => {
   for (const f of wizardFolders) f.needsDb = false;
-  renderWizardReadyStep();
+  afterDatabaseSteps();
 });
 
 $("wiz-needs-db-yes-btn").addEventListener("click", () => {
@@ -1428,7 +1473,7 @@ $("wiz-shared-db-yes-btn").addEventListener("click", async () => {
 
 async function advanceDbWizard() {
   if (wizardFolderIndex >= wizardFolders.length) {
-    renderWizardReadyStep();
+    afterDatabaseSteps();
     return;
   }
   const folder = wizardFolders[wizardFolderIndex];
@@ -1823,6 +1868,439 @@ $("wiz-db-back-btn").addEventListener("click", () => {
   advanceDbWizard();
 });
 
+// ---------- compose wizard: a project with no docker-compose.yml ----------
+//
+// When the one selected folder has no compose file, the wizard asks how to
+// run it (app setup), reuses the database steps unchanged, asks about extra
+// services and environment, then has the backend generate the compose file,
+// show it, and TEST-RUN it in Podman. Sending is blocked until a test run has
+// succeeded for the current answers. The pure form logic lives in
+// compose-wizard.js (ComposeForm); every option and default comes from the
+// backend's compose_catalog, nothing is listed here. The finished spec is
+// kept on wizardFolders[0].compose, which buildWizardFoldersPayload sends.
+//
+// composeState = { st (ComposeForm state), folderPath, spec, map, testedKey, testing }
+
+let composeCatalog = null;
+
+listen("compose-test-progress", (evt) => {
+  if (!composeState || !composeState.testing) return;
+  const log = $("cw-test-progress");
+  log.textContent += `${(evt.payload && evt.payload.line) ?? ""}\n`;
+  log.scrollTop = log.scrollHeight;
+});
+
+const CW_STEP_ID = { app: "wiz-step-compose-app", services: "wiz-step-compose-services" };
+
+function cwEl(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+/** options: [[value, label], ...] */
+function cwFillSelect(sel, options, current) {
+  sel.innerHTML = "";
+  for (const [value, label] of options) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = label;
+    sel.appendChild(o);
+  }
+  sel.value = current;
+}
+
+function cwFieldErrorEls(stepId) {
+  return Array.from($(stepId).querySelectorAll(".field-error"));
+}
+
+function cwClearSlot(stepId, slot) {
+  for (const p of cwFieldErrorEls(stepId)) if (p.dataset.slot === slot) p.textContent = "";
+}
+
+/** Shows each mapped error (see ComposeForm.mapErrors) next to its field, message verbatim. */
+function cwShowErrors(stepId, mapped) {
+  const els = cwFieldErrorEls(stepId);
+  els.forEach((p) => (p.textContent = ""));
+  for (const e of mapped) {
+    const p = els.find((x) => x.dataset.slot === e.slot) || els.find((x) => x.dataset.slot === "_general");
+    p.textContent = p.textContent ? `${p.textContent}\n${e.message}` : e.message;
+  }
+  const first = els.find((p) => p.textContent);
+  if (first) first.scrollIntoView({ block: "nearest" });
+}
+
+/** The database step's outcome as the spec's database (engine + name), or null when none was set up. */
+function cwDb() {
+  const f = wizardFolders[0];
+  return f && f.needsDb && f.dump ? { engine: f.dump.engine, database: f.dump.schema } : null;
+}
+
+const cwDumpPayload = () => buildWizardFoldersPayload([wizardFolders[0]])[0].dump;
+
+function cwBuild() {
+  return ComposeForm.buildSpec(composeCatalog, composeState.st, cwDb());
+}
+
+function composeTestIsCurrent() {
+  return !!composeState && ComposeForm.isTestCurrent(composeState.testedKey, cwBuild().spec, cwDumpPayload());
+}
+
+async function enterComposeWizard(path) {
+  try {
+    if (!composeCatalog) composeCatalog = await invoke("compose_catalog");
+  } catch (err) {
+    $("wiz-folders-error").textContent = `Couldn't load the setup options: ${err}`;
+    return;
+  }
+  composeActive = true;
+  if (!composeState || composeState.folderPath !== path) {
+    composeState = { st: ComposeForm.newState(), folderPath: path, spec: null, map: null, testedKey: null, testing: false };
+  }
+  renderComposeApp();
+  showWizardStep("wiz-step-compose-app");
+}
+
+// ----- step 1: app setup -----
+
+function renderComposeApp() {
+  const { st } = composeState;
+  const r = ComposeForm.runtimeInfo(composeCatalog, st.runtime);
+  cwShowErrors(CW_STEP_ID.app, []);
+  $("cw-app-error").textContent = "";
+  cwFillSelect($("cw-runtime"), [["", "Choose a runtime…"], ...composeCatalog.runtimes.map((x) => [x.runtime, x.label])], st.runtime);
+  cwFillSelect($("cw-runtime-version"), r ? r.versions.map((v) => [v, v]) : [], st.runtimeVersion);
+  cwFillSelect($("cw-build-tool"), r ? r.build_tools.map((t) => [t.tool, t.label]) : [], st.buildTool);
+  $("cw-runtime-version").disabled = !r;
+  $("cw-build-tool").disabled = !r;
+  const tool = ComposeForm.toolInfo(composeCatalog, st.runtime, st.buildTool);
+  $("cw-artifact-wrap").classList.toggle("hidden", !(tool && tool.needs_artifact_path));
+  $("cw-artifact-path").value = st.artifactPath;
+  $("cw-run-command").value = st.runCommand;
+  $("cw-run-command-hint").textContent = !tool
+    ? ""
+    : tool.default_run_command
+      ? "Pre-filled for this choice. Change it if your app starts differently."
+      : "There's no standard command for this one — enter the command that starts your app.";
+  $("cw-port").value = st.port;
+}
+
+$("cw-runtime").addEventListener("change", () => {
+  ComposeForm.setRuntime(composeCatalog, composeState.st, $("cw-runtime").value);
+  renderComposeApp();
+});
+$("cw-runtime-version").addEventListener("change", () => {
+  composeState.st.runtimeVersion = $("cw-runtime-version").value;
+  cwClearSlot(CW_STEP_ID.app, "runtime_version");
+});
+$("cw-build-tool").addEventListener("change", () => {
+  ComposeForm.setBuildTool(composeCatalog, composeState.st, $("cw-build-tool").value);
+  renderComposeApp();
+});
+$("cw-artifact-path").addEventListener("input", () => {
+  ComposeForm.setArtifactPath(composeCatalog, composeState.st, $("cw-artifact-path").value);
+  cwClearSlot(CW_STEP_ID.app, "artifact_path");
+});
+$("cw-run-command").addEventListener("input", () => {
+  ComposeForm.setRunCommand(composeCatalog, composeState.st, $("cw-run-command").value);
+  cwClearSlot(CW_STEP_ID.app, "run_command");
+});
+$("cw-port").addEventListener("keydown", (e) => {
+  if (["e", "E", "+", "-", "."].includes(e.key)) e.preventDefault();
+});
+$("cw-port").addEventListener("input", () => {
+  const clean = ComposeForm.cleanPortInput($("cw-port").value);
+  if ($("cw-port").value !== clean) $("cw-port").value = clean;
+  composeState.st.port = clean;
+  cwClearSlot(CW_STEP_ID.app, "port");
+});
+
+$("cw-app-back-btn").addEventListener("click", () => showWizardStep("wiz-step-folders"));
+
+$("cw-app-next-btn").addEventListener("click", async () => {
+  const { st } = composeState;
+  const clientErrs = ComposeForm.clientErrors(st).map((e) => ({ ...e, slot: e.field }));
+  if (clientErrs.length) {
+    cwShowErrors(CW_STEP_ID.app, clientErrs);
+    return;
+  }
+  $("cw-app-error").textContent = "";
+  $("cw-app-next-btn").disabled = true;
+  try {
+    // The database and services aren't known yet; only this step's own
+    // fields are checked (and shown) here.
+    const { spec, map } = cwBuild();
+    const errors = await invoke("validate_compose_spec", { spec });
+    const mine = ComposeForm.mapErrors(errors, map).filter((e) => e.step === "app");
+    if (mine.length) {
+      cwShowErrors(CW_STEP_ID.app, mine);
+      return;
+    }
+    cwShowErrors(CW_STEP_ID.app, []);
+    showWizardStep("wiz-step-needs-db");
+  } catch (err) {
+    $("cw-app-error").textContent = `Couldn't check your answers: ${err}`;
+  } finally {
+    $("cw-app-next-btn").disabled = false;
+  }
+});
+
+// ----- step 3: services & environment (after the existing database steps) -----
+
+function renderComposeServices() {
+  const { st } = composeState;
+  const db = cwDb();
+  ComposeForm.initServices(composeCatalog, st, db && db.engine);
+  cwShowErrors(CW_STEP_ID.services, []);
+
+  $("cw-db-wrap").classList.toggle("hidden", !db);
+  if (db) {
+    const info = composeCatalog.databases.find((d) => d.kind === db.engine);
+    $("cw-db-engine").textContent = info ? info.label : db.engine;
+    $("cw-db-name").textContent = db.database;
+    cwFillSelect($("cw-db-version"), (info ? info.versions : []).map((v) => [v, v]), st.dbVersion);
+    cwFillSelect($("cw-db-preset"), composeCatalog.db_env_presets.map((p) => [p.preset, p.label]), st.dbEnvPreset);
+  }
+
+  const extras = $("cw-extras-list");
+  extras.innerHTML = "";
+  for (const e of composeCatalog.extras) {
+    const cur = st.extras[e.kind];
+    const li = cwEl("li");
+    const row = cwEl("div", "cw-row");
+    const label = cwEl("label");
+    const cb = cwEl("input");
+    cb.type = "checkbox";
+    cb.checked = cur.checked;
+    label.append(cb, document.createTextNode(` ${e.label}`));
+    const sel = cwEl("select");
+    cwFillSelect(sel, e.versions.map((v) => [v, v]), cur.version);
+    sel.disabled = !cur.checked;
+    sel.setAttribute("aria-label", `${e.label} version`);
+    cb.addEventListener("change", () => {
+      cur.checked = cb.checked;
+      sel.disabled = !cb.checked;
+    });
+    sel.addEventListener("change", () => {
+      cur.version = sel.value;
+      cwClearSlot(CW_STEP_ID.services, `extra.${e.kind}`);
+    });
+    row.append(label, sel);
+    const err = cwEl("p", "error field-error");
+    err.dataset.slot = `extra.${e.kind}`;
+    li.append(row, err);
+    extras.appendChild(li);
+  }
+  renderComposeEnvRows();
+  showWizardStep(CW_STEP_ID.services);
+}
+
+function renderComposeEnvRows() {
+  const list = $("cw-env-list");
+  list.innerHTML = "";
+  composeState.st.env.forEach((row, i) => {
+    const li = cwEl("li");
+    const line = cwEl("div", "cw-row");
+    const key = cwEl("input");
+    key.type = "text";
+    key.value = row.key;
+    key.placeholder = "NAME";
+    key.spellcheck = false;
+    key.setAttribute("aria-label", "Variable name");
+    const value = cwEl("input");
+    value.type = "text";
+    value.value = row.value;
+    value.placeholder = "value";
+    value.spellcheck = false;
+    value.setAttribute("aria-label", "Variable value");
+    const rm = cwEl("button", "ghost-btn");
+    rm.type = "button";
+    rm.textContent = "Remove";
+    rm.setAttribute("aria-label", "Remove this variable");
+    key.addEventListener("input", () => {
+      row.key = key.value;
+      cwClearSlot(CW_STEP_ID.services, `env.${i}.key`);
+    });
+    value.addEventListener("input", () => {
+      row.value = value.value;
+      cwClearSlot(CW_STEP_ID.services, `env.${i}.value`);
+    });
+    rm.addEventListener("click", () => {
+      ComposeForm.removeEnvRow(composeState.st, i);
+      renderComposeEnvRows();
+    });
+    line.append(key, value, rm);
+    li.appendChild(line);
+    for (const part of ["key", "value"]) {
+      const err = cwEl("p", "error field-error");
+      err.dataset.slot = `env.${i}.${part}`;
+      li.appendChild(err);
+    }
+    list.appendChild(li);
+  });
+}
+
+$("cw-env-add-btn").addEventListener("click", () => {
+  ComposeForm.addEnvRow(composeState.st);
+  renderComposeEnvRows();
+});
+$("cw-db-version").addEventListener("change", () => {
+  composeState.st.dbVersion = $("cw-db-version").value;
+  cwClearSlot(CW_STEP_ID.services, "database.version");
+});
+$("cw-db-preset").addEventListener("change", () => {
+  composeState.st.dbEnvPreset = $("cw-db-preset").value;
+});
+
+$("cw-services-back-btn").addEventListener("click", backIntoDatabaseSteps);
+
+$("cw-services-next-btn").addEventListener("click", async () => {
+  const button = $("cw-services-next-btn");
+  button.disabled = true;
+  try {
+    const { spec, map } = cwBuild();
+    const mapped = ComposeForm.mapErrors(await invoke("validate_compose_spec", { spec }), map);
+    const step = ComposeForm.firstErrorStep(mapped);
+    if (step === "app") {
+      renderComposeApp();
+      cwShowErrors(CW_STEP_ID.app, mapped.filter((e) => e.step === "app"));
+      showWizardStep(CW_STEP_ID.app);
+      return;
+    }
+    if (step === "services") {
+      cwShowErrors(CW_STEP_ID.services, mapped.filter((e) => e.step === "services"));
+      return;
+    }
+    await showComposeReview(spec, map);
+  } catch (err) {
+    cwShowErrors(CW_STEP_ID.services, [{ slot: "_general", message: `Couldn't check your answers: ${err}` }]);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// ----- step 4: review & test run -----
+
+function cwBasename(p) {
+  return String(p).split(/[\\/]/).filter(Boolean).pop() || String(p);
+}
+
+function cwSyncContinue() {
+  $("cw-continue-btn").disabled = !composeTestIsCurrent();
+}
+
+async function showComposeReview(spec, map) {
+  const cs = composeState;
+  cs.spec = spec;
+  cs.map = map;
+  wizardFolders[0].compose = spec;
+  const dump = wizardFolders[0].needsDb ? wizardFolders[0].dump : null;
+  const status = $("cw-review-status");
+  const box = $("cw-preview");
+  status.textContent = "Generating…";
+  status.className = "hint-inline";
+  box.innerHTML = "";
+  $("cw-test-btn").disabled = true;
+  $("cw-fix-btn").classList.add("hidden");
+  $("cw-test-result").innerHTML = "";
+  $("cw-test-progress").classList.add("hidden");
+  cwSyncContinue();
+  showWizardStep("wiz-step-compose-review");
+  try {
+    const p = await invoke("preview_compose", {
+      spec,
+      folderLabel: wizFolderLabel(wizardFolders[0].path),
+      dump: dump ? { engine: dump.engine, file_name: cwBasename(dump.filePath) } : null,
+    });
+    if (composeState !== cs) return;
+    status.textContent = "";
+    box.append(cwEl("p", "hint", `Once running, your app is reachable on port ${p.host_port} on this computer.`));
+    if (p.rewrites && p.rewrites.length) {
+      box.append(cwEl("p", "hint", "To make this work on another computer we changed:"));
+      const ul = cwEl("ul");
+      for (const r of p.rewrites) ul.append(cwEl("li", "", `We changed ${r.key} from ${r.from} to ${r.to}`));
+      box.append(ul);
+    }
+    if (p.notes && p.notes.length) {
+      const ul = cwEl("ul");
+      for (const n of p.notes) ul.append(cwEl("li", "", n));
+      box.append(ul);
+    }
+    const addFile = (name, contents) => {
+      const d = cwEl("details");
+      d.append(cwEl("summary", "", name), cwEl("pre", "cw-log", contents));
+      box.append(d);
+    };
+    addFile("docker-compose.yml (what will run)", p.compose_yaml);
+    for (const f of p.files || []) addFile(f.path, f.contents);
+    $("cw-test-btn").disabled = false;
+    if (cs.testedKey && composeTestIsCurrent()) {
+      $("cw-test-result").append(cwEl("p", "result", "This setup already passed a test run with these answers. You can continue."));
+    } else if (cs.testedKey) {
+      $("cw-test-result").append(cwEl("p", "hint", "Your answers changed since the last successful test run — run it again to continue."));
+    }
+    cwSyncContinue();
+  } catch (err) {
+    if (composeState !== cs) return;
+    status.textContent = `Couldn't generate the files: ${err}`;
+    status.className = "hint-inline error-inline";
+    $("cw-fix-btn").classList.remove("hidden");
+  }
+}
+
+$("cw-test-btn").addEventListener("click", async () => {
+  const cs = composeState;
+  const folder = buildWizardFoldersPayload([wizardFolders[0]])[0]; // { path, dump, compose }
+  const key = ComposeForm.testKey(cs.spec, folder.dump);
+  const log = $("cw-test-progress");
+  const result = $("cw-test-result");
+  const buttons = ["cw-test-btn", "cw-review-back-btn", "cw-continue-btn", "cw-fix-btn"].map($);
+  cs.testing = true;
+  buttons.forEach((b) => (b.disabled = true));
+  $("cw-fix-btn").classList.add("hidden");
+  result.innerHTML = "";
+  log.textContent = "";
+  log.classList.remove("hidden");
+  result.append(cwEl("p", "hint-inline", "Testing in Podman — building the image and starting your app. This can take a minute or two…"));
+  let res;
+  try {
+    res = await invoke("test_run_compose", { folder });
+  } catch (err) {
+    res = { ok: false, error: String(err), output_tail: "", notes: [] };
+  }
+  if (composeState !== cs) return; // the wizard was cancelled meanwhile
+  cs.testing = false;
+  buttons.forEach((b) => (b.disabled = false));
+  result.innerHTML = "";
+  cs.testedKey = res.ok ? key : null;
+  if (res.ok) {
+    result.append(cwEl("p", "result", `Test run succeeded — your app started${res.host_port ? ` and answered on port ${res.host_port}` : ""}.`));
+    if (res.notes && res.notes.length) {
+      const ul = cwEl("ul");
+      for (const n of res.notes) ul.append(cwEl("li", "", n));
+      result.append(ul);
+    }
+    log.classList.add("hidden");
+  } else {
+    result.append(cwEl("p", "error", res.error || "The test run failed."));
+    if (res.output_tail) result.append(cwEl("pre", "cw-log", res.output_tail));
+    $("cw-fix-btn").classList.remove("hidden");
+  }
+  cwSyncContinue();
+});
+
+$("cw-fix-btn").addEventListener("click", () => {
+  renderComposeApp();
+  showWizardStep(CW_STEP_ID.app);
+});
+$("cw-review-back-btn").addEventListener("click", renderComposeServices);
+
+$("cw-continue-btn").addEventListener("click", () => {
+  if (composeTestIsCurrent()) renderWizardReadyStep();
+  else cwSyncContinue();
+});
+
 // ---------- final step: summary + real Send ----------
 
 function renderWizardReadyStep() {
@@ -1834,6 +2312,7 @@ function renderWizardReadyStep() {
     if (!f.needsDb) status = "no database";
     else if (f.dump) status = `database: ${escapeHtml(f.dump.schema)} (${escapeHtml(f.dump.filePath)})`;
     else status = "database: none selected";
+    if (f.compose) status += " — docker-compose generated and test-run OK";
     li.innerHTML = `<span class="mono">${escapeHtml(wizFolderLabel(f.path))}</span> — ${status}`;
     ul.appendChild(li);
   }
@@ -1841,6 +2320,21 @@ function renderWizardReadyStep() {
 }
 
 $("wiz-ready-back-btn").addEventListener("click", () => {
+  if (composeActive) {
+    showWizardStep("wiz-step-compose-review");
+    return;
+  }
+  backIntoDatabaseSteps();
+});
+
+// Where the wizard goes once the database step(s) are done.
+function afterDatabaseSteps() {
+  if (composeActive) renderComposeServices();
+  else renderWizardReadyStep();
+}
+
+// "Back" from whatever follows the database steps: reopen them from the end.
+function backIntoDatabaseSteps() {
   const anyDb = wizardFolders.some((f) => f.needsDb);
   if (!anyDb) {
     showWizardStep("wiz-step-needs-db");
@@ -1856,7 +2350,7 @@ $("wiz-ready-back-btn").addEventListener("click", () => {
     wizardFolderIndex = wizardFolders.length - 1;
   }
   advanceDbWizard();
-});
+}
 
 // Round 24: where the magic-link fallback page (web/) is actually hosted -
 // see .github/workflows/pages.yml and the README's "Magic link" section
@@ -2046,6 +2540,8 @@ function resetSendWizard() {
   wizardSharedResolved = null;
   wizardSelectedDevice = null;
   wizardTargetSession = null;
+  composeActive = false;
+  composeState = null;
   $("wiz-nearby-selected").classList.add("hidden");
   renderWizardFolderList();
   $("wiz-folders-error").textContent = "";
@@ -2440,6 +2936,10 @@ $("send-btn").addEventListener("click", async () => {
   }
   const spec = readWizardTarget(errorEl);
   if (!spec) return;
+  if (composeActive && !composeTestIsCurrent()) {
+    errorEl.textContent = "The generated setup hasn't passed a test run for your current answers. Go back to the test run step.";
+    return;
+  }
 
   $("send-btn").disabled = true;
   try {

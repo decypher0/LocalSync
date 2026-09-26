@@ -38,6 +38,9 @@ function buildWizardFoldersPayload(wizardFolders) {
   return wizardFolders.map((f) => ({
     path: f.path,
     dump: f.needsDb && f.dump ? { schema: f.dump.schema, file_path: f.dump.filePath, engine: f.dump.engine } : null,
+    // The compose wizard's spec (a project with no compose file of its own),
+    // only when there is one - the key is absent otherwise.
+    ...(f.compose ? { compose: f.compose } : {}),
   }));
 }
 
