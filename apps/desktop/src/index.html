@@ -304,6 +304,7 @@
        whenever there are zero sessions - Send/Receive's own "start
        something new" UI is the only thing visible then, same as before
        this round. ---- -->
+  <p id="session-notice" class="error hidden"></p>
   <div id="session-tabs-bar" class="session-tabs-bar hidden">
     <div id="session-tabs-list" class="session-tabs-list"></div>
   </div>
@@ -350,47 +351,45 @@
       <p id="session-detail-empty" class="hint hidden">Nothing to show yet for this session.</p>
     </div>
 
+    <!-- ---- A send session is a project-scoped workspace, not a connection
+         (see project_session.rs). This view shows what it holds - the
+         prepared artifact, every device it has been sent to (each with its
+         own last-received marker), and the short-lived transfers made from
+         it - and everything is rendered from the session object by
+         renderSendSessionDetail. ---- -->
     <div id="session-send-view" class="hidden">
-      <div id="send-code-wrap" class="room-code-wrap hidden">
-        <span class="hint">Share this code with the receiver:</span>
-        <code id="send-room-code-display" class="room-code-display"></code>
-        <span class="inline-row send-code-actions">
-          <button id="copy-code-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-copy"></use></svg> Copy code</button>
-          <button id="copy-link-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-link"></use></svg> Copy link</button>
-          <span id="copy-status" class="hint-inline"></span>
+      <p id="send-artifact-line" class="hint"></p>
+      <span class="inline-row">
+        <button id="send-new-device-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-send"></use></svg> Send to another device…</button>
+      </span>
+
+      <h3>Devices this project has been sent to</h3>
+      <p id="send-devices-empty" class="hint">
+        None yet. Once a transfer completes, the device is remembered here, so you can push
+        an update to it later without selecting the project again.
+      </p>
+      <ul id="send-devices-list" class="ports-list"></ul>
+      <span class="inline-row">
+        <button id="send-push-btn" class="ghost-btn" type="button" disabled><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Push update to selected</button>
+        <span id="send-push-status" class="hint-inline"></span>
+      </span>
+
+      <h3>Transfers</h3>
+      <p id="send-transfers-empty" class="hint">No transfers yet.</p>
+      <div id="send-transfers"></div>
+
+      <div class="room-code-wrap">
+        <span id="send-save-status" class="hint"></span>
+        <span class="inline-row">
+          <button id="send-save-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-save"></use></svg> Save this session</button>
+          <button id="send-forget-btn" class="ghost-btn hidden" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Remove saved copy</button>
         </span>
-        <p id="send-code-expiry" class="hint-inline"></p>
+        <p class="hint">
+          Saving stores this session on this computer's disk - the project folder path, its
+          database settings, and the devices you've sent it to - so you can open it again
+          later. An unsaved session is discarded when it's closed.
+        </p>
       </div>
-
-      <!-- ---- Round 30 goal A: Retry - an expired code or a failed attempt
-           both leave the exact same folder/database plan ready to go again;
-           this re-issues a fresh room code and re-runs the transfer on
-           *this* tab, instead of "Start a new send…" spawning a second,
-           duplicate tab for the same project (the real bug this round
-           found). Shown by renderSendSessionDetail's own canRetry check. ---- -->
-      <div id="send-retry-wrap" class="room-code-wrap hidden">
-        <span class="badge-expired"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> This send needs a new code</span>
-        <button id="send-retry-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Retry</button>
-        <span id="send-retry-status" class="hint-inline"></span>
-      </div>
-
-      <!-- ---- Goal 4: earliest, most-visible sign that a receiver has
-           actually shown up - fires the moment the WebRTC handshake
-           completes (the "receiver-connecting" event), well before the
-           transfer itself finishes and long before session-detail-people-wrap
-           (in the collapsed popover above, and only populated after a full
-           transfer completes) would ever show anyone. Sits right in the main
-           session view, not behind a click. ---- -->
-      <div id="send-receiver-status-wrap" class="room-code-wrap hidden">
-        <span class="badge-connected"><svg class="icon"><use href="#icon-circle-check"></use></svg> Receiver connected — sending…</span>
-      </div>
-
-      <div id="send-progress-wrap" class="progress-wrap hidden">
-        <div class="progress-track"><div id="send-progress-bar" class="progress-bar"></div></div>
-        <p id="send-progress-label" class="hint"></p>
-      </div>
-      <p id="send-result" class="result"></p>
-      <p id="send-error" class="error"></p>
     </div>
 
     <div id="session-receive-view" class="hidden">
@@ -429,10 +428,6 @@
           inspection — clicking Run is what starts sandboxed containers.
         </p>
 
-        <span class="inline-row ask-update-row">
-          <button id="ask-update-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Ask for update</button>
-          <span id="ask-update-status" class="hint"></span>
-        </span>
 
         <div class="manifest-card">
           <div class="manifest-row"><span class="k">Project</span><span id="m-project" class="v"></span></div>
@@ -489,30 +484,10 @@
   <section id="tab-send" class="tab-panel active">
     <h2>Share a project</h2>
 
-    <!-- ---- Previously connected: receivers still connected from earlier
-         this session - reuse that open connection directly instead of
-         generating and re-sharing a fresh room code. Session-scoped, not a
-         persisted history: a receiver has no identity of its own for this
-         app to recognize across restarts (unlike round 10's sender-identity
-         pairing on the Receive tab, below) - labelled accordingly rather
-         than overstating what this is. ---->
-    <div id="receivers-wrap" class="room-code-wrap hidden">
-      <span class="inline-row receivers-header">
-        <span class="hint"><strong>Previously connected</strong> (still connected this session)</span>
-        <span class="inline-row">
-          <button id="receivers-refresh-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Refresh</button>
-          <span id="receivers-refresh-status" class="hint-inline"></span>
-        </span>
-      </span>
-      <ul id="receivers-list" class="ports-list"></ul>
-      <p id="receivers-error" class="error"></p>
-      <p class="hint">Or start fresh, for someone new:</p>
-    </div>
-
     <!-- Round 20 goal 4: the trigger for the modal wizard below - the main
-         Send tab now only ever shows this button, the previously-connected
-         roster above, and (once a send is actually underway) the room
-         code/progress/result further down; everything from choosing a
+         Send tab now only ever shows this button (each project being sent
+         is a session tab above - see the session model in app.js);
+         everything from choosing a
          transfer mode through the full database wizard happens inside the
          overlay, never as inline page content. -->
     <button id="start-send-wizard-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-send"></use></svg> Start a new send…</button>
@@ -527,6 +502,29 @@
          17/22) -> a final summary. Clicking the real Send button in the
          last step closes this overlay and reveals the room-code/progress
          UI already inline on the main Send tab, further down. -->
+    <!-- ---- Save this session? An explicit choice, never automatic: shown
+         when a send session is closed (or the app is quit) unsaved. ---- -->
+    <div id="save-session-overlay" class="wizard-overlay hidden">
+      <div class="wizard-modal" role="dialog" aria-modal="true" aria-label="Save this session?">
+        <div class="wizard-modal-header">
+          <span id="save-session-title" class="wizard-progress"></span>
+        </div>
+        <div class="wizard-modal-body">
+          <p id="save-session-note" class="hint"></p>
+          <p>
+            Saving keeps this session on this computer's disk - the project folder path, its
+            database settings, and which devices you've sent it to - so you can open it again
+            later. If you don't save, it's discarded once it's closed.
+          </p>
+          <span class="inline-row">
+            <button id="save-session-save-btn" class="primary-btn" type="button">Save session</button>
+            <button id="save-session-discard-btn" class="ghost-btn" type="button">Don't save</button>
+            <button id="save-session-cancel-btn" class="ghost-btn" type="button">Cancel</button>
+          </span>
+        </div>
+      </div>
+    </div>
+
     <div id="send-wizard-overlay" class="wizard-overlay hidden">
       <div class="wizard-modal" role="dialog" aria-modal="true" aria-label="Send wizard">
         <div class="wizard-modal-header">
@@ -873,6 +871,7 @@
        app.js, which calls its one exported function directly as a global,
        same as every other script here (no bundler, no modules). -->
   <script src="wizard-payload.js"></script>
+  <script src="session-model.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
