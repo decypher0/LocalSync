@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::project_session::ProjectSession;
+use crate::received_session::ReceivedSession;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionHistoryEntry {
@@ -39,6 +40,13 @@ pub struct SessionHistoryEntry {
     /// and timestamps only) still loads, as `None`.
     #[serde(default)]
     pub project: Option<ProjectSession>,
+    /// The saved received session itself, for an entry the user explicitly
+    /// saved on the receiving end. Parallel to `project` above - an entry
+    /// carries at most one of the two, distinguished by `kind`. `#[serde(
+    /// default)]` for the same reason as `project`: every entry written
+    /// before this existed still loads, as `None`.
+    #[serde(default)]
+    pub received: Option<ReceivedSession>,
 }
 
 const FILE_NAME: &str = "session-history.json";
@@ -77,6 +85,17 @@ pub fn save_project(session: &ProjectSession) -> Result<(), String> {
     save_project_in(&default_dir()?, session)
 }
 
+/// The saved received session stored under `id`, if the user saved one.
+pub fn find_received(id: &str) -> Result<Option<ReceivedSession>, String> {
+    find_received_in(&default_dir()?, id)
+}
+
+/// "Save this session" - receiver side: stores the whole `ReceivedSession` so
+/// it can be reopened (and, via `ls_containers::run_existing`, re-run) later.
+pub fn save_received(session: &ReceivedSession) -> Result<(), String> {
+    save_received_in(&default_dir()?, session)
+}
+
 fn load_in(dir: &Path) -> Result<Vec<SessionHistoryEntry>, String> {
     let path = dir.join(FILE_NAME);
     match std::fs::read(&path) {
@@ -96,12 +115,32 @@ fn save_project_in(dir: &Path, session: &ProjectSession) -> Result<(), String> {
             started_at: session.created_at.clone(),
             ended_at: None,
             project: Some(session.clone()),
+            received: None,
         },
     )
 }
 
 fn find_project_in(dir: &Path, id: &str) -> Result<Option<ProjectSession>, String> {
     Ok(load_in(dir)?.into_iter().find(|e| e.id == id).and_then(|e| e.project))
+}
+
+fn save_received_in(dir: &Path, session: &ReceivedSession) -> Result<(), String> {
+    upsert_in(
+        dir,
+        SessionHistoryEntry {
+            id: session.id.clone(),
+            kind: "receive".to_string(),
+            title: session.title.clone(),
+            started_at: session.created_at.clone(),
+            ended_at: None,
+            project: None,
+            received: Some(session.clone()),
+        },
+    )
+}
+
+fn find_received_in(dir: &Path, id: &str) -> Result<Option<ReceivedSession>, String> {
+    Ok(load_in(dir)?.into_iter().find(|e| e.id == id).and_then(|e| e.received))
 }
 
 fn remove_in(dir: &Path, id: &str) -> Result<(), String> {
@@ -147,7 +186,21 @@ mod tests {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             ended_at: if ended { Some("2026-01-01T00:05:00Z".to_string()) } else { None },
             project: None,
+            received: None,
         }
+    }
+
+    fn received_session(id: &str) -> ReceivedSession {
+        let mut s = ReceivedSession::new(
+            id.to_string(),
+            "xusom-admin".to_string(),
+            "abc123".to_string(),
+            "xusom-admin@deadbeef".to_string(),
+            "deadbeef".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        s.record_run("/work".to_string(), "/work/xusom-admin-deadbeef".to_string());
+        s
     }
 
     fn project_session(id: &str) -> ProjectSession {
@@ -275,5 +328,65 @@ mod tests {
         let loaded = load_in(dir.path()).unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(loaded[0].project.is_none());
+        assert!(loaded[0].received.is_none(), "an entry written before `received` existed still loads");
+    }
+
+    // ---------- received sessions (receiver-side saves) ----------
+
+    #[test]
+    fn missing_received_file_loads_as_none_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find_received_in(dir.path(), "r1").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_saved_received_session_comes_back_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = received_session("r1");
+        save_received_in(dir.path(), &session).unwrap();
+        assert_eq!(find_received_in(dir.path(), "r1").unwrap(), Some(session));
+    }
+
+    #[test]
+    fn saving_a_received_session_again_updates_in_place_not_a_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = received_session("r1");
+        save_received_in(dir.path(), &session).unwrap();
+        session.record_update("xusom-admin@cafef00d".to_string(), "cafef00d".to_string(), String::new(), "2026-01-02T00:00:00Z".to_string());
+        save_received_in(dir.path(), &session).unwrap();
+        assert_eq!(load_in(dir.path()).unwrap().len(), 1, "the same session id must update, not accumulate a second row");
+        let reloaded = find_received_in(dir.path(), "r1").unwrap().unwrap();
+        assert_eq!(reloaded.snapshot_id, "xusom-admin@cafef00d");
+        assert_eq!(reloaded.git_commit, "cafef00d");
+    }
+
+    #[test]
+    fn deleting_a_saved_received_session_removes_it_and_leaves_others() {
+        let dir = tempfile::tempdir().unwrap();
+        save_received_in(dir.path(), &received_session("r1")).unwrap();
+        save_received_in(dir.path(), &received_session("r2")).unwrap();
+        remove_in(dir.path(), "r1").unwrap();
+        assert!(find_received_in(dir.path(), "r1").unwrap().is_none());
+        assert!(find_received_in(dir.path(), "r2").unwrap().is_some());
+    }
+
+    #[test]
+    fn received_sessions_share_the_same_max_entries_cap_as_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_ENTRIES + 10) {
+            save_received_in(dir.path(), &received_session(&format!("r-{i}"))).unwrap();
+        }
+        let loaded = load_in(dir.path()).unwrap();
+        assert_eq!(loaded.len(), MAX_ENTRIES);
+        assert!(!loaded.iter().any(|e| e.id == "r-0"));
+        assert!(loaded.iter().any(|e| e.id == format!("r-{}", MAX_ENTRIES + 9)));
+    }
+
+    #[test]
+    fn a_saved_received_session_has_kind_receive() {
+        let dir = tempfile::tempdir().unwrap();
+        save_received_in(dir.path(), &received_session("r1")).unwrap();
+        let loaded = load_in(dir.path()).unwrap();
+        assert_eq!(loaded[0].kind, "receive");
     }
 }

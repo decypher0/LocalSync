@@ -462,6 +462,41 @@
         <p id="run-error" class="error"></p>
       </div>
 
+      <!-- ---- A reopened saved receive session: "resume", not "review
+           again" - the diff was already accepted before it was ever saved,
+           so there's nothing to re-review, only Run/Stop and the arm
+           toggle. ---- -->
+      <div id="resume-panel" class="hidden">
+        <h2>Resume this project</h2>
+        <p class="hint">
+          Already reviewed and accepted before — there's nothing new to review. Running it
+          again unpacks and starts it the same way it did the first time.
+        </p>
+        <div class="manifest-card">
+          <div class="manifest-row"><span class="k">Project</span><span id="resume-project" class="v"></span></div>
+          <div class="manifest-row"><span class="k">Commit</span><span id="resume-commit" class="v mono"></span></div>
+          <div class="manifest-row"><span class="k">Last received</span><span id="resume-last-received" class="v"></span></div>
+        </div>
+        <p id="resume-already-running-hint" class="hint hidden">
+          This session was still running when it was last saved — Run below starts it fresh
+          rather than reattaching to that one.
+        </p>
+        <label>
+          Work directory (where the sandbox gets unpacked)
+          <input id="resume-work-dir" type="text" value="/tmp/localsync-work" />
+        </label>
+        <button id="resume-run-btn" class="danger-btn" type="button"><svg class="icon"><use href="#icon-play"></use></svg> Run</button>
+
+        <div id="resume-run-progress-wrap" class="progress-wrap hidden">
+          <div class="run-status">
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="resume-run-progress-label">Starting containers…</span>
+          </div>
+          <pre id="resume-run-log" class="run-log hidden"></pre>
+        </div>
+        <p id="resume-run-error" class="error"></p>
+      </div>
+
       <!-- ---- Running session status ---- -->
       <div id="session-panel" class="hidden">
         <h2>Running</h2>
@@ -476,6 +511,49 @@
         <ul id="s-ports" class="ports-list"></ul>
         <button id="stop-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-stop-circle"></use></svg> Stop</button>
         <p id="stop-error" class="error"></p>
+      </div>
+
+      <!-- ---- "Ready for update": arms this session so a future push from
+           the sender, over discovery, lands right back on this same tab for
+           review instead of creating a new one. Gated on the session having
+           actually run at least once - see renderReceiveArmControls. ---- -->
+      <div id="receive-arm-wrap" class="room-code-wrap hidden">
+        <span class="inline-row receivers-header">
+          <label class="radio-label">
+            <input type="checkbox" id="receive-arm-toggle" />
+            Ready for update
+          </label>
+          <span id="receive-arm-badge" class="badge-connected hidden">
+            <svg class="icon"><use href="#icon-circle-check"></use></svg> Armed
+          </span>
+        </span>
+        <p class="hint">
+          When armed, a push the sender sends to this same device lands right back on this
+          session for review — no new tab, no re-pasting a code.
+          <strong>This only works if this device is discoverable and the sender reaches you via
+          discovery</strong> — a session received from a one-off pasted code has no persistent
+          address for a future push to find automatically.
+        </p>
+        <p id="receive-arm-discoverable-hint" class="hint-inline"></p>
+        <p id="receive-arm-error" class="error"></p>
+      </div>
+
+      <!-- ---- Save/discard this receive session - same idea as the send
+           side's own save-session-overlay/send-save-btn, just for a received
+           project. Always visible once there's actually something to save
+           (a snapshot has been reviewed at least once), regardless of which
+           panel above is currently showing. ---- -->
+      <div id="receive-save-wrap" class="room-code-wrap hidden">
+        <span id="receive-save-status" class="hint"></span>
+        <span class="inline-row">
+          <button id="receive-save-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-save"></use></svg> Save this session</button>
+          <button id="receive-forget-btn" class="ghost-btn hidden" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Remove saved copy</button>
+        </span>
+        <p class="hint">
+          Saving keeps this received project on this computer's disk - so you can reopen and
+          run it again later, from Session history. An unsaved session is discarded when it's
+          closed.
+        </p>
       </div>
     </div>
   </section>
