@@ -892,4 +892,56 @@ mod tests {
         assert_eq!(plain.get("own-dockerfile-app/source/Dockerfile").map(|b| b.as_slice()), Some(&b"FROM openjdk:8-jdk"[..]));
         assert!(!plain.contains_key("own-dockerfile-app/source/Dockerfile.original"));
     }
+
+    /// The real project is a subfolder of a larger repo: `.git` at the parent,
+    /// `pom.xml` one level down, no `.git` of its own. Selecting the subfolder
+    /// must package only its files, with diffs limited to it and relative to
+    /// it, using the parent repo's history.
+    #[test]
+    fn a_subfolder_of_a_larger_repo_is_snapshotted_as_its_own_project() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init"]);
+        fs::write(root.join("README.md"), "monorepo
+").unwrap();
+        fs::create_dir_all(root.join("xusom-admin/src")).unwrap();
+        fs::write(root.join("xusom-admin/pom.xml"), "<project/>
+").unwrap();
+        fs::write(root.join("xusom-admin/src/App.java"), "class App {}
+").unwrap();
+        fs::create_dir_all(root.join("other-service")).unwrap();
+        fs::write(root.join("other-service/package.json"), "{}
+").unwrap();
+        commit_all(root, "init");
+        let sub = root.join("xusom-admin");
+        assert!(!sub.join(".git").exists());
+
+        let first = create_snapshot(&sub, None).unwrap();
+        let files = unpack(&first.payload);
+        let sources: Vec<&String> = files.keys().filter(|k| k.starts_with("source/")).collect();
+        assert!(files.contains_key("source/pom.xml"), "{sources:?}");
+        assert!(files.contains_key("source/src/App.java"), "{sources:?}");
+        assert!(
+            sources.iter().all(|k| !k.contains("README.md") && !k.contains("other-service")),
+            "only the selected folder is the project: {sources:?}"
+        );
+        let stat: Vec<DiffStatEntry> = serde_json::from_slice(files.get("diff_stat.json").unwrap()).unwrap();
+        let mut paths: Vec<&str> = stat.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["pom.xml", "src/App.java"], "diff limited to, and relative to, the folder");
+
+        // History comes from the parent repo: a later change elsewhere in the
+        // repo is not part of this project's diff; a change inside it is.
+        fs::write(root.join("README.md"), "monorepo v2
+").unwrap();
+        fs::write(sub.join("src/App.java"), "class App { int v = 2; }
+").unwrap();
+        commit_all(root, "second");
+        let second = create_snapshot(&sub, Some(&first.manifest.git_commit)).unwrap();
+        let files2 = unpack(&second.payload);
+        let stat2: Vec<DiffStatEntry> = serde_json::from_slice(files2.get("diff_stat.json").unwrap()).unwrap();
+        assert_eq!(stat2.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), vec!["src/App.java"]);
+        let patch = String::from_utf8(files2.get("diff.patch").unwrap().clone()).unwrap();
+        assert!(patch.contains("App.java") && !patch.contains("README"), "{patch}");
+    }
 }

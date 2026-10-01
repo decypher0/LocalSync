@@ -55,9 +55,10 @@ pub async fn inspect_project(folder_path: String) -> ProjectInspection {
 }
 
 fn inspect(folder: &Path) -> ProjectInspection {
-    // A snapshot needs the folder to be a repo root of its own, so ".git"
-    // there - not "some parent is a repo" - is what "is a git repo" means.
-    let is_git_repo = folder.join(".git").exists();
+    // The folder may be the repo root or any folder inside a repo (`.git`
+    // further up): the snapshot takes the folder's own files and the nearest
+    // repo's commits. `.git` may be a file (worktrees, submodules).
+    let is_git_repo = folder.ancestors().any(|d| d.join(".git").exists());
     ProjectInspection {
         has_compose: folder.join("docker-compose.yml").is_file(),
         is_git_repo,
@@ -438,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_does_not_treat_a_subfolder_of_a_repo_as_a_repo() {
+    fn inspect_accepts_a_subfolder_of_a_repo() {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q"]);
         std::fs::write(dir.path().join("f"), "x").unwrap();
@@ -447,7 +448,11 @@ mod tests {
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         let i = inspect(&sub);
-        assert!(!i.is_git_repo && !i.has_commits, "{i:?}");
+        assert!(i.is_git_repo && i.has_commits, "{i:?}");
+
+        // A plain folder outside any repo is still not one.
+        let outside = tempfile::tempdir().unwrap();
+        assert!(!inspect(outside.path()).is_git_repo);
     }
 
     #[test]

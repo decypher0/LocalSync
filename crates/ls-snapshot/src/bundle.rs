@@ -150,7 +150,7 @@ pub fn bundle_project_with(
     let diff_stat_json = serde_json::to_vec_pretty(&diff_stat)?;
 
     let diff_patch = match parent_commit {
-        Some(parent) => filter_noise_from_patch(&git_text(project_root, &["diff", &format!("{parent}..HEAD")])?),
+        Some(parent) => filter_noise_from_patch(&git_text(project_root, &["diff", "--relative", &format!("{parent}..HEAD")])?),
         None => String::new(),
     };
 
@@ -250,8 +250,13 @@ fn build_diff_stat(project_root: &Path, parent_commit: Option<&str>) -> Result<V
     // --no-renames: diff_stat's change_type is only added/modified/deleted
     // (no "renamed" variant), so a rename is simplest as a delete+add pair
     // rather than teaching the parser `old => new` path syntax.
-    let numstat = git_text(project_root, &["diff", "--no-renames", "--numstat", base, "HEAD"])?;
-    let name_status = git_text(project_root, &["diff", "--no-renames", "--name-status", base, "HEAD"])?;
+    // --relative: `project_root` may be a subfolder of a larger repo (`.git`
+    // further up). git diff always covers the whole repo; this limits it to
+    // the selected folder and makes paths relative to it, matching what `git
+    // archive` (which already only takes the current folder) ships. At a repo
+    // root it changes nothing.
+    let numstat = git_text(project_root, &["diff", "--relative", "--no-renames", "--numstat", base, "HEAD"])?;
+    let name_status = git_text(project_root, &["diff", "--relative", "--no-renames", "--name-status", base, "HEAD"])?;
 
     let mut status_map: HashMap<String, &str> = HashMap::new();
     for line in name_status.lines() {
