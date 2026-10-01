@@ -163,6 +163,8 @@ mod linux_impl {
 // never swallow a command's real error text, and end with podman machine
 // actually running and podman-compose reachable. ---
 
+pub mod setup;
+
 #[cfg(target_os = "windows")]
 mod windows_impl;
 

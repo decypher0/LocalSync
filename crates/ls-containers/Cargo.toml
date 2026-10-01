@@ -9,6 +9,7 @@ ls-snapshot = { path = "../ls-snapshot" }
 ls-security = { path = "../ls-security" }
 tokio = { version = "1", features = ["process", "fs", "rt-multi-thread", "macros", "io-util"] }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 # Round 36: matches ls-snapshot's own switch from gzip to zstd for
 # `Snapshot.payload` - unpack_payload() extracts that exact payload to run
