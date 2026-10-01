@@ -52,6 +52,17 @@ pub enum BuildTool {
     GoBuild,
 }
 
+/// How a Java app is deployed. Serializes as `"jar"` / `"war"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JavaPackaging {
+    /// A runnable jar, started with the run command (`java -jar /app/app.jar`).
+    #[default]
+    Jar,
+    /// A `.war` deployed into Tomcat as its root app.
+    War,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DbEngine {
@@ -126,6 +137,15 @@ pub struct ComposeSpec {
     /// makes `java -jar` unambiguous; ignored for other runtimes.
     #[serde(default)]
     pub artifact_path: Option<String>,
+    /// Java only: a runnable jar (the default) or a WAR deployed in Tomcat.
+    /// Ignored for other runtimes. `#[serde(default)]` keeps specs saved
+    /// before this existed loading as jar apps.
+    #[serde(default)]
+    pub java_packaging: JavaPackaging,
+    /// For a WAR: a Tomcat version from the catalog ("9.0" for `javax.*` apps,
+    /// "10.1" for `jakarta.*` apps). Required for a WAR, ignored otherwise.
+    #[serde(default)]
+    pub tomcat_version: Option<String>,
     #[serde(default)]
     pub database: Option<DatabaseSpec>,
     #[serde(default)]

@@ -2395,6 +2395,11 @@ On a real desktop build with Podman available:
    succeed on another port and say so.
 7. After a successful test run, send it; on the receiver, Run should behave
    the same as the test run did. Nothing is written into the sender's folder.
+8. WAR project (pom.xml with `<packaging>war</packaging>`): choosing Java
+   should preselect "WAR deployed on Tomcat" with a Tomcat version (9 for
+   javax.*, 10.1 for jakarta.* / Spring Boot 3) and `target/*.war`. The test
+   run should serve the app at `http://localhost:<port>/` (the WAR is the root
+   app, not `/<name>/`). Java 8 offers only Tomcat 9.
 
 Known limits: Node has no build step (put it in the run command); Gradle's
 `build/libs/*.jar` can match a `-plain.jar` too (set an exact name); a MongoDB

@@ -9,7 +9,7 @@
 
 use serde_yaml::{Mapping, Value};
 
-use crate::catalog::{db_info, db_service_name, extra_info, extra_service_name};
+use crate::catalog::{db_info, db_service_name, extra_info, extra_service_name, TOMCAT_RUN_COMMAND};
 use crate::spec::*;
 
 /// Fixed root password for MySQL (throwaway, like [`DB_PASSWORD`]).
@@ -152,18 +152,45 @@ fn artifact_check(artifact: &str) -> String {
     let parts: Vec<&str> = artifact.split('/').collect();
     let fixed: Vec<&str> = parts[..parts.len() - 1].iter().copied().take_while(|c| !c.contains(['*', '?', '['])).collect();
     let dir = if fixed.is_empty() { ".".to_string() } else { fixed.join("/") };
+    let kind = if artifact.ends_with(".war") { "war" } else { "jar" };
     let lines = [
         format!("RUN set -- /src/{artifact}; if [ ! -e \"$1\" ] || [ $# -gt 1 ]; then"),
         format!("    if [ ! -e \"$1\" ]; then echo 'LocalSync: no file matches the build-output path {artifact}';"),
         format!("    else echo \"LocalSync: the build-output path {artifact} matches $# files; it must match exactly one:\"; printf '  %s\\n' \"$@\"; fi;"),
         format!("    echo 'LocalSync: contents of {dir}/ after the build:';"),
         format!("    if [ -d '/src/{dir}' ]; then (cd '/src/{dir}' && find . -maxdepth 2 | sort | head -n 40); else echo '  ({dir}/ does not exist)'; fi;"),
-        "    echo 'LocalSync: jars the build produced anywhere in the project:';".to_string(),
-        "    (cd /src && find . -name '*.jar' | sort | head -n 20);".to_string(),
-        "    echo 'LocalSync: set the build-output path in the wizard to the jar to run, e.g. <module>/target/<name>.jar';".to_string(),
+        format!("    echo 'LocalSync: {kind} files the build produced anywhere in the project:';"),
+        format!("    (cd /src && find . -name '*.{kind}' | sort | head -n 20);"),
+        format!("    echo 'LocalSync: set the build-output path in the wizard to the one to run, e.g. <module>/target/<name>.{kind}';"),
         "    exit 1; fi".to_string(),
     ];
     format!("{}\n", lines.join(" \\\n"))
+}
+
+/// The WAR launcher's file name in the build context (next to the generated
+/// Dockerfile; copied into the image as `/usr/local/bin/localsync-tomcat`).
+pub const TOMCAT_LAUNCHER_NAME: &str = ".localsync-tomcat.sh";
+
+/// Starts Tomcat from a fresh writable copy under /tmp. The receiver's sandbox
+/// makes the root filesystem read-only (only /tmp is writable), but Tomcat
+/// writes logs, unpacks the WAR and compiles JSPs at run time - so
+/// CATALINA_BASE moves to /tmp while CATALINA_HOME (the binaries) stays put.
+/// The HTTP connector is set to the app's port so the wizard's port means
+/// what it says; the shutdown port is disabled.
+fn tomcat_launcher(port: u16) -> String {
+    format!(
+        "#!/bin/sh
+         set -e
+         B=/tmp/tomcat
+         rm -rf \"$B\"
+         mkdir -p \"$B/logs\" \"$B/temp\" \"$B/work\" \"$B/webapps\"
+         cp -r /usr/local/tomcat/conf \"$B/conf\"
+         cp /usr/local/tomcat/webapps/ROOT.war \"$B/webapps/ROOT.war\"
+         sed -i -e 's/port=\"8080\"/port=\"{port}\"/' -e 's/port=\"8005\"/port=\"-1\"/' \"$B/conf/server.xml\"
+         export CATALINA_BASE=\"$B\" CATALINA_TMPDIR=\"$B/temp\"
+         exec /usr/local/tomcat/bin/catalina.sh run
+"
+    )
 }
 
 fn dockerfile(spec: &ComposeSpec) -> String {
@@ -176,6 +203,22 @@ fn dockerfile(spec: &ComposeSpec) -> String {
             };
             let artifact = spec.artifact_path.as_deref().unwrap_or("target/*.jar");
             let check = artifact_check(artifact);
+            if spec.java_packaging == JavaPackaging::War {
+                let tomcat = spec.tomcat_version.as_deref().unwrap_or("9.0");
+                return format!(
+                    "FROM {image} AS build
+WORKDIR /src
+COPY . .
+RUN {build}
+{check}
+                     FROM docker.io/library/tomcat:{tomcat}-jre{v}-temurin
+                     RUN rm -rf /usr/local/tomcat/webapps/*
+                     COPY --from=build /src/{artifact} /usr/local/tomcat/webapps/ROOT.war
+                     COPY {TOMCAT_LAUNCHER_NAME} /usr/local/bin/{TOMCAT_RUN_COMMAND}
+                     RUN chmod 755 /usr/local/bin/{TOMCAT_RUN_COMMAND}
+"
+                );
+            }
             format!(
                 "FROM {image} AS build\nWORKDIR /src\nCOPY . .\nRUN {build}\n{check}\n\
                  FROM docker.io/library/eclipse-temurin:{v}-jre\nWORKDIR /app\nCOPY --from=build /src/{artifact} /app/app.jar\n"
@@ -340,13 +383,25 @@ pub(crate) fn generate_unchecked(spec: &ComposeSpec, ctx: &GenerateContext) -> R
     if spec.runtime == Runtime::Node {
         notes.push("Node projects are installed but not built. If yours needs a build step (e.g. TypeScript), put it in the run command, like: sh -c \"npm run build && npm start\".".into());
     }
-    if spec.runtime == Runtime::Java && spec.build_tool == BuildTool::Gradle && spec.artifact_path.as_deref().is_some_and(|p| p.contains('*')) {
+    let war = spec.runtime == Runtime::Java && spec.java_packaging == JavaPackaging::War;
+    if war {
+        notes.push(format!(
+            "The WAR is deployed as Tomcat's root app, so it is served at http://localhost:{host_port}/ rather than under its file name (e.g. /myapp/)."
+        ));
+    }
+    if !war && spec.runtime == Runtime::Java && spec.build_tool == BuildTool::Gradle && spec.artifact_path.as_deref().is_some_and(|p| p.contains('*')) {
         notes.push("Gradle often builds a second \"-plain.jar\" next to the runnable jar. If the build fails while copying the jar, set the artifact path to the exact jar file name.".into());
     }
 
     Ok(Generated {
         compose_yaml,
-        files: vec![GeneratedFile { path: DOCKERFILE_NAME.into(), contents: dockerfile(spec) }],
+        files: {
+            let mut files = vec![GeneratedFile { path: DOCKERFILE_NAME.into(), contents: dockerfile(spec) }];
+            if war {
+                files.push(GeneratedFile { path: TOMCAT_LAUNCHER_NAME.into(), contents: tomcat_launcher(spec.port) });
+            }
+            files
+        },
         rewrites,
         notes,
         host_port,
@@ -376,6 +431,8 @@ mod tests {
             db_env_preset: DbEnvPreset::Standard,
             extras: vec![],
             env: vec![],
+            java_packaging: Default::default(),
+            tomcat_version: None,
         }
     }
 
@@ -410,7 +467,6 @@ mod tests {
     }
 
     fn dockerfile_of(g: &Generated) -> &str {
-        assert_eq!(g.files.len(), 1);
         assert_eq!(g.files[0].path, DOCKERFILE_NAME);
         &g.files[0].contents
     }
@@ -498,6 +554,49 @@ mod tests {
         sp.artifact_path = Some("*/target/*.jar".into());
         let g = gen(&sp, &ctx());
         assert!(dockerfile_of(&g).contains("cd '/src/.' && find . -maxdepth 2"), "glob directory falls back to the project root");
+    }
+
+    #[test]
+    fn a_war_deploys_into_tomcat_with_a_launcher_for_the_read_only_sandbox() {
+        let mut sp = java_maven();
+        sp.runtime_version = "17".into();
+        sp.java_packaging = JavaPackaging::War;
+        sp.tomcat_version = Some("10.1".into());
+        sp.artifact_path = Some("target/*.war".into());
+        sp.run_command = "localsync-tomcat".into();
+        sp.port = 9090;
+        let g = gen(&sp, &ctx());
+        let d = dockerfile_of(&g);
+        assert!(d.contains("FROM docker.io/library/maven:3.9-eclipse-temurin-17 AS build"), "{d}");
+        assert!(d.contains("RUN set -- /src/target/*.war;"), "the build-output check runs for WARs too: {d}");
+        assert!(d.contains("find . -name '*.war'"), "and lists .war files: {d}");
+        assert!(d.contains("FROM docker.io/library/tomcat:10.1-jre17-temurin"), "{d}");
+        assert!(d.contains("COPY --from=build /src/target/*.war /usr/local/tomcat/webapps/ROOT.war"), "{d}");
+        assert!(d.contains("COPY .localsync-tomcat.sh /usr/local/bin/localsync-tomcat"), "{d}");
+        assert!(!d.contains("app.jar") && !d.contains("eclipse-temurin:17-jre
+"), "no jar stage: {d}");
+
+        let launcher = &g.files.iter().find(|f| f.path == TOMCAT_LAUNCHER_NAME).expect("launcher shipped").contents;
+        assert!(launcher.starts_with("#!/bin/sh
+"), "{launcher}");
+        assert!(launcher.contains("export CATALINA_BASE=\"$B\""), "Tomcat must run from /tmp: {launcher}");
+        assert!(launcher.contains("B=/tmp/tomcat"), "{launcher}");
+        assert!(launcher.contains("s/port=\"8080\"/port=\"9090\"/"), "connector on the app's port: {launcher}");
+        assert!(!launcher.contains('\r'), "LF line endings only");
+        let y = yaml(&g);
+        assert_eq!(svc(&y, APP_SERVICE)["command"][2], "localsync-tomcat");
+        assert!(g.notes.iter().any(|n| n.contains("root app")), "{:?}", g.notes);
+
+        sp.runtime_version = "8".into();
+        sp.tomcat_version = Some("9.0".into());
+        assert!(dockerfile_of(&gen(&sp, &ctx())).contains("FROM docker.io/library/tomcat:9.0-jre8-temurin"));
+    }
+
+    #[test]
+    fn a_jar_app_ships_no_tomcat_launcher() {
+        let g = gen(&java_maven(), &ctx());
+        assert_eq!(g.files.len(), 1, "{:?}", g.files.iter().map(|f| &f.path).collect::<Vec<_>>());
+        assert!(!dockerfile_of(&g).contains("tomcat"));
     }
 
     #[test]
