@@ -11,9 +11,10 @@
 mod compose;
 mod podman;
 mod provisioning;
+pub mod readiness;
 
 pub use podman::ServiceState;
-pub use provisioning::{ensure_podman_ready, ProvisioningLog};
+pub use provisioning::{ensure_podman_ready, setup, ProvisioningLog};
 
 use anyhow::{Context, Result};
 use ls_security::VerifiedSnapshot;
