@@ -200,6 +200,29 @@ pub async fn run_existing(compose_root: &Path, project_name: &str, git_commit: &
 /// the resulting [`RunningSession`]. `db_cache_hit` is passed in rather than
 /// computed here since only `run_snapshot` has the manifest needed to
 /// compute it - see `run_existing`'s own doc comment on why it can't.
+/// Shown when Podman can't apply the sandbox's memory limit. The limit stays
+/// enforced (never relaxed to make a run "work"); this only says why nothing
+/// can start, in place of crun's raw error.
+pub const MEMORY_LIMIT_UNSUPPORTED: &str = "Podman on this computer can't apply the memory limit LocalSync's sandbox puts on every container, so no container can start. This is a problem with how the Podman machine is set up, not with the project. On Windows it is caused by the WSL 3.0.1 update (kernel 6.18), which broke memory limits for Podman; rolling WSL back to a 2.x version fixes it. See docs/troubleshooting.md.";
+
+/// True when container output shows the memory limit couldn't be applied:
+/// crun failing to write the cgroup's `memory.max` because the memory
+/// controller isn't delegated to it, e.g.
+/// `crun: open `memory.max` for writing: No such file or directory`.
+pub fn is_memory_limit_unsupported(output: &str) -> bool {
+    output.contains("memory.max") && (output.contains("No such file or directory") || output.contains("Permission denied"))
+}
+
+/// A failed `up` with that cause gets the plain explanation on top; the raw
+/// output is kept underneath for anyone diagnosing it.
+fn explain_up_failure(e: anyhow::Error) -> anyhow::Error {
+    if is_memory_limit_unsupported(&format!("{e:#}")) {
+        e.context(MEMORY_LIMIT_UNSUPPORTED)
+    } else {
+        e
+    }
+}
+
 async fn bring_up(
     compose_root: &Path,
     project_name: &str,
@@ -227,7 +250,7 @@ async fn bring_up(
         if let Err(down_err) = podman::compose_down(compose_root, &compose_project_name, log).await {
             eprintln!("cleanup after a failed `up` also failed: {down_err:#}");
         }
-        return Err(e);
+        return Err(explain_up_failure(e));
     }
 
     Ok(RunningSession {
@@ -405,6 +428,34 @@ pub fn compose_project_name(project_name: &str, git_commit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact error a Windows Podman machine gave after the WSL 3.0.1
+    /// update, as `podman-compose up` reports it.
+    const REAL_CRUN_ERROR: &str = "Error: unable to start container \"714e1edf2360\": crun: open `memory.max` for writing: No such file or directory: OCI runtime attempted to invoke a command that was not found";
+
+    #[test]
+    fn a_memory_limit_failure_gets_the_plain_explanation_first_and_keeps_the_raw_error() {
+        let raw = anyhow::anyhow!("subprocess exited with exit status: 125. Last output:
+{REAL_CRUN_ERROR}")
+            .context("podman-compose up failed");
+        let msg = format!("{:#}", explain_up_failure(raw));
+        assert!(msg.starts_with(MEMORY_LIMIT_UNSUPPORTED), "{msg}");
+        assert!(msg.contains("memory.max"), "the raw cause stays available: {msg}");
+        assert!(MEMORY_LIMIT_UNSUPPORTED.contains("WSL") && MEMORY_LIMIT_UNSUPPORTED.contains("2.x"));
+    }
+
+    #[test]
+    fn other_up_failures_are_left_exactly_as_they_were() {
+        for other in [
+            "Error: Dockerfile not found in source",
+            "bind: address already in use",
+            "open `cpu.max` for writing: No such file or directory",
+            "memory.max is 1073741824",
+        ] {
+            let msg = format!("{:#}", explain_up_failure(anyhow::anyhow!("{other}").context("podman-compose up failed")));
+            assert_eq!(msg, format!("podman-compose up failed: {other}"));
+        }
+    }
 
     #[test]
     fn sanitize_strips_path_traversal() {
