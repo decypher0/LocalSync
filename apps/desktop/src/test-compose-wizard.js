@@ -153,3 +153,18 @@ test("a test run only counts for the answers (and dump) it ran with", () => {
   assert.equal(CF.isTestCurrent(key, CF.buildSpec(catalog, st, null).spec, { ...dump, file_path: "/y.sql" }), false);
   assert.equal(CF.isTestCurrent(null, a, dump), false);
 });
+
+test("multi-module Maven: warns until the build-output path points into a module", () => {
+  const mods = ["core", "web"];
+  const w = CF.mavenModulesWarning(mods, "maven", "target/*.jar");
+  assert.match(w, /multi-module Maven project \(modules: core, web\)/);
+  assert.match(w, /core\/target\/\*\.jar/);
+  assert.ok(CF.mavenModulesWarning(mods, "maven", "") !== null);
+  assert.equal(CF.mavenModulesWarning(mods, "maven", "web/target/*.jar"), null);
+  assert.equal(CF.mavenModulesWarning(mods, "maven", "./core/target/app.jar"), null);
+  assert.ok(CF.mavenModulesWarning(mods, "maven", "corex/target/*.jar") !== null, "a prefix of a name is not the module");
+  assert.equal(CF.mavenModulesWarning(mods, "gradle", "target/*.jar"), null, "Maven only");
+  assert.equal(CF.mavenModulesWarning([], "maven", "target/*.jar"), null, "single-module project");
+  assert.equal(CF.mavenModulesWarning(undefined, "maven", "target/*.jar"), null);
+  assert.match(CF.mavenModulesWarning(["a", "b", "c", "d", "e", "f"], "maven", ""), /a, b, c, d, e, \.\.\./);
+});
