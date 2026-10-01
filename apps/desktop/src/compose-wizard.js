@@ -30,17 +30,46 @@ const ComposeForm = (() => {
       runtime: "", runtimeVersion: "", buildTool: "",
       runCommand: "", runCommandEdited: false,
       artifactPath: "", artifactPathEdited: false,
+      // Java deployment: "jar" (java -jar) or "war" (deployed on Tomcat).
+      // detectedWar / suggestedTomcat come from inspect_project's look at pom.xml.
+      packaging: "jar", tomcatVersion: "", detectedWar: false, suggestedTomcat: "",
       port: "",
       dbEngine: "", dbVersion: "", dbEnvPreset: "",
       extras: {}, env: [],
     };
   }
 
-  /** Pre-fills the run command / artifact path from the chosen tool, except where the person has edited them. */
+  const isWar = (st) => st.runtime === "java" && st.packaging === "war";
+  const defaultRunCommand = (tool, st) => (tool ? (isWar(st) ? tool.war_run_command : tool.default_run_command) || "" : "");
+  const defaultArtifactPath = (tool, st) =>
+    (tool && tool.needs_artifact_path && (isWar(st) ? tool.default_war_path : tool.default_artifact_path)) || "";
+
+  /** Tomcat versions that have an image for this Java version. */
+  const tomcatOptions = (catalog, javaVersion) => (catalog.tomcat_versions || []).filter((t) => t.java_versions.includes(javaVersion));
+
+  /** Keeps the Tomcat choice valid for the Java version: the current one, else the pom's suggestion, else the newest that fits. */
+  function pickTomcat(catalog, st) {
+    const fits = tomcatOptions(catalog, st.runtimeVersion).map((t) => t.version);
+    if (fits.includes(st.tomcatVersion)) return;
+    st.tomcatVersion = fits.includes(st.suggestedTomcat) ? st.suggestedTomcat : fits[fits.length - 1] || "";
+  }
+
+  /** Pre-fills the run command / artifact path from the chosen tool and packaging, except where the person has edited them. */
   function applyDefaults(catalog, st) {
     const tool = toolInfo(catalog, st.runtime, st.buildTool);
-    if (!st.runCommandEdited) st.runCommand = (tool && tool.default_run_command) || "";
-    if (!st.artifactPathEdited) st.artifactPath = (tool && tool.needs_artifact_path && tool.default_artifact_path) || "";
+    if (!st.runCommandEdited) st.runCommand = defaultRunCommand(tool, st);
+    if (!st.artifactPathEdited) st.artifactPath = defaultArtifactPath(tool, st);
+  }
+
+  function setPackaging(catalog, st, packaging) {
+    st.packaging = packaging === "war" ? "war" : "jar";
+    if (isWar(st)) pickTomcat(catalog, st);
+    applyDefaults(catalog, st);
+  }
+
+  function setRuntimeVersion(catalog, st, version) {
+    st.runtimeVersion = version;
+    if (isWar(st)) pickTomcat(catalog, st);
   }
 
   /** Changing runtime resets version and tool to that runtime's own (newest version, first tool). "" clears all. */
@@ -49,6 +78,8 @@ const ComposeForm = (() => {
     st.runtime = r ? r.runtime : "";
     st.runtimeVersion = r ? newest(r.versions) : "";
     st.buildTool = r && r.build_tools.length ? r.build_tools[0].tool : "";
+    st.packaging = st.runtime === "java" && st.detectedWar ? "war" : "jar";
+    if (isWar(st)) pickTomcat(catalog, st);
     applyDefaults(catalog, st);
   }
 
@@ -61,13 +92,13 @@ const ComposeForm = (() => {
   function setRunCommand(catalog, st, value) {
     const tool = toolInfo(catalog, st.runtime, st.buildTool);
     st.runCommand = value;
-    st.runCommandEdited = value !== ((tool && tool.default_run_command) || "");
+    st.runCommandEdited = value !== defaultRunCommand(tool, st);
   }
 
   function setArtifactPath(catalog, st, value) {
     const tool = toolInfo(catalog, st.runtime, st.buildTool);
     st.artifactPath = value;
-    st.artifactPathEdited = value !== ((tool && tool.needs_artifact_path && tool.default_artifact_path) || "");
+    st.artifactPathEdited = value !== defaultArtifactPath(tool, st);
   }
 
   /** Port input keeps digits only (a number input still lets "e" and "-" through). */
@@ -139,6 +170,8 @@ const ComposeForm = (() => {
       db_env_preset: st.dbEnvPreset || (catalog.db_env_presets[0] || {}).preset || "",
       extras: extraKinds.map((k) => ({ kind: k, version: st.extras[k].version })),
       env: envRows.map((i) => ({ key: st.env[i].key.trim(), value: st.env[i].value })),
+      // Only for a WAR, so a jar app's spec keeps exactly its old shape (the backend defaults these).
+      ...(isWar(st) ? { java_packaging: "war", tomcat_version: st.tomcatVersion } : {}),
     };
     return { spec, map: { extras: extraKinds, env: envRows } };
   }
@@ -174,7 +207,7 @@ const ComposeForm = (() => {
   // A multi-module Maven project (its pom.xml declares <modules>) builds each
   // module's jar in <module>/target/, not the root's target/. Warn until the
   // build-output path points inside one of the modules.
-  function mavenModulesWarning(modules, buildTool, artifactPath) {
+  function mavenModulesWarning(modules, buildTool, artifactPath, war) {
     if (buildTool !== "maven" || !modules || !modules.length) return null;
     const path = String(artifactPath || "").trim().replace(/^\.\//, "");
     if (modules.some((m) => path.startsWith(m.replace(/\/+$/, "") + "/"))) return null;
@@ -182,7 +215,7 @@ const ComposeForm = (() => {
     return (
       `This is a multi-module Maven project (modules: ${shown}). Each module builds its jar in its own ` +
       `<module>/target/ folder, not the project root's target/. Set the build-output path to the module ` +
-      `that starts the app, for example ${modules[0].replace(/\/+$/, "")}/target/*.jar.`
+      `that starts the app, for example ${modules[0].replace(/\/+$/, "")}/target/*.${war ? "war" : "jar"}.`
     );
   }
 
@@ -190,6 +223,7 @@ const ComposeForm = (() => {
     newState, setRuntime, setBuildTool, setRunCommand, setArtifactPath, applyDefaults, cleanPortInput,
     initServices, addEnvRow, removeEnvRow, clientErrors, buildSpec, mapErrors, firstErrorStep, fieldStep,
     testKey, isTestCurrent, runtimeInfo, toolInfo, newest, mavenModulesWarning,
+    isWar, setPackaging, setRuntimeVersion, tomcatOptions,
   };
 })();
 

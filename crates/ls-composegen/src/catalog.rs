@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use crate::spec::{BuildTool, DbEngine, DbEnvPreset, ExtraKind, Runtime};
+use crate::spec::{BuildTool, DbEngine, DbEnvPreset, ExtraKind, JavaPackaging, Runtime};
 
 pub struct RuntimeInfo {
     pub runtime: Runtime,
@@ -25,6 +25,48 @@ pub const RUNTIMES: &[RuntimeInfo] = &[
     RuntimeInfo { runtime: Runtime::Python, label: "Python", versions: &["3.10", "3.11", "3.12"], build_tools: &[BuildTool::Pip] },
     RuntimeInfo { runtime: Runtime::Go, label: "Go", versions: &["1.21", "1.22"], build_tools: &[BuildTool::GoBuild] },
 ];
+
+/// Tomcat versions offered for WAR deployment. The split that matters is the
+/// servlet API: Tomcat 9 runs `javax.*` apps, Tomcat 10.1 only `jakarta.*`
+/// apps - a WAR built for one does not deploy on the other. Each uses the
+/// official `tomcat:<version>-jre<java>-temurin` image; there is no Tomcat
+/// 10.1 image for Java 8 (it needs Java 11+).
+pub struct TomcatInfo {
+    pub version: &'static str,
+    pub label: &'static str,
+    /// Java versions (from the Java catalog entry) this Tomcat has images for.
+    pub java_versions: &'static [&'static str],
+}
+
+pub const TOMCATS: &[TomcatInfo] = &[
+    TomcatInfo { version: "9.0", label: "Tomcat 9 (javax.* - Java EE 8, Spring Boot 2 and older)", java_versions: &["8", "11", "17", "21"] },
+    TomcatInfo { version: "10.1", label: "Tomcat 10.1 (jakarta.* - Jakarta EE 10, Spring Boot 3)", java_versions: &["11", "17", "21"] },
+];
+
+pub fn tomcat_info(version: &str) -> Option<&'static TomcatInfo> {
+    TOMCATS.iter().find(|t| t.version == version)
+}
+
+/// The run command for a WAR: a launcher baked into the generated image that
+/// starts Tomcat from a writable copy under /tmp (the receiver's sandbox makes
+/// everything else read-only).
+pub const TOMCAT_RUN_COMMAND: &str = "localsync-tomcat";
+
+pub fn packaging_label(p: JavaPackaging) -> &'static str {
+    match p {
+        JavaPackaging::Jar => "Runnable jar (java -jar)",
+        JavaPackaging::War => "WAR deployed on Tomcat",
+    }
+}
+
+/// Where the tool leaves a WAR by default.
+pub fn default_war_path(tool: BuildTool) -> Option<&'static str> {
+    match tool {
+        BuildTool::Maven => Some("target/*.war"),
+        BuildTool::Gradle => Some("build/libs/*.war"),
+        _ => None,
+    }
+}
 
 pub struct DbInfo {
     pub engine: DbEngine,
@@ -142,6 +184,22 @@ pub struct Catalog {
     pub databases: Vec<ServiceEntry<DbEngine>>,
     pub extras: Vec<ServiceEntry<ExtraKind>>,
     pub db_env_presets: Vec<PresetEntry>,
+    /// Java deployment choices, with their WAR defaults.
+    pub java_packagings: Vec<PackagingEntry>,
+    pub tomcat_versions: Vec<TomcatEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PackagingEntry {
+    pub packaging: JavaPackaging,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TomcatEntry {
+    pub version: String,
+    pub label: String,
+    pub java_versions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,6 +219,9 @@ pub struct BuildToolEntry {
     /// Whether the artifact path is asked for (and required) with this tool.
     pub needs_artifact_path: bool,
     pub default_artifact_path: Option<String>,
+    /// For a Java WAR: the artifact-path and run-command pre-fills.
+    pub default_war_path: Option<String>,
+    pub war_run_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +257,8 @@ pub fn catalog() -> Catalog {
                         default_run_command: default_run_command(r.runtime, tool).map(str::to_string),
                         needs_artifact_path: needs_artifact_path(r.runtime),
                         default_artifact_path: default_artifact_path(tool).map(str::to_string),
+                        default_war_path: default_war_path(tool).map(str::to_string),
+                        war_run_command: (r.runtime == Runtime::Java).then(|| TOMCAT_RUN_COMMAND.to_string()),
                     })
                     .collect(),
             })
@@ -212,6 +275,18 @@ pub fn catalog() -> Catalog {
             .into_iter()
             .map(|preset| PresetEntry { preset, label: preset_label(preset).to_string() })
             .collect(),
+        java_packagings: [JavaPackaging::Jar, JavaPackaging::War]
+            .into_iter()
+            .map(|packaging| PackagingEntry { packaging, label: packaging_label(packaging).to_string() })
+            .collect(),
+        tomcat_versions: TOMCATS
+            .iter()
+            .map(|t| TomcatEntry {
+                version: t.version.to_string(),
+                label: t.label.to_string(),
+                java_versions: t.java_versions.iter().map(|v| v.to_string()).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -225,6 +300,23 @@ mod tests {
             assert!(!r.versions.is_empty(), "{}", r.label);
             assert!(!r.build_tools.is_empty(), "{}", r.label);
         }
+    }
+
+    #[test]
+    fn every_tomcat_runs_on_offered_java_versions_and_every_java_version_has_a_tomcat() {
+        let java = runtime_info(Runtime::Java).versions;
+        for t in TOMCATS {
+            assert!(t.java_versions.iter().all(|v| java.contains(v)), "Tomcat {} lists a Java version not offered", t.version);
+        }
+        for v in java {
+            assert!(TOMCATS.iter().any(|t| t.java_versions.contains(v)), "Java {v} has no Tomcat for a WAR");
+        }
+        let c = catalog();
+        assert_eq!(c.java_packagings.len(), 2);
+        let maven = &c.runtimes[0].build_tools[0];
+        assert_eq!(maven.default_war_path.as_deref(), Some("target/*.war"));
+        assert_eq!(maven.war_run_command.as_deref(), Some(TOMCAT_RUN_COMMAND));
+        assert!(c.runtimes[1].build_tools[0].war_run_command.is_none(), "Node has no WAR");
     }
 
     #[test]

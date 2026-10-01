@@ -49,13 +49,19 @@ pub struct ProjectInspection {
     /// multi-module Maven project, whose jar lands in a module's own
     /// `target/`, not the root's - the wizard warns about the build-output path.
     pub maven_modules: Vec<String>,
+    /// The pom's `<packaging>` is `war`: the wizard defaults to deploying it
+    /// on Tomcat instead of `java -jar`.
+    pub war_packaging: bool,
+    /// For a WAR, the Tomcat version its servlet API needs, when the pom says:
+    /// "10.1" for `jakarta.*` (or Spring Boot 3), otherwise "9.0" (`javax.*`).
+    pub suggested_tomcat: Option<String>,
 }
 
 #[tauri::command]
 pub async fn inspect_project(folder_path: String) -> ProjectInspection {
     tauri::async_runtime::spawn_blocking(move || inspect(Path::new(&folder_path)))
         .await
-        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: Vec::new() })
+        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: Vec::new(), war_packaging: false, suggested_tomcat: None })
 }
 
 fn inspect(folder: &Path) -> ProjectInspection {
@@ -63,26 +69,54 @@ fn inspect(folder: &Path) -> ProjectInspection {
     // further up): the snapshot takes the folder's own files and the nearest
     // repo's commits. `.git` may be a file (worktrees, submodules).
     let is_git_repo = folder.ancestors().any(|d| d.join(".git").exists());
+    let pom = std::fs::read_to_string(folder.join("pom.xml")).ok();
+    let war_packaging = pom.as_deref().is_some_and(|p| element_text(&strip_xml_comments(p), "packaging") == Some("war"));
     ProjectInspection {
         has_compose: folder.join("docker-compose.yml").is_file(),
         is_git_repo,
         has_commits: is_git_repo && ls_snapshot::head_commit(folder).is_ok(),
-        maven_modules: std::fs::read_to_string(folder.join("pom.xml")).map(|pom| maven_modules(&pom)).unwrap_or_default(),
+        maven_modules: pom.as_deref().map(maven_modules).unwrap_or_default(),
+        war_packaging,
+        suggested_tomcat: war_packaging.then(|| pom.as_deref().map_or("9.0", tomcat_for_pom).to_string()),
     }
+}
+
+fn strip_xml_comments(xml: &str) -> String {
+    let mut text = String::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<!--") {
+        text.push_str(&rest[..start]);
+        rest = rest[start..].find("-->").map_or("", |end| &rest[start + end + 3..]);
+    }
+    text.push_str(rest);
+    text
+}
+
+/// The first element's text, e.g. `<packaging>war</packaging>` -> "war".
+fn element_text<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let after = &xml[xml.find(&open)? + open.len()..];
+    Some(after[..after.find(&format!("</{tag}>"))?].trim())
+}
+
+/// Tomcat 10.1 if the pom uses the `jakarta.*` servlet API (a `jakarta.servlet`
+/// or Jakarta EE dependency, or Spring Boot 3 as parent); otherwise Tomcat 9,
+/// which runs `javax.*` apps. A pom-only guess, shown as the default.
+fn tomcat_for_pom(pom: &str) -> &'static str {
+    let text = strip_xml_comments(pom);
+    let jakarta = text.contains("jakarta.servlet") || text.contains("jakarta.platform") || {
+        text.find("<artifactId>spring-boot-starter-parent</artifactId>")
+            .and_then(|i| element_text(&text[i..], "version"))
+            .is_some_and(|v| v.starts_with("3.") || v.starts_with("4."))
+    };
+    if jakarta { "10.1" } else { "9.0" }
 }
 
 /// The `<module>` entries of a pom's `<modules>` sections (including any in
 /// profiles), skipping commented-out ones. A plain scan, not an XML parser:
 /// it only feeds a warning, and poms keep these as simple text elements.
 fn maven_modules(pom: &str) -> Vec<String> {
-    let mut text = String::new();
-    let mut rest = pom;
-    while let Some(start) = rest.find("<!--") {
-        text.push_str(&rest[..start]);
-        rest = rest[start..].find("-->").map_or("", |end| &rest[start + end + 3..]);
-    }
-    text.push_str(rest);
-
+    let text = strip_xml_comments(pom);
     let mut modules = Vec::new();
     for section in text.split("<modules>").skip(1) {
         let section = section.split("</modules>").next().unwrap_or("");
@@ -447,18 +481,18 @@ mod tests {
         let p = dir.path();
 
         // Not a repo, no compose file.
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: vec![] });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None });
 
         // Repo with no commits yet.
         git(p, &["init", "-q"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false, maven_modules: vec![] });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None });
 
         // A compose file (even untracked) is seen; commits are seen after one exists.
         std::fs::write(p.join("docker-compose.yml"), "services: {}\n").unwrap();
         assert!(inspect(p).has_compose);
         git(p, &["add", "-A"]);
         git(p, &["commit", "-q", "-m", "init"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true, maven_modules: vec![] });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true, maven_modules: vec![], war_packaging: false, suggested_tomcat: None });
     }
 
     #[test]
@@ -490,6 +524,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("pom.xml"), pom).unwrap();
         assert_eq!(inspect(dir.path()).maven_modules, vec!["core", "web", "tools"]);
+    }
+
+    #[test]
+    fn war_packaging_is_detected_with_the_tomcat_its_servlet_api_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let pom = |body: &str| std::fs::write(dir.path().join("pom.xml"), format!("<project>{body}</project>")).unwrap();
+
+        pom("<packaging>war</packaging><dependencies><dependency><groupId>javax.servlet</groupId></dependency></dependencies>");
+        let i = inspect(dir.path());
+        assert!(i.war_packaging);
+        assert_eq!(i.suggested_tomcat.as_deref(), Some("9.0"));
+
+        pom("<packaging>war</packaging><dependency><groupId>jakarta.servlet</groupId></dependency>");
+        assert_eq!(inspect(dir.path()).suggested_tomcat.as_deref(), Some("10.1"));
+
+        pom("<parent><artifactId>spring-boot-starter-parent</artifactId><version>3.2.5</version></parent><packaging>war</packaging>");
+        assert_eq!(inspect(dir.path()).suggested_tomcat.as_deref(), Some("10.1"));
+        pom("<parent><artifactId>spring-boot-starter-parent</artifactId><version>2.7.18</version></parent><packaging>war</packaging>");
+        assert_eq!(inspect(dir.path()).suggested_tomcat.as_deref(), Some("9.0"));
+
+        pom("<packaging>jar</packaging>");
+        let i = inspect(dir.path());
+        assert!(!i.war_packaging && i.suggested_tomcat.is_none());
+        pom("<!-- <packaging>war</packaging> -->");
+        assert!(!inspect(dir.path()).war_packaging, "a commented-out packaging doesn't count");
+        std::fs::remove_file(dir.path().join("pom.xml")).unwrap();
+        assert!(!inspect(dir.path()).war_packaging);
     }
 
     #[test]

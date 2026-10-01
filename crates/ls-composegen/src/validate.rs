@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::catalog::{self, build_tool_label};
-use crate::spec::{ComposeSpec, FieldError};
+use crate::spec::{ComposeSpec, FieldError, JavaPackaging, Runtime};
 
 const MAX_RUN_COMMAND: usize = 500;
 const MAX_ARTIFACT_PATH: usize = 200;
@@ -108,14 +108,50 @@ pub fn validate(spec: &ComposeSpec) -> Result<(), Vec<FieldError>> {
         _ => {}
     }
 
+    let war = spec.java_packaging == JavaPackaging::War;
+    if war && spec.runtime != Runtime::Java {
+        errors.push(err("java_packaging", "Deploying a WAR on Tomcat is only for Java projects. Choose Java as the runtime, or remove the WAR choice."));
+    }
+
     if catalog::needs_artifact_path(spec.runtime) {
         match spec.artifact_path.as_deref() {
+            None if war => errors.push(err("artifact_path", "Enter where the build leaves the .war, relative to the project folder, like target/*.war (Maven) or build/libs/*.war (Gradle).")),
             None => errors.push(err("artifact_path", "Enter where the build leaves the jar, relative to the project folder, like target/*.jar (Maven) or build/libs/*.jar (Gradle).")),
             Some(p) => {
                 if let Some(m) = artifact_path_problem(p) {
                     errors.push(err("artifact_path", m));
+                } else if war && !p.ends_with(".war") {
+                    errors.push(err("artifact_path", format!("\"{p}\" doesn't point at a .war file. For a WAR deployed on Tomcat, point it at the built .war, like target/*.war.")));
+                } else if !war && p.ends_with(".war") {
+                    errors.push(err("artifact_path", format!("\"{p}\" is a .war file, which can't be started with java -jar. Choose \"WAR deployed on Tomcat\" as the packaging, or point the path at a runnable jar.")));
                 }
             }
+        }
+    }
+
+    if war && spec.runtime == Runtime::Java {
+        let offered: Vec<&str> = catalog::TOMCATS.iter().map(|t| t.version).collect();
+        match spec.tomcat_version.as_deref().map(|v| (v, catalog::tomcat_info(v))) {
+            None => errors.push(err("tomcat_version", format!("Choose a Tomcat version for the WAR: {}.", offered.join(" or ")))),
+            Some((v, None)) => errors.push(err("tomcat_version", format!("Tomcat {v} isn't offered. Choose {}.", offered.join(" or ")))),
+            Some((v, Some(info))) if !info.java_versions.contains(&spec.runtime_version.as_str()) => {
+                let fits: Vec<&str> = catalog::TOMCATS
+                    .iter()
+                    .filter(|t| t.java_versions.contains(&spec.runtime_version.as_str()))
+                    .map(|t| t.version)
+                    .collect();
+                errors.push(err(
+                    "tomcat_version",
+                    format!(
+                        "Tomcat {v} needs Java {}; it has no image for Java {}. With Java {} choose Tomcat {}, or pick a newer Java version.",
+                        info.java_versions.join(", "),
+                        spec.runtime_version,
+                        spec.runtime_version,
+                        fits.join(" or ")
+                    ),
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -189,6 +225,8 @@ mod tests {
             db_env_preset: DbEnvPreset::Standard,
             extras: vec![],
             env: vec![],
+            java_packaging: Default::default(),
+            tomcat_version: None,
         }
     }
 
@@ -296,6 +334,44 @@ mod tests {
     fn port_boundaries_are_accepted() {
         assert_eq!(validate(&ComposeSpec { port: 1024, ..node() }), Ok(()));
         assert_eq!(validate(&ComposeSpec { port: 65535, ..node() }), Ok(()));
+    }
+
+    fn war() -> ComposeSpec {
+        ComposeSpec {
+            runtime_version: "17".into(),
+            artifact_path: Some("target/*.war".into()),
+            java_packaging: JavaPackaging::War,
+            tomcat_version: Some("10.1".into()),
+            run_command: "localsync-tomcat".into(),
+            ..java()
+        }
+    }
+
+    #[test]
+    fn a_war_on_tomcat_validates_for_every_java_version_each_tomcat_supports() {
+        for t in catalog::TOMCATS {
+            for v in t.java_versions {
+                assert_eq!(validate(&ComposeSpec { runtime_version: (*v).into(), tomcat_version: Some(t.version.into()), ..war() }), Ok(()), "Tomcat {} / Java {v}", t.version);
+            }
+        }
+    }
+
+    #[test]
+    fn war_problems_are_specific() {
+        let m = only(&ComposeSpec { tomcat_version: None, ..war() }, "tomcat_version");
+        assert!(m.contains("9.0") && m.contains("10.1"), "{m}");
+        only(&ComposeSpec { tomcat_version: Some("8.5".into()), ..war() }, "tomcat_version");
+        let m = only(&ComposeSpec { runtime_version: "8".into(), tomcat_version: Some("10.1".into()), ..war() }, "tomcat_version");
+        assert!(m.contains("Java 8") && m.contains("choose Tomcat 9.0"), "{m}");
+        let m = only(&ComposeSpec { artifact_path: Some("target/*.jar".into()), ..war() }, "artifact_path");
+        assert!(m.contains(".war"), "{m}");
+        let m = only(&ComposeSpec { artifact_path: None, ..war() }, "artifact_path");
+        assert!(m.contains("target/*.war"), "{m}");
+        let m = only(&ComposeSpec { artifact_path: Some("target/app.war".into()), ..java() }, "artifact_path");
+        assert!(m.contains("WAR deployed on Tomcat"), "a jar app pointed at a .war is told to switch: {m}");
+        only(&ComposeSpec { java_packaging: JavaPackaging::War, ..node() }, "java_packaging");
+        // A jar app ignores any leftover Tomcat version.
+        assert_eq!(validate(&ComposeSpec { tomcat_version: Some("nonsense".into()), ..java() }), Ok(()));
     }
 
     #[test]
