@@ -1393,7 +1393,7 @@ $("wiz-folders-next-btn").addEventListener("click", async () => {
             " and has no docker-compose.yml. LocalSync builds what it sends from git, so commit the project's files first (git init, git add, git commit), then try again.";
           return;
         }
-        await enterComposeWizard(path);
+        await enterComposeWizard(path, info);
         return;
       }
     } catch (err) {
@@ -1947,7 +1947,7 @@ function composeTestIsCurrent() {
   return !!composeState && ComposeForm.isTestCurrent(composeState.testedKey, cwBuild().spec, cwDumpPayload());
 }
 
-async function enterComposeWizard(path) {
+async function enterComposeWizard(path, info) {
   try {
     if (!composeCatalog) composeCatalog = await invoke("compose_catalog");
   } catch (err) {
@@ -1958,6 +1958,7 @@ async function enterComposeWizard(path) {
   if (!composeState || composeState.folderPath !== path) {
     composeState = { st: ComposeForm.newState(), folderPath: path, spec: null, map: null, testedKey: null, testing: false };
   }
+  composeState.mavenModules = (info && info.maven_modules) || [];
   renderComposeApp();
   showWizardStep("wiz-step-compose-app");
 }
@@ -1977,6 +1978,7 @@ function renderComposeApp() {
   const tool = ComposeForm.toolInfo(composeCatalog, st.runtime, st.buildTool);
   $("cw-artifact-wrap").classList.toggle("hidden", !(tool && tool.needs_artifact_path));
   $("cw-artifact-path").value = st.artifactPath;
+  renderMavenWarning();
   $("cw-run-command").value = st.runCommand;
   $("cw-run-command-hint").textContent = !tool
     ? ""
@@ -2001,7 +2003,15 @@ $("cw-build-tool").addEventListener("change", () => {
 $("cw-artifact-path").addEventListener("input", () => {
   ComposeForm.setArtifactPath(composeCatalog, composeState.st, $("cw-artifact-path").value);
   cwClearSlot(CW_STEP_ID.app, "artifact_path");
+  renderMavenWarning();
 });
+
+function renderMavenWarning() {
+  const { st } = composeState;
+  const warning = ComposeForm.mavenModulesWarning(composeState.mavenModules, st.buildTool, st.artifactPath);
+  $("cw-maven-warning").textContent = warning || "";
+  $("cw-maven-warning").classList.toggle("hidden", !warning);
+}
 $("cw-run-command").addEventListener("input", () => {
   ComposeForm.setRunCommand(composeCatalog, composeState.st, $("cw-run-command").value);
   cwClearSlot(CW_STEP_ID.app, "run_command");
