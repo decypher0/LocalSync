@@ -137,6 +137,35 @@ fn rewrite_localhost(value: &str, services: &[(&str, u16)]) -> String {
     out
 }
 
+/// A build-stage step that fails with a useful listing when the configured
+/// build-output path doesn't match exactly one file, instead of letting the
+/// final `COPY --from=build` fail with only the copier's "no such file". It
+/// lists the path's directory two levels deep (so a module's own folder
+/// shows) and every jar the build produced, so the person can see where the
+/// artifact really landed. `artifact` was validated to a shell-safe character
+/// set (no spaces, quotes or `$`), so it is used unquoted for globbing and
+/// inside single quotes in messages.
+fn artifact_check(artifact: &str) -> String {
+    // The directory to list: the leading components before the file name that
+    // contain no glob characters ("target" for "target/*.jar", "." for
+    // "*/target/*.jar").
+    let parts: Vec<&str> = artifact.split('/').collect();
+    let fixed: Vec<&str> = parts[..parts.len() - 1].iter().copied().take_while(|c| !c.contains(['*', '?', '['])).collect();
+    let dir = if fixed.is_empty() { ".".to_string() } else { fixed.join("/") };
+    let lines = [
+        format!("RUN set -- /src/{artifact}; if [ ! -e \"$1\" ] || [ $# -gt 1 ]; then"),
+        format!("    if [ ! -e \"$1\" ]; then echo 'LocalSync: no file matches the build-output path {artifact}';"),
+        format!("    else echo \"LocalSync: the build-output path {artifact} matches $# files; it must match exactly one:\"; printf '  %s\\n' \"$@\"; fi;"),
+        format!("    echo 'LocalSync: contents of {dir}/ after the build:';"),
+        format!("    if [ -d '/src/{dir}' ]; then (cd '/src/{dir}' && find . -maxdepth 2 | sort | head -n 40); else echo '  ({dir}/ does not exist)'; fi;"),
+        "    echo 'LocalSync: jars the build produced anywhere in the project:';".to_string(),
+        "    (cd /src && find . -name '*.jar' | sort | head -n 20);".to_string(),
+        "    echo 'LocalSync: set the build-output path in the wizard to the jar to run, e.g. <module>/target/<name>.jar';".to_string(),
+        "    exit 1; fi".to_string(),
+    ];
+    format!("{}\n", lines.join(" \\\n"))
+}
+
 fn dockerfile(spec: &ComposeSpec) -> String {
     let v = &spec.runtime_version;
     match spec.runtime {
@@ -146,8 +175,9 @@ fn dockerfile(spec: &ComposeSpec) -> String {
                 _ => (format!("docker.io/library/maven:3.9-eclipse-temurin-{v}"), "mvn -B -q -DskipTests package"),
             };
             let artifact = spec.artifact_path.as_deref().unwrap_or("target/*.jar");
+            let check = artifact_check(artifact);
             format!(
-                "FROM {image} AS build\nWORKDIR /src\nCOPY . .\nRUN {build}\n\n\
+                "FROM {image} AS build\nWORKDIR /src\nCOPY . .\nRUN {build}\n{check}\n\
                  FROM docker.io/library/eclipse-temurin:{v}-jre\nWORKDIR /app\nCOPY --from=build /src/{artifact} /app/app.jar\n"
             )
         }
@@ -446,6 +476,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The build stage checks the build-output path before the final COPY,
+    /// listing the path's directory and every jar when it doesn't match one file.
+    #[test]
+    fn java_build_stage_checks_the_build_output_path_before_copying() {
+        let mut sp = java_maven();
+        sp.artifact_path = Some("app/target/*.jar".into());
+        let g = gen(&sp, &ctx());
+        let d = dockerfile_of(&g);
+        let check = d.find("RUN set -- /src/app/target/*.jar;").expect("check step present");
+        let build = d.find("RUN mvn").unwrap();
+        let copy = d.find("COPY --from=build").unwrap();
+        assert!(build < check && check < copy, "check runs after the build, before the copy: {d}");
+        assert!(d.contains("no file matches the build-output path app/target/*.jar"), "{d}");
+        assert!(d.contains("matches $# files; it must match exactly one"), "{d}");
+        assert!(d.contains("cd '/src/app/target' && find . -maxdepth 2"), "{d}");
+        assert!(d.contains("find . -name '*.jar'"), "{d}");
+
+        sp.artifact_path = Some("*/target/*.jar".into());
+        let g = gen(&sp, &ctx());
+        assert!(dockerfile_of(&g).contains("cd '/src/.' && find . -maxdepth 2"), "glob directory falls back to the project root");
     }
 
     #[test]

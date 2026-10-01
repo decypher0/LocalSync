@@ -45,13 +45,17 @@ pub struct ProjectInspection {
     pub is_git_repo: bool,
     /// HEAD resolves (a snapshot is built from a commit).
     pub has_commits: bool,
+    /// The `<module>`s the folder's `pom.xml` declares. Non-empty means a
+    /// multi-module Maven project, whose jar lands in a module's own
+    /// `target/`, not the root's - the wizard warns about the build-output path.
+    pub maven_modules: Vec<String>,
 }
 
 #[tauri::command]
 pub async fn inspect_project(folder_path: String) -> ProjectInspection {
     tauri::async_runtime::spawn_blocking(move || inspect(Path::new(&folder_path)))
         .await
-        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false })
+        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: Vec::new() })
 }
 
 fn inspect(folder: &Path) -> ProjectInspection {
@@ -63,7 +67,35 @@ fn inspect(folder: &Path) -> ProjectInspection {
         has_compose: folder.join("docker-compose.yml").is_file(),
         is_git_repo,
         has_commits: is_git_repo && ls_snapshot::head_commit(folder).is_ok(),
+        maven_modules: std::fs::read_to_string(folder.join("pom.xml")).map(|pom| maven_modules(&pom)).unwrap_or_default(),
     }
+}
+
+/// The `<module>` entries of a pom's `<modules>` sections (including any in
+/// profiles), skipping commented-out ones. A plain scan, not an XML parser:
+/// it only feeds a warning, and poms keep these as simple text elements.
+fn maven_modules(pom: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut rest = pom;
+    while let Some(start) = rest.find("<!--") {
+        text.push_str(&rest[..start]);
+        rest = rest[start..].find("-->").map_or("", |end| &rest[start + end + 3..]);
+    }
+    text.push_str(rest);
+
+    let mut modules = Vec::new();
+    for section in text.split("<modules>").skip(1) {
+        let section = section.split("</modules>").next().unwrap_or("");
+        for entry in section.split("<module>").skip(1) {
+            if let Some(name) = entry.split("</module>").next() {
+                let name = name.trim();
+                if !name.is_empty() && !modules.iter().any(|m| m == name) {
+                    modules.push(name.to_string());
+                }
+            }
+        }
+    }
+    modules
 }
 
 /// Empty = valid.
@@ -415,18 +447,18 @@ mod tests {
         let p = dir.path();
 
         // Not a repo, no compose file.
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: vec![] });
 
         // Repo with no commits yet.
         git(p, &["init", "-q"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false, maven_modules: vec![] });
 
         // A compose file (even untracked) is seen; commits are seen after one exists.
         std::fs::write(p.join("docker-compose.yml"), "services: {}\n").unwrap();
         assert!(inspect(p).has_compose);
         git(p, &["add", "-A"]);
         git(p, &["commit", "-q", "-m", "init"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true, maven_modules: vec![] });
     }
 
     #[test]
@@ -439,6 +471,25 @@ mod tests {
         // A directory with that name is not a compose file either.
         std::fs::create_dir(dir.path().join("docker-compose.yml")).unwrap();
         assert!(!inspect(dir.path()).has_compose);
+    }
+
+    #[test]
+    fn maven_modules_are_found_and_commented_out_ones_ignored() {
+        let pom = r#"<project>
+  <modules>
+    <module>core</module>
+    <module> web </module>
+    <!-- <module>legacy</module> -->
+  </modules>
+  <profiles><profile><modules><module>tools</module><module>core</module></modules></profile></profiles>
+</project>"#;
+        assert_eq!(maven_modules(pom), vec!["core", "web", "tools"]);
+        assert!(maven_modules("<project><artifactId>single</artifactId></project>").is_empty());
+        assert!(maven_modules("<project><!-- <modules><module>x</module></modules> --></project>").is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pom.xml"), pom).unwrap();
+        assert_eq!(inspect(dir.path()).maven_modules, vec!["core", "web", "tools"]);
     }
 
     #[test]
