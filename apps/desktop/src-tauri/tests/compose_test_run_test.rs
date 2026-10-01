@@ -47,7 +47,9 @@ fn make_project(name: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, PathB
     let dir = base.path().join(name);
     std::fs::create_dir(&dir).unwrap();
     for (path, contents) in files {
-        std::fs::write(dir.join(path), contents).unwrap();
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, contents).unwrap();
     }
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "-A"]);
@@ -266,6 +268,77 @@ async fn a_failed_build_reports_the_real_build_error() {
     assert!(all.contains("localsync-no-such-package-xyz"), "the npm error naming the package is missing: {all}");
     assert!(all.contains("404") || all.contains("E404") || all.contains("not found"), "npm's real reason is missing: {all}");
     assert_nothing_left_running("tr-node-build-fails");
+}
+
+/// A multi-module Maven project: the parent pom has `<modules>`, and the jar
+/// lands in the module's own `app/target/`, not the root's `target/`.
+fn multi_module_maven(name: &str, port: u16) -> (tempfile::TempDir, PathBuf) {
+    let parent_pom = r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>t</groupId><artifactId>parent</artifactId><version>1.0</version><packaging>pom</packaging>
+  <properties><maven.compiler.release>21</maven.compiler.release></properties>
+  <modules><module>app</module></modules>
+</project>"#;
+    let app_pom = r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>t</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>app</artifactId>
+  <build><plugins><plugin>
+    <artifactId>maven-jar-plugin</artifactId>
+    <configuration><archive><manifest><mainClass>App</mainClass></manifest></archive></configuration>
+  </plugin></plugins></build>
+</project>"#;
+    let app = format!(
+        r#"import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+public class App {{
+  public static void main(String[] a) throws Exception {{
+    HttpServer s = HttpServer.create(new InetSocketAddress({port}), 0);
+    s.createContext("/", x -> {{ byte[] b = "ok".getBytes(); x.sendResponseHeaders(200, b.length); x.getResponseBody().write(b); x.close(); }});
+    s.start();
+    System.out.println("listening on {port}");
+  }}
+}}"#
+    );
+    make_project(name, &[("pom.xml", parent_pom), ("app/pom.xml", app_pom), ("app/src/main/java/App.java", &app)])
+}
+
+/// The configured build-output path points at the root `target/`, but the jar
+/// is in `app/target/`: the report must show where it really is, not just
+/// the copier's "no such file".
+#[tokio::test]
+async fn a_wrong_build_output_path_lists_where_the_jar_really_landed() {
+    if !podman_stack_available() {
+        return;
+    }
+    let (_base, dir) = multi_module_maven("tr-maven-wrong-path", 18109);
+    let mut s = spec(Runtime::Java, "21", BuildTool::Maven, "java -jar /app/app.jar", 18109);
+    s.artifact_path = Some("target/*.jar".into());
+    let (report, _) = test_run(plan(&dir, s)).await;
+    let all = format!("{}
+{}", report.error.clone().unwrap_or_default(), report.output_tail);
+    eprintln!("--- wrong artifact path report ---
+{all}");
+    assert!(!report.ok);
+    assert!(all.contains("no file matches the build-output path target/*.jar"), "{all}");
+    assert!(all.contains("(target/ does not exist)"), "{all}");
+    assert!(all.contains("./app/target/app-1.0.jar"), "the real jar's location must be listed: {all}");
+    assert_nothing_left_running("tr-maven-wrong-path");
+}
+
+/// Same project with the path pointed at the module: it builds and serves.
+#[tokio::test]
+async fn a_multi_module_maven_project_runs_with_the_modules_build_output_path() {
+    if !podman_stack_available() {
+        return;
+    }
+    let (_base, dir) = multi_module_maven("tr-maven-module-path", 18110);
+    let mut s = spec(Runtime::Java, "21", BuildTool::Maven, "java -jar /app/app.jar", 18110);
+    s.artifact_path = Some("app/target/*.jar".into());
+    let (report, _) = test_run(plan(&dir, s)).await;
+    assert!(report.ok, "test run failed: {:?}
+{}", report.error, report.output_tail);
+    assert_nothing_left_running("tr-maven-module-path");
 }
 
 #[tokio::test]

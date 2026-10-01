@@ -171,10 +171,25 @@ const ComposeForm = (() => {
   const testKey = (spec, dump) => JSON.stringify({ spec, dump: dump ? { schema: dump.schema, file_path: dump.file_path, engine: dump.engine } : null });
   const isTestCurrent = (testedKey, spec, dump) => testedKey !== null && testedKey === testKey(spec, dump);
 
+  // A multi-module Maven project (its pom.xml declares <modules>) builds each
+  // module's jar in <module>/target/, not the root's target/. Warn until the
+  // build-output path points inside one of the modules.
+  function mavenModulesWarning(modules, buildTool, artifactPath) {
+    if (buildTool !== "maven" || !modules || !modules.length) return null;
+    const path = String(artifactPath || "").trim().replace(/^\.\//, "");
+    if (modules.some((m) => path.startsWith(m.replace(/\/+$/, "") + "/"))) return null;
+    const shown = modules.length > 5 ? modules.slice(0, 5).join(", ") + ", ..." : modules.join(", ");
+    return (
+      `This is a multi-module Maven project (modules: ${shown}). Each module builds its jar in its own ` +
+      `<module>/target/ folder, not the project root's target/. Set the build-output path to the module ` +
+      `that starts the app, for example ${modules[0].replace(/\/+$/, "")}/target/*.jar.`
+    );
+  }
+
   return {
     newState, setRuntime, setBuildTool, setRunCommand, setArtifactPath, applyDefaults, cleanPortInput,
     initServices, addEnvRow, removeEnvRow, clientErrors, buildSpec, mapErrors, firstErrorStep, fieldStep,
-    testKey, isTestCurrent, runtimeInfo, toolInfo, newest,
+    testKey, isTestCurrent, runtimeInfo, toolInfo, newest, mavenModulesWarning,
   };
 })();
 
