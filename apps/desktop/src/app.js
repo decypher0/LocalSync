@@ -1959,6 +1959,8 @@ async function enterComposeWizard(path, info) {
     composeState = { st: ComposeForm.newState(), folderPath: path, spec: null, map: null, testedKey: null, testing: false };
   }
   composeState.mavenModules = (info && info.maven_modules) || [];
+  composeState.st.detectedWar = !!(info && info.war_packaging);
+  composeState.st.suggestedTomcat = (info && info.suggested_tomcat) || "";
   renderComposeApp();
   showWizardStep("wiz-step-compose-app");
 }
@@ -1977,12 +1979,25 @@ function renderComposeApp() {
   $("cw-build-tool").disabled = !r;
   const tool = ComposeForm.toolInfo(composeCatalog, st.runtime, st.buildTool);
   $("cw-artifact-wrap").classList.toggle("hidden", !(tool && tool.needs_artifact_path));
+  const isJava = st.runtime === "java";
+  const war = ComposeForm.isWar(st);
+  $("cw-packaging-wrap").classList.toggle("hidden", !isJava);
+  cwFillSelect($("cw-packaging"), (composeCatalog.java_packagings || []).map((p) => [p.packaging, p.label]), st.packaging);
+  $("cw-tomcat-wrap").classList.toggle("hidden", !war);
+  cwFillSelect($("cw-tomcat-version"), ComposeForm.tomcatOptions(composeCatalog, st.runtimeVersion).map((t) => [t.version, t.label]), st.tomcatVersion);
+  $("cw-tomcat-hint").textContent = !war
+    ? ""
+    : st.detectedWar && st.suggestedTomcat === st.tomcatVersion
+      ? "Chosen from your pom.xml. A WAR built for javax.* only runs on Tomcat 9; one built for jakarta.* only on Tomcat 10.1."
+      : "A WAR built for javax.* only runs on Tomcat 9; one built for jakarta.* only on Tomcat 10.1.";
   $("cw-artifact-path").value = st.artifactPath;
   renderMavenWarning();
   $("cw-run-command").value = st.runCommand;
   $("cw-run-command-hint").textContent = !tool
     ? ""
-    : tool.default_run_command
+    : war && !st.runCommandEdited
+      ? "Starts Tomcat with your WAR deployed at /. Leave this unless you know you need something else."
+      : tool.default_run_command
       ? "Pre-filled for this choice. Change it if your app starts differently."
       : "There's no standard command for this one — enter the command that starts your app.";
   $("cw-port").value = st.port;
@@ -1993,8 +2008,18 @@ $("cw-runtime").addEventListener("change", () => {
   renderComposeApp();
 });
 $("cw-runtime-version").addEventListener("change", () => {
-  composeState.st.runtimeVersion = $("cw-runtime-version").value;
+  ComposeForm.setRuntimeVersion(composeCatalog, composeState.st, $("cw-runtime-version").value);
   cwClearSlot(CW_STEP_ID.app, "runtime_version");
+  if (ComposeForm.isWar(composeState.st)) renderComposeApp(); // the Tomcat choices depend on the Java version
+});
+$("cw-packaging").addEventListener("change", () => {
+  ComposeForm.setPackaging(composeCatalog, composeState.st, $("cw-packaging").value);
+  renderComposeApp();
+});
+$("cw-tomcat-version").addEventListener("change", () => {
+  composeState.st.tomcatVersion = $("cw-tomcat-version").value;
+  cwClearSlot(CW_STEP_ID.app, "tomcat_version");
+  renderComposeApp();
 });
 $("cw-build-tool").addEventListener("change", () => {
   ComposeForm.setBuildTool(composeCatalog, composeState.st, $("cw-build-tool").value);
@@ -2008,7 +2033,7 @@ $("cw-artifact-path").addEventListener("input", () => {
 
 function renderMavenWarning() {
   const { st } = composeState;
-  const warning = ComposeForm.mavenModulesWarning(composeState.mavenModules, st.buildTool, st.artifactPath);
+  const warning = ComposeForm.mavenModulesWarning(composeState.mavenModules, st.buildTool, st.artifactPath, ComposeForm.isWar(st));
   $("cw-maven-warning").textContent = warning || "";
   $("cw-maven-warning").classList.toggle("hidden", !warning);
 }

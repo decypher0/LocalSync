@@ -4,9 +4,12 @@ const assert = require("node:assert/strict");
 const CF = require("./compose-wizard.js");
 
 const tool = (t, label, run, art, defArt) => ({ tool: t, label, default_run_command: run, needs_artifact_path: art, default_artifact_path: defArt });
+const javaTool = (t, label, defArt, defWar) => ({ ...tool(t, label, "java -jar /app/app.jar", true, defArt), default_war_path: defWar, war_run_command: "localsync-tomcat" });
 const catalog = {
+  java_packagings: [{ packaging: "jar", label: "Runnable jar" }, { packaging: "war", label: "WAR on Tomcat" }],
+  tomcat_versions: [{ version: "9.0", label: "Tomcat 9", java_versions: ["8", "11", "17", "21"] }, { version: "10.1", label: "Tomcat 10.1", java_versions: ["11", "17", "21"] }],
   runtimes: [
-    { runtime: "java", label: "Java", versions: ["17", "21"], build_tools: [tool("maven", "Maven", "java -jar /app/app.jar", true, "target/*.jar"), tool("gradle", "Gradle", "java -jar /app/app.jar", true, "build/libs/*.jar")] },
+    { runtime: "java", label: "Java", versions: ["8", "11", "17", "21"], build_tools: [javaTool("maven", "Maven", "target/*.jar", "target/*.war"), javaTool("gradle", "Gradle", "build/libs/*.jar", "build/libs/*.war")] },
     { runtime: "node", label: "Node.js", versions: ["18", "20", "22"], build_tools: [tool("npm", "npm", "npm start", false, null), tool("yarn", "Yarn", "yarn start", false, null), tool("pnpm", "pnpm", "pnpm start", false, null)] },
     { runtime: "python", label: "Python", versions: ["3.10", "3.11", "3.12"], build_tools: [tool("pip", "pip", null, false, null)] },
   ],
@@ -167,4 +170,49 @@ test("multi-module Maven: warns until the build-output path points into a module
   assert.equal(CF.mavenModulesWarning([], "maven", "target/*.jar"), null, "single-module project");
   assert.equal(CF.mavenModulesWarning(undefined, "maven", "target/*.jar"), null);
   assert.match(CF.mavenModulesWarning(["a", "b", "c", "d", "e", "f"], "maven", ""), /a, b, c, d, e, \.\.\./);
+});
+
+test("WAR packaging: defaults, Tomcat choice per Java version, and the spec", () => {
+  const st = CF.newState();
+  CF.setRuntime(catalog, st, "java");
+  assert.equal(st.packaging, "jar", "a project not detected as a WAR starts as a jar");
+  const jarSpec = CF.buildSpec(catalog, { ...st, port: "8080" }, null).spec;
+  assert.ok(!("java_packaging" in jarSpec) && !("tomcat_version" in jarSpec), "a jar spec keeps its old shape");
+
+  CF.setPackaging(catalog, st, "war");
+  assert.deepEqual([st.artifactPath, st.runCommand, st.tomcatVersion], ["target/*.war", "localsync-tomcat", "10.1"], "newest Tomcat that fits Java 21");
+  CF.setBuildTool(catalog, st, "gradle");
+  assert.equal(st.artifactPath, "build/libs/*.war");
+  CF.setRuntimeVersion(catalog, st, "8");
+  assert.equal(st.tomcatVersion, "9.0", "Java 8 has no Tomcat 10.1, so it moves to 9.0");
+  assert.deepEqual(CF.tomcatOptions(catalog, "8").map((t) => t.version), ["9.0"]);
+  CF.setRuntimeVersion(catalog, st, "17");
+  assert.equal(st.tomcatVersion, "9.0", "a still-valid choice is kept");
+  st.port = "8080";
+  const spec = CF.buildSpec(catalog, st, null).spec;
+  assert.equal(spec.java_packaging, "war");
+  assert.equal(spec.tomcat_version, "9.0");
+  assert.equal(spec.artifact_path, "build/libs/*.war");
+
+  CF.setPackaging(catalog, st, "jar");
+  assert.deepEqual([st.artifactPath, st.runCommand], ["build/libs/*.jar", "java -jar /app/app.jar"], "back to jar defaults");
+});
+
+test("WAR packaging: a pom detected as a WAR defaults to Tomcat with the suggested version; edits are kept", () => {
+  const st = CF.newState();
+  st.detectedWar = true;
+  st.suggestedTomcat = "9.0";
+  CF.setRuntime(catalog, st, "java");
+  assert.deepEqual([st.packaging, st.tomcatVersion, st.artifactPath, st.runCommand], ["war", "9.0", "target/*.war", "localsync-tomcat"]);
+  CF.setArtifactPath(catalog, st, "web/target/web.war");
+  CF.setPackaging(catalog, st, "jar");
+  assert.equal(st.artifactPath, "web/target/web.war", "an edited path survives a packaging change");
+  CF.setRuntime(catalog, st, "node");
+  assert.equal(CF.isWar(st), false, "WAR is Java only");
+  assert.ok(!("java_packaging" in CF.buildSpec(catalog, { ...st, port: "3000" }, null).spec));
+});
+
+test("multi-module warning example matches the packaging", () => {
+  assert.match(CF.mavenModulesWarning(["web"], "maven", "target/*.war", true), /web\/target\/\*\.war/);
+  assert.match(CF.mavenModulesWarning(["web"], "maven", "target/*.jar", false), /web\/target\/\*\.jar/);
 });

@@ -746,6 +746,19 @@
           <select id="cw-build-tool"></select>
         </label>
         <p class="error field-error" data-slot="build_tool"></p>
+        <div id="cw-packaging-wrap" class="hidden">
+          <label>How is the app packaged?
+            <select id="cw-packaging"></select>
+          </label>
+          <p class="error field-error" data-slot="java_packaging"></p>
+          <div id="cw-tomcat-wrap" class="hidden">
+            <label>Tomcat version
+              <select id="cw-tomcat-version"></select>
+            </label>
+            <p id="cw-tomcat-hint" class="hint"></p>
+            <p class="error field-error" data-slot="tomcat_version"></p>
+          </div>
+        </div>
         <div id="cw-artifact-wrap" class="hidden">
           <label>Where the build leaves the app (relative to the project folder)
             <input id="cw-artifact-path" type="text" />
