@@ -303,6 +303,9 @@ listen("menu-action", (evt) => {
     case "menu-settings":
       $("settings-panel").classList.remove("hidden");
       break;
+    case "menu-check-setup":
+      openSetup();
+      break;
     case "menu-theme-system":
     case "menu-theme-light":
     case "menu-theme-dark":

@@ -242,6 +242,9 @@ async fn bring_up(
     // a RunningSession for the caller to stop, so clean up here rather than
     // leave them running.
     if let Err(e) = podman::compose_up(compose_root, &compose_project_name, log).await {
+        // A failed start may mean Podman itself broke since the last good
+        // probe: make the next Run re-check instead of trusting the cache.
+        readiness::invalidate_probe_cache();
         if let Err(down_err) = podman::compose_down(compose_root, &compose_project_name, log).await {
             eprintln!("cleanup after a failed `up` also failed: {down_err:#}");
         }

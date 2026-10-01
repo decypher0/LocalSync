@@ -31,6 +31,7 @@ use tauri::{Emitter, Manager};
 fn build_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let app_menu = SubmenuBuilder::new(app, "LocalSync")
         .text("menu-check-updates", "Check for updates…")
+        .text("menu-check-setup", "Check Podman setup…")
         .separator()
         .text("menu-settings", "Settings")
         .separator()

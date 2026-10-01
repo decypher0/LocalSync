@@ -151,13 +151,24 @@ fn info_for(os: TargetOs, step: SetupStep, has: &dyn Fn(&str) -> bool) -> StepIn
             false,
             "Run `podman machine init` (first time only), then `podman machine start`, in Terminal.".into(),
         ),
-        (FunctionalCheck, _) => (
+        (FunctionalCheck, os) => (
             "Test container",
             None,
             false,
-            "Run `podman run --rm --memory 1g docker.io/library/busybox true` in a terminal; it should finish without \
-             an error. If it fails, the details below show why."
-                .into(),
+            format!(
+                "Run `podman run --rm --memory 1g docker.io/library/busybox true` in a terminal; it should finish without \
+                 an error. If it fails, the details below show why.{}",
+                match os {
+                    // The one known cause seen in the field (docs/troubleshooting.md).
+                    TargetOs::Windows => " If the error mentions `memory.max`, the WSL 3.0.1 update (kernel 6.18) broke \
+                        memory limits for Podman: check `wsl --version`, roll WSL back to a 2.x release from the WSL \
+                        GitHub releases page, run `wsl --shutdown`, then Recheck.",
+                    TargetOs::Linux => " If the error mentions `memory.max`, your system isn't delegating cgroup memory \
+                        control to your user, which rootless Podman needs (cgroup v2 with systemd delegation); see \
+                        \"Rootless Podman\" in Podman's troubleshooting guide.",
+                    TargetOs::Macos => " If the error mentions the machine, run `podman machine start` and Recheck.",
+                }
+            ),
         ),
     };
     StepInfo { step, title: title.into(), consent, needs_admin, manual_instructions: manual }
@@ -527,5 +538,27 @@ mod tests {
         let r = fix_step(MachineReady, &log).await;
         println!("{}", std::fs::read_to_string(log.path()).unwrap());
         assert!(r.is_ok(), "{r:?}");
+    }
+}
+
+#[cfg(test)]
+mod manual_text_tests {
+    use super::*;
+
+    /// The container check's do-it-yourself text names the known cause per
+    /// OS, reads as normal sentences (no stray runs of spaces from line
+    /// continuations), and is never empty.
+    #[test]
+    fn functional_check_manual_instructions_name_the_known_cause_per_os() {
+        let none = |_: &str| false;
+        let win = info_for(TargetOs::Windows, SetupStep::FunctionalCheck, &none).manual_instructions;
+        assert!(win.contains("WSL 3.0.1") && win.contains("2.x") && win.contains("Recheck"), "{win}");
+        let linux = info_for(TargetOs::Linux, SetupStep::FunctionalCheck, &none).manual_instructions;
+        assert!(linux.contains("memory.max") && linux.contains("Rootless Podman"), "{linux}");
+        let mac = info_for(TargetOs::Macos, SetupStep::FunctionalCheck, &none).manual_instructions;
+        assert!(mac.contains("podman machine start"), "{mac}");
+        for text in [&win, &linux, &mac] {
+            assert!(!text.contains("  "), "double spaces: {text}");
+        }
     }
 }
