@@ -15,19 +15,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ls_composegen::{BuildTool, ComposeSpec, DbEnvPreset, Runtime};
+use ls_composegen::{BuildTool, ComposeSpec, DbEnvPreset, JavaPackaging, Runtime};
 use localsync_desktop::commands::{self, FolderPlanDto};
 use localsync_desktop::compose_wizard::{self, TestRunReport};
 use localsync_desktop::state::AppState;
 use tauri::{Listener, Manager};
 
-fn podman_stack_available() -> bool {
+/// `Some(guard)` when Podman is available; the guard serializes the
+/// real-container tests in this file. They all stream into the one shared
+/// provisioning log, and a test run's report is that log's tail - so tests
+/// running at the same time end up with each other's output in their reports.
+fn podman_stack() -> Option<std::sync::MutexGuard<'static, ()>> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let ok = |bin: &str| Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
-    let available = ok("podman") && ok("podman-compose");
-    if !available {
+    if !(ok("podman") && ok("podman-compose")) {
         eprintln!("podman/podman-compose not on PATH - skipping (this test boots real containers)");
+        return None;
     }
-    available
+    // A test that panicked while holding it must not fail the rest.
+    Some(SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -69,6 +75,8 @@ fn spec(runtime: Runtime, version: &str, tool: BuildTool, run_command: &str, por
         db_env_preset: DbEnvPreset::Standard,
         extras: vec![],
         env: vec![],
+        java_packaging: Default::default(),
+        tomcat_version: None,
     }
 }
 
@@ -140,9 +148,9 @@ fn snapshot_as_sent(dir: &Path, spec: &ComposeSpec) -> ls_security::VerifiedSnap
 
 #[tokio::test]
 async fn python_project_boots_and_the_same_snapshot_runs_like_a_receiver_would() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let (_base, dir) = make_project("tr-py-ok", &[("index.html", "<h1>hello from the test run</h1>")]);
     let spec = spec(Runtime::Python, "3.12", BuildTool::Pip, "python -m http.server 18101", 18101);
 
@@ -179,9 +187,9 @@ async fn python_project_boots_and_the_same_snapshot_runs_like_a_receiver_would()
 /// file - here one whose container fails on purpose, so building it can't pass.
 #[tokio::test]
 async fn a_projects_own_dockerfile_is_never_built_instead_of_the_generated_one() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let stale = "FROM docker.io/library/busybox
 CMD [\"sh\", \"-c\", \"echo STALE_DOCKERFILE_WAS_BUILT; exit 1\"]
 ";
@@ -212,9 +220,9 @@ CMD [\"sh\", \"-c\", \"echo STALE_DOCKERFILE_WAS_BUILT; exit 1\"]
 
 #[tokio::test]
 async fn node_project_boots() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let (_base, dir) = make_project(
         "tr-node-ok",
         &[
@@ -233,9 +241,9 @@ async fn node_project_boots() {
 
 #[tokio::test]
 async fn a_crashing_app_reports_the_containers_own_error_not_just_an_exit_status() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let (_base, dir) = make_project("tr-py-crash", &[("readme.txt", "no server here")]);
     let (report, _) = test_run(plan(&dir, spec(Runtime::Python, "3.12", BuildTool::Pip, "python nosuchfile.py", 18104))).await;
     assert!(!report.ok);
@@ -250,9 +258,9 @@ async fn a_crashing_app_reports_the_containers_own_error_not_just_an_exit_status
 
 #[tokio::test]
 async fn a_failed_build_reports_the_real_build_error() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let (_base, dir) = make_project(
         "tr-node-build-fails",
         &[
@@ -308,9 +316,9 @@ public class App {{
 /// the copier's "no such file".
 #[tokio::test]
 async fn a_wrong_build_output_path_lists_where_the_jar_really_landed() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let (_base, dir) = multi_module_maven("tr-maven-wrong-path", 18109);
     let mut s = spec(Runtime::Java, "21", BuildTool::Maven, "java -jar /app/app.jar", 18109);
     s.artifact_path = Some("target/*.jar".into());
@@ -329,9 +337,9 @@ async fn a_wrong_build_output_path_lists_where_the_jar_really_landed() {
 /// Same project with the path pointed at the module: it builds and serves.
 #[tokio::test]
 async fn a_multi_module_maven_project_runs_with_the_modules_build_output_path() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let (_base, dir) = multi_module_maven("tr-maven-module-path", 18110);
     let mut s = spec(Runtime::Java, "21", BuildTool::Maven, "java -jar /app/app.jar", 18110);
     s.artifact_path = Some("app/target/*.jar".into());
@@ -341,11 +349,90 @@ async fn a_multi_module_maven_project_runs_with_the_modules_build_output_path() 
     assert_nothing_left_running("tr-maven-module-path");
 }
 
+fn http_body(port: u16) -> Option<String> {
+    let mut s = TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_secs(1)).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    s.write_all(b"GET / HTTP/1.0
+Host: localhost
+
+").ok()?;
+    let mut buf = String::new();
+    let _ = s.read_to_string(&mut buf);
+    Some(buf)
+}
+
+/// A WAR-packaged Maven project (`<packaging>war</packaging>`) with a JSP
+/// that Tomcat has to compile at run time - which only works if the
+/// read-only-rootfs workaround (CATALINA_BASE under /tmp) does.
+fn war_project(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let pom = r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>t</groupId><artifactId>webapp</artifactId><version>1.0</version>
+  <packaging>war</packaging>
+  <build><plugins><plugin>
+    <artifactId>maven-war-plugin</artifactId><version>3.4.0</version>
+  </plugin></plugins></build>
+</project>"#;
+    let jsp = r#"<html><body>jsp-ok-<%= 6 * 7 %></body></html>"#;
+    let web_xml = r#"<web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee" version="3.1"/>"#;
+    make_project(name, &[("pom.xml", pom), ("src/main/webapp/index.jsp", jsp), ("src/main/webapp/WEB-INF/web.xml", web_xml)])
+}
+
+async fn war_boots_on_tomcat(name: &str, java: &str, tomcat: &str, port: u16) {
+    let Some(_serial) = podman_stack() else {
+        return;
+    };
+    let (_base, dir) = war_project(name);
+    let mut s = spec(Runtime::Java, java, BuildTool::Maven, "localsync-tomcat", port);
+    s.artifact_path = Some("target/*.war".into());
+    s.java_packaging = JavaPackaging::War;
+    s.tomcat_version = Some(tomcat.into());
+
+    let (report, _) = test_run(plan(&dir, s.clone())).await;
+    assert!(report.ok, "test run failed: {:?}
+{}", report.error, report.output_tail);
+    assert_nothing_left_running(name);
+
+    // What the receiver does with it: the JSP is compiled and served at /.
+    let app = tauri::test::mock_app();
+    app.manage(AppState::default());
+    let handle = app.handle().clone();
+    let verified = snapshot_as_sent(&dir, &s);
+    let id = format!("{}@{}", verified.snapshot().manifest.project_name, verified.snapshot().manifest.git_commit);
+    handle.state::<AppState>().verified.lock().unwrap().insert(id.clone(), verified);
+    let work = tempfile::tempdir().unwrap();
+    let session = commands::run_snapshot(handle.clone(), handle.state::<AppState>(), id, work.path().display().to_string())
+        .await
+        .expect("the receiver's Run of the WAR should work");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut body = String::new();
+    while Instant::now() < deadline {
+        body = http_body(port).unwrap_or_default();
+        if body.contains("jsp-ok-42") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    commands::stop_session(handle.state::<AppState>(), session.session_id).await.unwrap();
+    assert!(body.contains("jsp-ok-42"), "Tomcat never served the compiled JSP at /: {body}");
+    assert_nothing_left_running(name);
+}
+
+#[tokio::test]
+async fn a_war_project_builds_and_serves_on_tomcat_10_with_java_17() {
+    war_boots_on_tomcat("tr-war-tomcat10", "17", "10.1", 18111).await;
+}
+
+#[tokio::test]
+async fn a_war_project_builds_and_serves_on_tomcat_9_with_java_8() {
+    war_boots_on_tomcat("tr-war-tomcat9", "8", "9.0", 18112).await;
+}
+
 #[tokio::test]
 async fn a_busy_port_does_not_fail_the_test_run_and_is_explained() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     // The sender's own dev server, already on the app's port.
     let dev_server = TcpListener::bind("0.0.0.0:18106").expect("port 18106 should be free for this test");
     let (_base, dir) = make_project("tr-py-busy", &[("index.html", "hi")]);
@@ -359,9 +446,9 @@ async fn a_busy_port_does_not_fail_the_test_run_and_is_explained() {
 
 #[tokio::test]
 async fn an_app_that_never_listens_times_out_with_a_useful_message() {
-    if !podman_stack_available() {
+    let Some(_serial) = podman_stack() else {
         return;
-    }
+    };
     let (_base, dir) = make_project("tr-py-silent", &[("readme.txt", "x")]);
     // Runs fine but never opens its port.
     let folder = plan(&dir, spec(Runtime::Python, "3.12", BuildTool::Pip, "python -c \"import time; print('idle'); time.sleep(600)\"", 18107));

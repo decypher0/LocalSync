@@ -74,6 +74,8 @@ fn spec() -> ComposeSpec {
         db_env_preset: DbEnvPreset::Standard,
         extras: vec![],
         env: vec![],
+        java_packaging: Default::default(),
+        tomcat_version: None,
     }
 }
 
