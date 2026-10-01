@@ -78,7 +78,11 @@ fn spec() -> ComposeSpec {
 }
 
 fn http_200() -> bool {
-    let Ok(mut s) = TcpStream::connect_timeout(&format!("127.0.0.1:{PORT}").parse().unwrap(), Duration::from_secs(1)) else {
+    http_200_on(PORT)
+}
+
+fn http_200_on(port: u16) -> bool {
+    let Ok(mut s) = TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_secs(1)) else {
         return false;
     };
     let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
@@ -159,4 +163,61 @@ async fn a_projects_own_dockerfile_is_never_built_instead_of_the_generated_one()
         served,
         "the app never answered HTTP 200 - the wrong Dockerfile was probably built (services not started: {missing:?})"
     );
+}
+
+/// The real project is a subfolder of a larger repo (`.git` at the parent,
+/// `pom.xml` one level down, no `.git` of its own). Selecting the subfolder
+/// must produce a snapshot that actually builds and serves - with only the
+/// subfolder's files in the build context.
+#[tokio::test]
+async fn a_subfolder_of_a_larger_repo_builds_and_runs() {
+    if !stack_available() {
+        return;
+    }
+    const SUB_PORT: u16 = 18108;
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("monorepo");
+    let dir = repo.join("xusom-admin");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(repo.join("README.md"), "monorepo").unwrap();
+    std::fs::write(dir.join("pom.xml"), "<project/>").unwrap();
+    std::fs::write(dir.join("index.html"), "<h1>nested</h1>").unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "initial"]);
+
+    let spec = ComposeSpec { run_command: format!("python -m http.server {SUB_PORT}"), port: SUB_PORT, ..spec() };
+    let folders = vec![ls_snapshot::FolderSpec { path: dir.clone(), parent_commit: None }];
+    let label = ls_snapshot::folder_labels(&folders).remove(0);
+    assert_eq!(label, "xusom-admin");
+    let generated =
+        ls_composegen::generate(&spec, &GenerateContext { folder_label: label, dump: None, host_port: None }).unwrap();
+    let files = ls_snapshot::GeneratedFiles {
+        compose_yaml: generated.compose_yaml,
+        files: generated.files.into_iter().map(|g| (g.path, g.contents.into_bytes())).collect(),
+    };
+    let snapshot = ls_snapshot::create_snapshot_multi_with(&folders, &[], &[Some(files)]).unwrap();
+    let verified = ls_security::verify(snapshot, &[]).unwrap();
+
+    let work = tempfile::tempdir().unwrap();
+    let session = ls_containers::run_snapshot(&verified, work.path()).await.expect("run_snapshot");
+    let source = find_dir(work.path(), "source").expect("unpacked source dir");
+    let only_the_subfolder = source.join("pom.xml").is_file()
+        && source.join("index.html").is_file()
+        && !source.join("README.md").exists()
+        && !source.join("xusom-admin").exists();
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut served = false;
+    while Instant::now() < deadline {
+        if http_200_on(SUB_PORT) {
+            served = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    ls_containers::stop_session(&session).await.unwrap();
+
+    assert!(only_the_subfolder, "the build context must be exactly the selected subfolder's files");
+    assert!(served, "the snapshot of a nested project never served HTTP 200");
 }
