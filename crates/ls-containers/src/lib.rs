@@ -56,12 +56,12 @@ pub struct RunningSession {
 /// this), point any database service at the deterministic seed-hash-keyed
 /// volume, and bring the project up via `podman-compose`.
 pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Result<RunningSession> {
-    // On Linux this is close to the old bare availability checks; on
-    // Windows/macOS it actually attempts to provision Podman (installing it
-    // and/or starting its VM) rather than just failing. Every step is
-    // logged to ProvisioningLog::open_default()'s file regardless of
-    // platform. Falls back to a stderr-only log if the OS data dir can't be
-    // determined, rather than blocking the run over a logging problem.
+    // The readiness gate: podman + podman-compose present, a stopped podman
+    // machine started, and a memory-limited test container really runs
+    // (cached on success). Never installs anything - that's the setup
+    // wizard's job. Every step is logged to ProvisioningLog::open_default()'s
+    // file; falls back to stderr if the OS data dir can't be determined,
+    // still running the same gate.
     //
     // Kept for the rest of this function (not just this preflight check) so
     // `podman::compose_up` below can stream its own real, live output into
@@ -71,15 +71,12 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
     // "Show details" panel going silent almost immediately in real use).
     let log = match ProvisioningLog::open_default() {
         Ok(log) => {
-            provisioning::ensure_podman_ready(&log).await?;
+            readiness::ensure_ready_for_run(&log).await?;
             Some(log)
         }
         Err(e) => {
             eprintln!("provisioning log unavailable ({e:#}), continuing without one");
-            anyhow::ensure!(
-                podman::podman_available() && podman::podman_compose_available(),
-                "podman/podman-compose not found on PATH — run scripts/setup-linux-deps.sh"
-            );
+            readiness::gate(None).await?;
             None
         }
     };
@@ -180,15 +177,12 @@ pub async fn run_existing(compose_root: &Path, project_name: &str, git_commit: &
 
     let log = match ProvisioningLog::open_default() {
         Ok(log) => {
-            provisioning::ensure_podman_ready(&log).await?;
+            readiness::ensure_ready_for_run(&log).await?;
             Some(log)
         }
         Err(e) => {
             eprintln!("provisioning log unavailable ({e:#}), continuing without one");
-            anyhow::ensure!(
-                podman::podman_available() && podman::podman_compose_available(),
-                "podman/podman-compose not found on PATH — run scripts/setup-linux-deps.sh"
-            );
+            readiness::gate(None).await?;
             None
         }
     };
