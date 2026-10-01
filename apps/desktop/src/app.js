@@ -2319,6 +2319,13 @@ $("cw-test-btn").addEventListener("click", async () => {
     log.classList.add("hidden");
   } else {
     result.append(cwEl("p", "error", res.error || "The test run failed."));
+    if (SetupWizard.isPodmanNotReady(res.error)) {
+      const fix = cwEl("button", "ghost-btn", "Fix setup");
+      fix.type = "button";
+      fix.id = "cw-fix-setup-btn";
+      fix.addEventListener("click", () => openSetup());
+      result.append(fix);
+    }
     if (res.output_tail) result.append(cwEl("pre", "cw-log", res.output_tail));
     $("cw-fix-btn").classList.remove("hidden");
   }
@@ -3195,6 +3202,7 @@ function renderReviewPanel(session) {
   // attempt looked like, so switching tabs away mid-Run and back doesn't
   // lose the log or silently drop the error.
   $("run-error").textContent = session.runErrorText || "";
+  $("run-fix-setup-btn").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
   const showRunProgress = session.runInProgress || !!session.runErrorText;
   $("run-progress-wrap").classList.toggle("hidden", !showRunProgress);
   if (showRunProgress) {
@@ -3219,6 +3227,7 @@ function renderResumePanel(session) {
   $("resume-already-running-hint").classList.toggle("hidden", !session.reportedRunning);
 
   $("resume-run-error").textContent = session.runErrorText || "";
+  $("resume-run-fix-setup-btn").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
   const showRunProgress = session.runInProgress || !!session.runErrorText;
   $("resume-run-progress-wrap").classList.toggle("hidden", !showRunProgress);
   if (showRunProgress) {
@@ -3404,11 +3413,11 @@ $("reject-btn").addEventListener("click", async () => {
 // same as the label text always did - kept as innerHTML (fixed literals
 // only, nothing dynamic ever reaches this button) rather than duplicating
 // two full icon+label strings at every call site.
-function setDetailsToggleExpanded(expanded) {
-  $("run-details-toggle").innerHTML = expanded
+function setDetailsToggleExpanded(expanded, btn = $("run-details-toggle")) {
+  btn.innerHTML = expanded
     ? '<svg class="icon"><use href="#icon-chevron-up"></use></svg> Hide details'
     : '<svg class="icon"><use href="#icon-chevron-down"></use></svg> Show details';
-  $("run-details-toggle").setAttribute("aria-expanded", String(expanded));
+  btn.setAttribute("aria-expanded", String(expanded));
 }
 
 // Collapsed by default — toggling only shows/hides the log already
@@ -3434,6 +3443,7 @@ async function runReceiveSession(session, workDir, ids) {
   session.runErrorText = "";
   $(ids.btn).disabled = true;
   $(ids.error).textContent = "";
+  $(ids.fixSetup).classList.add("hidden");
   $(ids.progressWrap).classList.remove("hidden");
   $(ids.progressLabel).textContent = "Starting containers…";
   document.querySelector(ids.spinnerSelector)?.classList.remove("hidden");
@@ -3481,6 +3491,7 @@ async function runReceiveSession(session, workDir, ids) {
     session.runErrorText = String(err);
     if (session.id === activeSessionId) {
       $(ids.error).textContent = session.runErrorText;
+      $(ids.fixSetup).classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
       $(ids.progressLabel).textContent = "Failed — see details below.";
       document.querySelector(ids.spinnerSelector)?.classList.add("hidden");
     }
@@ -3503,6 +3514,7 @@ const REVIEW_RUN_IDS = {
   spinnerSelector: "#run-progress-wrap .spinner",
   log: "run-log",
   detailsToggle: true,
+  fixSetup: "run-fix-setup-btn",
 };
 
 const RESUME_RUN_IDS = {
@@ -3512,6 +3524,7 @@ const RESUME_RUN_IDS = {
   progressLabel: "resume-run-progress-label",
   spinnerSelector: "#resume-run-progress-wrap .spinner",
   log: "resume-run-log",
+  fixSetup: "resume-run-fix-setup-btn",
 };
 
 $("run-btn").addEventListener("click", () => {
@@ -3589,6 +3602,242 @@ $("receive-arm-toggle").addEventListener("change", async () => {
     $("receive-arm-toggle").disabled = false;
   }
 });
+
+// ---------- dependency setup: Welcome -> live checklist -> guided fix -> app ----------
+// The pure view model is setup-wizard.js (SetupWizard); this only draws it and
+// drives the four backend commands. #setup-screen is visible from the first
+// paint and covers the app, which keeps starting up normally behind it.
+let setupView = null;
+const setupUi = { openDetails: new Set(), manualOpen: null, consentStep: null, returnFocus: null };
+
+function showSetupScreen() {
+  $("setup-screen").classList.remove("hidden");
+  document.querySelector(".app-shell").inert = true;
+}
+
+function enterApp() {
+  setupView = null;
+  $("setup-screen").classList.add("hidden");
+  document.querySelector(".app-shell").inert = false;
+}
+
+const SETUP_ICON = { done: "icon-circle-check", failed: "icon-circle-x" };
+
+function renderSetupStep(s) {
+  const li = cwEl("li", `setup-step is-${s.status}`);
+  li.dataset.step = s.step;
+  const icon = cwEl("span", "setup-icon");
+  icon.setAttribute("aria-hidden", "true");
+  if (s.status === "checking") icon.append(cwEl("span", "spinner"));
+  else icon.innerHTML = SETUP_ICON[s.status] ? `<svg class="icon"><use href="#${SETUP_ICON[s.status]}"></use></svg>` : '<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle></svg>';
+  const main = cwEl("div", "setup-step-main");
+  const title = cwEl("div", "setup-step-title", s.title);
+  title.append(cwEl("span", "sr-only", ` (${SetupWizard.statusLabel(s.status)})`));
+  main.append(title);
+  const summary = s.summary || (s.status === "checking" ? "Checking…" : "");
+  if (summary) main.append(cwEl("p", "setup-step-summary", summary));
+  if (s.details) {
+    const open = setupUi.openDetails.has(s.step);
+    const toggle = cwEl("button", "link-btn setup-details-toggle");
+    toggle.type = "button";
+    setDetailsToggleExpanded(open, toggle);
+    const log = cwEl("pre", `run-log setup-details${open ? "" : " hidden"}`, s.details);
+    toggle.addEventListener("click", () => {
+      const nowOpen = !log.classList.toggle("hidden");
+      if (nowOpen) setupUi.openDetails.add(s.step);
+      else setupUi.openDetails.delete(s.step);
+      setDetailsToggleExpanded(nowOpen, toggle);
+    });
+    main.append(toggle, log);
+  }
+  const actions = SetupWizard.stepActions(s);
+  if (actions.length) {
+    const row = cwEl("div", "setup-actions");
+    const btn = (label, cls, onClick) => {
+      const b = cwEl("button", cls, label);
+      b.type = "button";
+      b.addEventListener("click", onClick);
+      row.append(b);
+      return b;
+    };
+    if (actions.includes("fix")) btn("Fix it", "primary-btn setup-fix-btn", (e) => openSetupConsent(s, e.currentTarget));
+    btn("Retry this step", "ghost-btn setup-retry-btn", () => verifySetup());
+    if (actions.includes("manual")) {
+      const b = btn("I'll do it myself", "ghost-btn setup-manual-btn", () => {
+        setupUi.manualOpen = setupUi.manualOpen === s.step ? null : s.step;
+        renderSetup();
+        document.querySelector("#setup-steps .setup-recheck-btn")?.focus();
+      });
+      b.setAttribute("aria-expanded", String(setupUi.manualOpen === s.step));
+    }
+    main.append(row);
+    if (setupUi.manualOpen === s.step) {
+      const box = cwEl("div", "warn setup-manual");
+      box.append(cwEl("p", "", s.manual_instructions));
+      const recheck = cwEl("button", "primary-btn setup-recheck-btn", "Recheck");
+      recheck.type = "button";
+      recheck.addEventListener("click", () => verifySetup());
+      box.append(recheck);
+      main.append(box);
+    }
+  }
+  li.append(icon, main);
+  return li;
+}
+
+const SETUP_STATUS_TEXT = {
+  checking: "Checking this computer…",
+  fixing: "Setting things up…",
+  failed: "One step needs your attention.",
+  restart: "Waiting for a restart.",
+  done: "You're all set.",
+};
+
+function renderSetup() {
+  const v = setupView;
+  if (!v) return;
+  $("setup-welcome").classList.toggle("hidden", v.phase !== "welcome");
+  $("setup-checklist").classList.toggle("hidden", v.phase === "welcome");
+  $("setup-steps").replaceChildren(...v.steps.map(renderSetupStep));
+  $("setup-status").textContent = SETUP_STATUS_TEXT[v.phase] || "";
+  $("setup-status").classList.toggle("result", v.phase === "done");
+  $("setup-skip-wrap").classList.toggle("hidden", v.phase !== "failed");
+}
+
+listen("setup-step", (evt) => {
+  if (!setupView || (setupView.phase !== "checking" && setupView.phase !== "fixing")) return;
+  SetupWizard.applyEvent(setupView, evt.payload);
+  renderSetup();
+});
+listen("setup-progress", (evt) => {
+  if (!setupView || setupView.phase !== "fixing") return;
+  SetupWizard.applyProgress(setupView, evt.payload);
+  renderSetup();
+});
+
+/// After a verify/fix finished: go into the app, ask for a restart, or
+/// leave the failed step on screen with focus on its first action.
+function afterSetupResult() {
+  renderSetup();
+  if (!setupView) return;
+  if (setupView.phase === "done") {
+    const v = setupView;
+    setTimeout(() => { if (setupView === v) enterApp(); }, 900);
+  } else if (setupView.phase === "restart") {
+    $("setup-restart-error").textContent = "";
+    $("setup-restart-overlay").classList.remove("hidden");
+    $("setup-restart-now").focus();
+  } else if (setupView.phase === "failed") {
+    document.querySelector("#setup-steps .setup-actions button")?.focus();
+  }
+}
+
+async function verifySetup() {
+  const v = setupView;
+  if (!v) return;
+  setupUi.manualOpen = null;
+  SetupWizard.beginVerify(v);
+  renderSetup();
+  try {
+    const res = await invoke("setup_verify");
+    if (setupView !== v) return;
+    SetupWizard.applyResult(v, res);
+  } catch (err) {
+    if (setupView !== v) return;
+    SetupWizard.applyError(v, err);
+  }
+  afterSetupResult();
+}
+
+async function runSetupFix(step) {
+  const v = setupView;
+  if (!v) return;
+  setupUi.manualOpen = null;
+  setupUi.openDetails.delete(step);
+  SetupWizard.beginFix(v, step);
+  renderSetup();
+  try {
+    const res = await invoke("setup_fix", { step, confirmed: true });
+    if (setupView !== v) return;
+    SetupWizard.applyResult(v, res);
+  } catch (err) {
+    if (setupView !== v) return;
+    SetupWizard.applyError(v, err, step);
+  }
+  afterSetupResult();
+}
+
+/// Startup and every "Fix setup" button land here. The checklist is drawn
+/// from setup_state (file-only, instant) before the real check starts, so
+/// progress made earlier shows straight away.
+async function openSetup({ fromStartup = false } = {}) {
+  showSetupScreen();
+  try {
+    setupView = SetupWizard.viewFromState(await invoke("setup_state"));
+  } catch (err) {
+    // setup_state failed or answered garbage: don't lock the user out - Run
+    // is still checked by the backend before it starts anything.
+    console.warn("setup_state failed, skipping setup:", err);
+    enterApp();
+    return;
+  }
+  setupUi.openDetails.clear();
+  setupUi.manualOpen = null;
+  if (!fromStartup) setupView.phase = "checking";
+  renderSetup();
+  if (setupView.phase === "welcome") {
+    $("setup-welcome-title").focus();
+    return;
+  }
+  $("setup-checklist-title").focus();
+  verifySetup();
+}
+
+$("setup-start-btn").addEventListener("click", () => {
+  setupView.phase = "checking";
+  renderSetup();
+  $("setup-checklist-title").focus();
+  verifySetup();
+});
+$("setup-skip-btn").addEventListener("click", enterApp);
+$("run-fix-setup-btn").addEventListener("click", () => openSetup());
+$("resume-run-fix-setup-btn").addEventListener("click", () => openSetup());
+
+function openSetupConsent(s, returnFocus) {
+  setupUi.consentStep = s.step;
+  setupUi.returnFocus = returnFocus;
+  $("setup-consent-title").textContent = s.title;
+  $("setup-consent-text").textContent = SetupWizard.consentMessage(s, setupView.os);
+  $("setup-consent-overlay").classList.remove("hidden");
+  $("setup-consent-continue").focus();
+}
+
+function closeSetupConsent() {
+  $("setup-consent-overlay").classList.add("hidden");
+  setupUi.returnFocus?.focus();
+}
+
+$("setup-consent-cancel").addEventListener("click", closeSetupConsent);
+$("setup-consent-continue").addEventListener("click", () => {
+  $("setup-consent-overlay").classList.add("hidden");
+  runSetupFix(setupUi.consentStep);
+});
+$("setup-consent-overlay").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeSetupConsent();
+});
+
+async function restartForSetup(now) {
+  $("setup-restart-error").textContent = "";
+  try {
+    await invoke("setup_restart", { now });
+  } catch (err) {
+    $("setup-restart-error").textContent = `Couldn't do that: ${err}`;
+  }
+}
+$("setup-restart-now").addEventListener("click", () => restartForSetup(true));
+$("setup-restart-later").addEventListener("click", () => restartForSetup(false));
+
+openSetup({ fromStartup: true });
 
 // ---------- helpers ----------
 function setProgress(id, pct) {
