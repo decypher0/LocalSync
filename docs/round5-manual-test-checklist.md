@@ -2404,3 +2404,31 @@ On a real desktop build with Podman available:
 Known limits: Node has no build step (put it in the run command); Gradle's
 `build/libs/*.jar` can match a `-plain.jar` too (set an exact name); a MongoDB
 dump is not restored automatically; single-folder projects only.
+
+## Addendum: dependency setup wizard
+
+Automated tests cover the probe, the resume logic and the UI against a mocked
+backend. These need real machines:
+
+1. **Fresh Windows (no Podman, WSL off):** first launch shows Welcome, then the
+   checklist. "Fix it" on Podman shows a one-sentence consent dialog, then
+   winget installs Podman and podman-compose. Enabling WSL raises a UAC prompt;
+   afterwards the restart modal appears. Choose "Exit and restart later",
+   restart manually, relaunch: setup resumes at "Podman's machine", with the
+   earlier steps already ticked.
+2. **"Restart now"** actually restarts Windows, and the relaunch resumes the same
+   way.
+3. **Declining the UAC prompt** shows the step as failed with Retry and
+   "I'll do it myself", not a crash.
+4. **macOS (no Podman):** brew installs Podman and podman-compose; the machine
+   step creates and starts the VM; the container check passes.
+5. **Linux without pkexec:** the Podman step shows the exact `sudo ...` command
+   and Recheck enters the app once you've run it.
+6. **Broken Podman (e.g. Windows after the WSL 3.0.1 update):** the container
+   check fails with "Podman can't apply memory limits on this computer..."; the
+   crun error is under "Show details". Run on the Receive tab fails with the
+   same plain message and a "Fix setup" button.
+7. **Mid-project regression:** with setup done, break Podman (e.g.
+   `podman machine stop` then remove the machine) and press Run - within 90
+   seconds of the last good check it may still try; after that it must fail
+   at the check with the plain message, not deep inside podman-compose.
