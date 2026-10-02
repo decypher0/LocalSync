@@ -50,10 +50,15 @@ pub fn export_tables(details: &ConnectionDetails, tables: &[String]) -> Result<V
     let mut conn = open_connection(details)?;
     let mut out = String::new();
 
+    // Like real mysqldump: foreign-key checks are off for the whole restore,
+    // so a table whose FK references a table later in the dump (or a DROP of
+    // a table another one references) imports fine - table order is irrelevant.
+    writeln!(out, "SET FOREIGN_KEY_CHECKS=0;").ok();
     for name in tables {
         validate_identifier(name)?;
         export_one_table(&mut conn, name, &mut out)?;
     }
+    writeln!(out, "SET FOREIGN_KEY_CHECKS=1;").ok();
 
     Ok(out.into_bytes())
 }
