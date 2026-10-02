@@ -2944,10 +2944,12 @@ async function pushUpdateToDevices(session, keys) {
 /// The session for `folders`: one already open for exactly this project and
 /// database plan is reused (sending it again is a new transfer, never a
 /// second tab); otherwise it's created - its snapshot built once, now.
-async function sessionForFolders(folders) {
-  const existing = [...sessions.values()].find((s) => s.kind === "send" && sameFolderPlan(s.folders, folders));
+// `name` (New Session -> Name) always makes a new, named session - two
+// sessions of the same folders are different sessions once they're named.
+async function sessionForFolders(folders, name) {
+  const existing = !name && [...sessions.values()].find((s) => s.kind === "send" && sameFolderPlan(s.folders, folders));
   if (existing) return existing;
-  const session = sendSessionFromView(await invoke("create_project_session", { folders, title: null }));
+  const session = sendSessionFromView(await invoke("create_project_session", { folders, title: name || null }));
   addSession(session);
   return session;
 }
