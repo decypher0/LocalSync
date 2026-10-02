@@ -44,9 +44,7 @@ fn build_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> 
         .text("menu-theme-dark", "Dark")
         .build()?;
 
-    let view_menu = SubmenuBuilder::new(app, "View").text("menu-session-history", "Session history").build()?;
-
-    MenuBuilder::new(app).items(&[&app_menu, &theme_menu, &view_menu]).build()
+    MenuBuilder::new(app).items(&[&app_menu, &theme_menu]).build()
 }
 
 /// Two demo instances (sender + receiver) commonly run on the same Linux
@@ -315,6 +313,7 @@ fn main() {
             receiver_session_commands::save_received_session,
             receiver_session_commands::stop_received_session,
             session_list_commands::list_sessions,
+            session_commands::project_push_status,
             session_list_commands::rename_session,
             session_list_commands::close_session,
             receiver_session_commands::discard_received_session,

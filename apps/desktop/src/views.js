@@ -38,6 +38,8 @@
     return d === 1 ? "yesterday" : `${d} days ago`;
   }
   const displayName = (s) => s.displayName || s.title || "Untitled session";
+  // A device key is a discovered device's persistent id, or "dev-<room code>".
+  const shortDeviceId = (key) => (key || "").replace(/^dev-/, "").slice(0, 8) || "—";
   const sendIsRunning = (s) => s.transfers.some((t) => t.status === "connecting" || t.status === "active");
   function receiveState(s) {
     if (s.status === "connecting" || s.status === "active") return "receiving";
@@ -69,6 +71,7 @@
   function navigate(view, session) {
     V.view = view;
     if (session !== undefined) V.session = session;
+    if (view !== "session") syncNearbyBrowsing();
     for (const el of document.querySelectorAll("#app-views .lsv-view")) el.classList.add("hidden");
     if (view === "home") {
       $id("view-home").classList.remove("hidden");
@@ -226,6 +229,15 @@
     $id(slotId).appendChild(wizardModal);
     $id("send-wizard-overlay").classList.add("hidden"); // the overlay shell stays empty
   }
+  // Parks the wizard out of sight (so a later receive flow never shows it).
+  function parkWizard() {
+    holding.appendChild(wizardModal);
+  }
+  // Which Transfer area shows: the send wizard's step, or the receive modes.
+  function showTransferArea(mode) {
+    $id("new-transfer-slot").classList.toggle("hidden", mode !== "send");
+    $id("new-transfer-receive").classList.toggle("hidden", mode !== "receive");
+  }
 
   function startSendSetup() {
     V.flow.phase = "setup";
@@ -264,6 +276,7 @@
   function startSendTransfer(session, again) {
     V.flow = V.flow && !again ? { ...V.flow, phase: "transfer", sessionId: session.id } : { name: session.title, mode: "send", phase: "transfer", sessionId: session.id, again };
     placeWizard("new-transfer-slot");
+    showTransferArea("send");
     openSendWizard({ sessionId: session.id });
     $id("send-wizard-overlay").classList.add("hidden");
     navigate("new-transfer");
@@ -289,6 +302,7 @@
   const origCloseSendWizard = window.closeSendWizard;
   window.closeSendWizard = function () {
     origCloseSendWizard();
+    parkWizard();
     // The wizard's own Cancel while it's a step of this flow = leave the flow.
     if (V.flow && (V.view === "new-setup" || V.view === "new-transfer") && !V.sendingNow) {
       const back = V.flow.sessionId && sessions.get(V.flow.sessionId);
@@ -321,9 +335,9 @@
   const receiveForm = $id("receive-idle");
   function startReceiveSetup() {
     V.flow.phase = "setup";
+    parkWizard();
     $id("new-setup-slot").classList.add("hidden");
     $id("new-setup-receive").classList.remove("hidden");
-    $id("new-setup-receive-slot").appendChild(discoverWrap);
     $id("new-work-dir").value = $id("work-dir").value || "/tmp/localsync-work";
     navigate("new-setup");
   }
@@ -333,9 +347,44 @@
     $id("resume-work-dir").value = dir;
     V.flow.phase = "transfer";
     V.flow.workDir = dir;
-    $id("new-transfer-slot").appendChild(receiveForm);
+    parkWizard();
+    $id("ntr-code-slot").appendChild(receiveForm);
+    $id("ntr-local-slot").appendChild(discoverWrap);
+    $id("ntr-relay-url").value = $id("relay-url").value || modeStore.url || "";
+    showTransferArea("receive");
+    applyReceiveMode();
     navigate("new-transfer");
     $id("receive-room-code").focus();
+  });
+
+  // The receive modes drive the existing receive form: Cloud drop is its
+  // "this is a Cloud drop code" branch; Remote relay needs the relay URL the
+  // Receive handler reads from Settings.
+  const RECEIVE_MODE_HINT = {
+    local: "Paste the code the sender shared, or turn on discoverability below so a sender on this network can pick this device directly.",
+    remote: "For a sender on a different network: both of you use the same relay server.",
+    cloud: "The sender uploaded the project to Google Drive. Paste their code; nothing downloads until they approve your linked account.",
+  };
+  function receiveMode() {
+    const on = document.querySelector('input[name="ntr-mode"]:checked');
+    return on ? on.value : "local";
+  }
+  function applyReceiveMode() {
+    const mode = receiveMode();
+    $id("ntr-local").classList.toggle("hidden", mode !== "local");
+    $id("ntr-remote").classList.toggle("hidden", mode !== "remote");
+    $id("ntr-mode-hint").textContent = RECEIVE_MODE_HINT[mode];
+    const cloud = $id("cloud-drop-receive-toggle");
+    if (cloud.checked !== (mode === "cloud")) {
+      cloud.checked = mode === "cloud";
+      cloud.dispatchEvent(new Event("change"));
+    }
+  }
+  for (const r of document.querySelectorAll('input[name="ntr-mode"]')) r.addEventListener("change", applyReceiveMode);
+  $id("ntr-relay-url").addEventListener("input", () => {
+    const url = $id("ntr-relay-url").value.trim();
+    $id("relay-url").value = url; // what the Receive handler reads
+    modeStore.url = url; // and remembered, like Settings does
   });
 
   $id("new-back-btn").addEventListener("click", () => {
@@ -357,7 +406,6 @@
         if (s) navigate("session", s);
         else navigate("home");
       } else {
-        $id("new-setup-receive-slot").appendChild(discoverWrap);
         V.flow.phase = "setup";
         navigate("new-setup");
       }
@@ -487,7 +535,12 @@
       V.layout = layout;
     }
     renderHeader(s, state);
+    if (s.kind === "send" && (!V.pushStatus || V.pushStatus.sessionId !== s.id)) {
+      V.pushStatus = { sessionId: s.id, pending: true };
+      refreshPushStatus();
+    }
     (s.kind === "send" ? updateSend : updateReceive)(s, state);
+    syncNearbyBrowsing();
   }
 
   function renderHeader(s, state) {
@@ -544,7 +597,17 @@
           "",
           "is-send"
         );
-      $id("sp-devices-slot").insertAdjacentHTML("beforeend", `<div id="sp-live-devices" class="lsv-live-devices"></div>`);
+      $id("sp-devices-slot").insertAdjacentHTML(
+        "beforeend",
+        `<div id="sp-live-devices" class="lsv-live-devices"></div>
+         <div class="lsv-subhead">On this network</div>
+         <div id="sp-nearby" class="lsv-live-devices"><p class="lsv-muted lsv-small">Looking for discoverable devices…</p></div>`
+      );
+      $id("sp-nearby").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-send-nearby]");
+        const device = b && V.nearby.find((d) => d.fullname === b.dataset.sendNearby);
+        if (device) startTransfer(V.session, { kind: "device", device }, { deviceName: device.nickname });
+      });
       $id("sp-devices-slot").append(reuse.devices, reuse.devicesEmpty);
       $id("sp-save").disabled = true;
       $id("sp-pull").disabled = true;
@@ -575,7 +638,7 @@
         panel("Last known device", "sp-last-device") +
         actionsPanel(
           btn("sp-send-again", "Send again", icon.sendAgain, "lsv-btn-primary") + btn("sp-push", "Push update", icon.up) + btn("sp-close", "Close session", "", "lsv-btn-danger"),
-          "Pull only appears once a device has connected this session - there's nothing to pull from until then.",
+          "Push update sends only what changed since the last send, to the last device - reconnecting the same way Send again does.",
           "is-send"
         );
     }
@@ -617,7 +680,12 @@
           .join("") + `<div class="lsv-device is-waiting"><span class="lsv-device-dot"></span><span class="lsv-device-name">Waiting for another device…</span></div>`;
     } else {
       const last = [...s.devices].filter((d) => d.marker).sort((x, y) => (x.marker.sent_at || "").localeCompare(y.marker.sent_at || "")).pop();
-      $id("sp-last-device").innerHTML = last ? row("Name", last.name) + row("Last seen", timeAgo(last.marker.sent_at)) : `<p class="lsv-muted">Not sent to any device yet.</p>`;
+      $id("sp-last-device").innerHTML = last
+        ? row("Name", last.name) +
+          row("Id", shortDeviceId(last.key)) +
+          row("Last sent", `${new Date(last.marker.sent_at).toLocaleString()} (${timeAgo(last.marker.sent_at)})`) +
+          row("Transfer speed", last.bytes_per_sec ? `${formatBytes(last.bytes_per_sec)}/s` : "—")
+        : `<p class="lsv-muted">Not sent to any device yet.</p>`;
       if (state === "failed") return void updatePushButtons(s);
       $id("sp-ph-text").textContent = last
         ? `The last transfer to this device finished ${timeAgo(last.marker.sent_at)}. Send again to generate a fresh connection code.`
@@ -626,21 +694,81 @@
     updatePushButtons(s);
   }
 
+  // Push update needs a previous recipient AND a project that changed since
+  // the last send to it (project_push_status compares the folders' current
+  // git commits with what that device received).
   function updatePushButtons(s) {
-    const behind = s.devices.filter((d) => !d.up_to_date);
-    $id("sp-push").disabled = s.busy || behind.length === 0;
-    $id("sp-push").title = behind.length === 0 ? "Every device already has the latest version." : `Send the latest version to ${behind.map((d) => d.name).join(", ")}.`;
+    const st = V.pushStatus && V.pushStatus.sessionId === s.id ? V.pushStatus : { pending: true };
+    let reason = "";
+    if (st.pending) reason = "Checking for changes…";
+    else if (!st.last_device_key) reason = "No previous recipient on record - send this project to a device first.";
+    else if (!st.changed) reason = `No changes to push since the last send to ${st.last_device_name}.`;
+    $id("sp-push").disabled = s.busy || !!reason;
+    $id("sp-push").title = reason || `Send what changed since the last send to ${st.last_device_name}.`;
     $id("sp-send-again").disabled = s.busy;
+  }
+
+  async function refreshPushStatus() {
+    const s = V.session;
+    if (V.view !== "session" || !s || s.kind !== "send") return;
+    let st;
+    try {
+      st = await invoke("project_push_status", { sessionId: s.id });
+    } catch (_) {
+      st = { last_device_key: null, changed: false };
+    }
+    V.pushStatus = { ...st, sessionId: s.id };
+    if (V.view === "session" && V.session === s && $id("sp-push")) updatePushButtons(s);
   }
 
   function pushUpdate() {
     const s = V.session;
-    // The existing push sends to the selected devices: select every device that's behind.
-    s.pushSelection = new Set(s.devices.filter((d) => !d.up_to_date).map((d) => d.key));
-    renderActiveSession();
-    const push = $id("send-push-btn");
-    if (!push.disabled) push.click();
+    const key = V.pushStatus && V.pushStatus.last_device_key;
+    if (!key) return;
+    s.pushSelection ||= new Set();
+    // Only the diff, to the last-known device: pushUpdateToDevices finds it on
+    // the network or falls back to a fresh code, like Send again.
+    pushUpdateToDevices(s, [key]).finally(refreshPushStatus);
   }
+
+  // LAN discovery for the running sender page's Devices panel.
+  V.nearby = [];
+  let nearbyTimer = null;
+  async function pollNearby() {
+    const box = $id("sp-nearby");
+    if (!box) return;
+    try {
+      V.nearby = await invoke("list_nearby_devices");
+    } catch (err) {
+      box.innerHTML = `<p class="lsv-muted lsv-small">Couldn't list nearby devices: ${escapeHtml(String(err))}</p>`;
+      return;
+    }
+    box.innerHTML = V.nearby.length
+      ? V.nearby
+          .map(
+            (d) => `<div class="lsv-device is-live"><span class="lsv-device-dot"></span><span class="lsv-grow"><span class="lsv-device-name">${escapeHtml(d.nickname)}</span><span class="lsv-device-sub">discoverable on this network</span></span>
+              <button type="button" class="lsv-btn lsv-btn-small" data-send-nearby="${escapeHtml(d.fullname)}">Send</button></div>`
+          )
+          .join("")
+      : `<p class="lsv-muted lsv-small">No discoverable devices yet. A device shows up here once it turns on "Make this device discoverable" - a connection code always works too.</p>`;
+  }
+  function syncNearbyBrowsing() {
+    const want = V.view === "session" && V.layout === "send-running";
+    if (want && !nearbyTimer) {
+      invoke("start_discovery_browsing").catch(() => {});
+      pollNearby();
+      nearbyTimer = setInterval(pollNearby, 2500);
+    } else if (!want && nearbyTimer) {
+      clearInterval(nearbyTimer);
+      nearbyTimer = null;
+      invoke("stop_discovery_browsing").catch(() => {});
+    }
+  }
+  // A commit made while the page is open enables Push update within 10 s.
+  setInterval(() => {
+    if (V.view === "session" && !document.hidden && V.session && V.session.kind === "send") refreshPushStatus();
+  }, 10000);
+  window.addEventListener("focus", refreshPushStatus);
 
   // ----- receiver -----
   function buildReceive(state) {

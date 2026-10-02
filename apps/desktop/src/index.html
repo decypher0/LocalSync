@@ -310,14 +310,40 @@
               <input id="new-work-dir" class="lsv-input" type="text" value="/tmp/localsync-work" />
             </label>
           </div>
-          <div id="new-setup-receive-slot"></div>
           <div class="lsv-new-footer lsv-new-footer-inline">
             <button id="new-setup-receive-continue" class="lsv-btn-primary" type="button">Continue</button>
           </div>
         </div>
       </div>
       <div id="new-transfer-panel" class="lsv-new-body lsv-slot-body hidden">
+        <!-- Send: the existing wizard's transfer-mode + target step (moved here by views.js). -->
         <div id="new-transfer-slot" class="lsv-slot"></div>
+        <!-- Receive: the same three transfer modes as the sender. -->
+        <div id="new-transfer-receive" class="lsv-slot hidden">
+          <section class="lsv-panel">
+            <div class="lsv-panel-title">How is the project coming?</div>
+            <div class="lsv-radio-row" role="radiogroup" aria-label="Transfer mode">
+              <label class="lsv-radio"><input type="radio" name="ntr-mode" value="local" checked /> Local network</label>
+              <label class="lsv-radio"><input type="radio" name="ntr-mode" value="remote" /> Remote relay</label>
+              <label class="lsv-radio"><input type="radio" name="ntr-mode" value="cloud" /> Cloud drop</label>
+            </div>
+            <p id="ntr-mode-hint" class="lsv-muted lsv-small"></p>
+          </section>
+          <section id="ntr-remote" class="lsv-panel hidden">
+            <div class="lsv-panel-title">Relay server</div>
+            <label class="lsv-field">Remote relay URL (the same relay the sender uses)
+              <input id="ntr-relay-url" class="lsv-input" type="text" placeholder="ws://your-vps-ip:9090" />
+            </label>
+          </section>
+          <section class="lsv-panel">
+            <div class="lsv-panel-title">Connection code</div>
+            <div id="ntr-code-slot"></div>
+          </section>
+          <section id="ntr-local" class="lsv-panel">
+            <div class="lsv-panel-title">Let senders on this network find you</div>
+            <div id="ntr-local-slot"></div>
+          </section>
+        </div>
       </div>
     </section>
 
