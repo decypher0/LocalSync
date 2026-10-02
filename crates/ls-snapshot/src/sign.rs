@@ -22,38 +22,50 @@ fn identity_path() -> Result<PathBuf> {
 }
 
 /// Loads the sender's persistent ed25519 identity from `~/.localsync/identity.key`,
-/// generating and persisting a new one on first run. Uses `create_new` so two
-/// concurrent first-run callers can't corrupt each other's key file; whichever
-/// loses the race just reads back what the winner wrote.
+/// generating and persisting a new one on first run. The new key is written in
+/// full to a private temp file, then hard-linked into place - an atomic
+/// create-if-absent - so the key file never exists half-written: a concurrent
+/// first-run caller that loses the race reads back exactly what the winner wrote.
 pub fn load_or_create_identity() -> Result<SigningKey> {
     let path = identity_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
+    let parent = path.parent().expect("identity path has a parent");
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
 
-    match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            let key = SigningKey::generate(&mut rand::rngs::OsRng);
-            file.write_all(key.as_bytes())?;
+    if !path.exists() {
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let tmp = parent.join(format!(
+            "identity.key.{}.{:?}.tmp",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let written = (|| -> std::io::Result<()> {
+            let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 file.set_permissions(fs::Permissions::from_mode(0o600))?;
             }
-            log::info!("signing: created new sender identity at {}", path.display());
-            Ok(key)
+            file.write_all(key.as_bytes())?;
+            file.sync_all()
+        })();
+        let linked = written.and_then(|()| fs::hard_link(&tmp, &path));
+        let _ = fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => {
+                log::info!("signing: created new sender identity at {}", path.display());
+                return Ok(key);
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {} // lost the race: read the winner's key
+            Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
         }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            let arr: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("identity key file {} is corrupt (expected 32 bytes)", path.display()))?;
-            log::info!("signing: loaded existing sender identity from {}", path.display());
-            Ok(SigningKey::from_bytes(&arr))
-        }
-        Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
     }
+
+    let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("identity key file {} is corrupt (expected 32 bytes)", path.display()))?;
+    log::info!("signing: loaded existing sender identity from {}", path.display());
+    Ok(SigningKey::from_bytes(&arr))
 }
 
 /// Signs `sha256(manifest_json) || sha256(payload)` (64 bytes) — the exact
