@@ -476,3 +476,67 @@ async fn a_request_without_compose_settings_is_an_error_not_a_failed_boot() {
     let err = compose_wizard::test_run_compose(handle.clone(), handle.state::<AppState>(), bad).await.unwrap_err();
     assert!(err.contains("port"), "{err}");
 }
+
+/// The FK-order dump LocalSync's MySQL exporter produced before the
+/// `SET FOREIGN_KEY_CHECKS` fix: `children` references `parents`, which is
+/// created later, so a real MySQL 8 import fails with ERROR 1824. With
+/// `fixed`, the same dump wrapped the way the exporter now writes it.
+fn fk_order_dump(fixed: bool) -> String {
+    let body = "-- Table: children\n\
+        DROP TABLE IF EXISTS `children`;\n\
+        CREATE TABLE `children` (`id` int NOT NULL, `parent_id` int NOT NULL, PRIMARY KEY (`id`), KEY `fk` (`parent_id`), \
+        CONSTRAINT `fk` FOREIGN KEY (`parent_id`) REFERENCES `parents` (`id`)) ENGINE=InnoDB;\n\
+        INSERT INTO `children` (`id`,`parent_id`) VALUES (10,1);\n\
+        -- Table: parents\n\
+        DROP TABLE IF EXISTS `parents`;\n\
+        CREATE TABLE `parents` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;\n\
+        INSERT INTO `parents` (`id`) VALUES (1);\n";
+    if fixed {
+        format!("SET FOREIGN_KEY_CHECKS=0;\n{body}SET FOREIGN_KEY_CHECKS=1;\n")
+    } else {
+        body.to_string()
+    }
+}
+
+/// A Python app that never touches the database (so it serves either way)
+/// plus MySQL 8.0 seeded with `dump` - the app answering must not count as
+/// success unless the database really started and imported its data.
+async fn test_run_with_mysql_dump(name: &str, port: u16, dump: &str) -> TestRunReport {
+    let (base, dir) = make_project(name, &[("index.html", "<h1>app</h1>")]);
+    let dump_path = base.path().join("appdb.sql");
+    std::fs::write(&dump_path, dump).unwrap();
+    let mut s = spec(Runtime::Python, "3.12", BuildTool::Pip, &format!("python -m http.server {port}"), port);
+    s.database = Some(ls_composegen::DatabaseSpec { engine: ls_composegen::DbEngine::Mysql, version: "8.0".into(), database: "appdb".into() });
+    let mut folder = plan(&dir, s);
+    folder.dump = Some(commands::DumpPlanDto {
+        schema: "appdb".into(),
+        file_path: dump_path.display().to_string(),
+        engine: "mysql".into(),
+    });
+    let (report, _) = test_run(folder).await;
+    report
+}
+
+#[tokio::test]
+async fn a_database_dump_that_fails_to_import_fails_the_test_run_with_the_real_mysql_error() {
+    let Some(_serial) = podman_stack() else {
+        return;
+    };
+    let report = test_run_with_mysql_dump("tr-db-import-fails", 18121, &fk_order_dump(false)).await;
+    let all = format!("{}\n{}", report.error.clone().unwrap_or_default(), report.output_tail);
+    eprintln!("--- failed import report ---\n{all}");
+    assert!(!report.ok, "a database that crashed importing its dump must not pass: {all}");
+    assert!(all.contains("The database (`mysql`) stopped"), "the failure is attributed to the database: {all}");
+    assert!(all.contains("Failed to open the referenced table"), "MySQL's real error is surfaced: {all}");
+    assert_nothing_left_running("tr-db-import-fails");
+}
+
+#[tokio::test]
+async fn a_database_dump_that_imports_passes_the_test_run() {
+    let Some(_serial) = podman_stack() else {
+        return;
+    };
+    let report = test_run_with_mysql_dump("tr-db-import-ok", 18122, &fk_order_dump(true)).await;
+    assert!(report.ok, "test run failed: {:?}\n{}", report.error, report.output_tail);
+    assert_nothing_left_running("tr-db-import-ok");
+}
