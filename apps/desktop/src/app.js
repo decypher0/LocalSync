@@ -207,6 +207,8 @@ listen("snapshot-updated", (evt) => {
     startReceiveSessionFromInfo(evt.payload);
     return;
   }
+  // The push was filed as its own ReceivedSession; Run must target that one.
+  rekeySession(session, evt.payload.received_session_id);
   applyReviewInfoToSession(session, evt.payload);
   renderSessionTabs();
   if (session.id === activeSessionId) renderActiveSession();
@@ -572,7 +574,7 @@ listen("connection-request", (evt) => {
     try {
       const info = await invoke("respond_to_connection_request", { peerId, accept });
       div.remove();
-      if (info) startReceiveSessionFromInfo(info);
+      if (info) startReceiveSessionFromInfo(info, info.received_session_id);
     } catch (err) {
       errorEl.textContent = String(err);
       div.querySelectorAll("button").forEach((b) => (b.disabled = false));
@@ -3272,11 +3274,25 @@ function renderRunningPanel(session) {
 /// snapshot_id (see received_session.rs) - a tab keyed by the wrong id would
 /// make a later Run/Save/Arm call fail with "no open received session".
 function startReceiveSessionFromInfo(info, sessionId) {
-  const session = newSession("receive", sessionId || info.snapshot_id, info.manifest.project_name);
+  // The tab is keyed by the backend's ReceivedSession id - what Run/Save/arming
+  // look sessions up by - never the snapshot id or a room code.
+  const session = newSession("receive", sessionId || info.received_session_id || info.snapshot_id, info.manifest.project_name);
   applyReviewInfoToSession(session, info);
   addSession(session);
   lastReceiveSessionId = session.id;
   return session;
+}
+
+// A receive tab opened before the backend answered (keyed by its room code or
+// a placeholder) takes the real ReceivedSession id once the info arrives.
+function rekeySession(session, newId) {
+  if (!newId || newId === session.id) return;
+  sessions.delete(session.id);
+  const wasActive = activeSessionId === session.id;
+  if (lastReceiveSessionId === session.id) lastReceiveSessionId = newId;
+  session.id = newId;
+  sessions.set(session.id, session);
+  if (wasActive) activeSessionId = session.id;
 }
 
 $("cloud-drop-receive-toggle").addEventListener("change", () => {
@@ -3323,6 +3339,7 @@ $("receive-btn").addEventListener("click", async () => {
         session.errorText = "The sender declined this request.";
         endSession(session, "error");
       } else {
+        rekeySession(session, outcome.info.received_session_id);
         applyReviewInfoToSession(session, outcome.info);
         renderSessionTabs();
         if (session.id === activeSessionId) renderActiveSession();
@@ -3358,6 +3375,7 @@ $("receive-btn").addEventListener("click", async () => {
     // This only verifies + diffs. Nothing from the snapshot executes until
     // the user reviews it below and clicks Run.
     const info = await invoke("receive_snapshot", { roomCode: decoded.room_id, signalingUrl: decoded.signaling_url });
+    rekeySession(session, info.received_session_id);
     applyReviewInfoToSession(session, info);
     renderSessionTabs();
     if (session.id === activeSessionId) renderActiveSession();
