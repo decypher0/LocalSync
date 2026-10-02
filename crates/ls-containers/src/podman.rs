@@ -62,6 +62,12 @@ pub fn podman_compose_available() -> bool {
 
 /// True if a podman volume named `name` already exists — i.e. this is a
 /// cache hit on the database data volume, not a cold start.
+/// `podman volume rm -f` - succeeds if the volume is already gone.
+pub async fn volume_remove(name: &str) -> Result<()> {
+    let output = command("podman").args(["volume", "rm", "-f", name]).output().await.context("running podman volume rm")?;
+    ensure_success(&output, "podman volume rm")
+}
+
 pub async fn volume_exists(name: &str) -> Result<bool> {
     let output = command("podman")
         .args(["volume", "inspect", name])
@@ -224,6 +230,23 @@ pub async fn service_state(project: &str, service: &str) -> Result<ServiceState>
             _ => ServiceState::Running,
         },
     })
+}
+
+/// Runs the service container's own health check once, now (`podman
+/// healthcheck run`), instead of reading a status that only podman's
+/// health-check *timer* updates - rootless podman without a systemd user
+/// session (WSL, some setups) may never run that timer, leaving the status
+/// stuck at "starting". `Ok(true)` = healthy; `Ok(false)` = not (yet)
+/// healthy, no container, or no health check defined.
+pub async fn service_healthy(project: &str, service: &str) -> Result<bool> {
+    let Some((name, _, _)) = service_container(project, service).await? else { return Ok(false) };
+    let output = command("podman")
+        .args(["healthcheck", "run"])
+        .arg(&name)
+        .output()
+        .await
+        .context("running podman healthcheck run")?;
+    Ok(output.status.success())
 }
 
 /// The last `tail` lines the service's container wrote (stdout and stderr

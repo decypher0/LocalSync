@@ -204,7 +204,6 @@ pub fn create_snapshot_multi_with(
     }
 
     let dependency_lock_hash = hash::combine_hex_hashes(&lock_hashes);
-    let db_seed_hash = hash::combine_hex_hashes(&seed_hashes);
 
     // Round: no `.clone()` of the dump content here — `dump_tuples` borrows
     // each `PendingDump`'s `DumpSource` (either already-in-memory `Bytes`, or
@@ -246,6 +245,16 @@ pub fn create_snapshot_multi_with(
             engine: d.engine.clone(),
         });
     }
+
+    // The receiver keys its database volume by this hash and skips the dump
+    // import when that volume already exists - so every dump's content must
+    // be part of it, or two different dumps (even of different projects)
+    // share one volume and the second one is never imported. Projects with
+    // no dump keep exactly the hash they always had.
+    for d in &database_dumps {
+        seed_hashes.push(d.hash.clone());
+    }
+    let db_seed_hash = hash::combine_hex_hashes(&seed_hashes);
 
     let payload = bundle::merge_folder_payloads(&bundles, &dump_tuples)?;
 
@@ -768,6 +777,43 @@ mod tests {
         assert_eq!(
             files.get("db-dumps/catalog-service/catalog_db.tar.gz").unwrap().as_slice(),
             dump_bytes.as_slice()
+        );
+    }
+
+    /// The receiver keys its database volume by `db_seed_hash` and skips the
+    /// import when that volume exists, so a different dump must give a
+    /// different hash (else project B silently runs on project A's database),
+    /// the same dump the same hash (the cache still works), and no dump the
+    /// hash it always had.
+    #[test]
+    fn db_seed_hash_covers_the_database_dump() {
+        let dir = tempdir().unwrap();
+        let a = make_git_folder(dir.path(), "orders-service");
+        let folders = [FolderSpec { path: a, parent_commit: None }];
+        let with_dump = |sql: &[u8]| {
+            create_snapshot_multi(
+                &folders,
+                &[PendingDump {
+                    folder_index: 0,
+                    schema: "orders".to_string(),
+                    source: DumpSource::Bytes(sql.to_vec()),
+                    engine: "mysql".to_string(),
+                }],
+            )
+            .unwrap()
+            .manifest
+            .db_seed_hash
+        };
+        let one = with_dump(b"CREATE TABLE a (id INT);");
+        let two = with_dump(b"CREATE TABLE b (id INT);");
+        let none = create_snapshot_multi(&folders, &[]).unwrap().manifest.db_seed_hash;
+        assert_ne!(one, two, "different dumps must not share a database volume");
+        assert_eq!(one, with_dump(b"CREATE TABLE a (id INT);"), "the same dump keeps the same volume");
+        assert_ne!(one, none);
+        assert_eq!(
+            none,
+            hash::combine_hex_hashes(&[hash::db_seed_hash(&folders[0].path).unwrap()]),
+            "without a dump the hash is unchanged"
         );
     }
 
