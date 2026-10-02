@@ -313,6 +313,7 @@ fn main() {
             compose_wizard::test_run_compose,
             receiver_session_commands::run_received_session,
             receiver_session_commands::save_received_session,
+            receiver_session_commands::stop_received_session,
             receiver_session_commands::discard_received_session,
             receiver_session_commands::delete_saved_received_session,
             receiver_session_commands::open_saved_received_session,

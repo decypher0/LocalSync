@@ -62,6 +62,22 @@ pub fn podman_compose_available() -> bool {
 
 /// True if a podman volume named `name` already exists — i.e. this is a
 /// cache hit on the database data volume, not a cold start.
+/// Whether any container of compose project `project` is running right now
+/// - asked of podman itself (podman-compose's project label), so it's right
+/// across app restarts, unlike any in-memory record of what was started.
+/// Blocking, so the (synchronous) Tauri command asking it can stay a plain
+/// `fn` (run off the main thread via `#[tauri::command(async)]`).
+pub fn project_running(project: &str) -> Result<bool> {
+    let output = sync_command("podman")
+        .args(["ps", "--filter"])
+        .arg(format!("label=io.podman.compose.project={project}"))
+        .args(["--filter", "status=running", "--format", "{{.Names}}"])
+        .output()
+        .context("running podman ps")?;
+    ensure_success(&output, "podman ps")?;
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|l| !l.trim().is_empty()))
+}
+
 /// `podman volume rm -f` - succeeds if the volume is already gone.
 pub async fn volume_remove(name: &str) -> Result<()> {
     let output = command("podman").args(["volume", "rm", "-f", name]).output().await.context("running podman volume rm")?;
