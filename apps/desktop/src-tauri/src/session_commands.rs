@@ -231,6 +231,11 @@ pub async fn create_project_session(
     let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| default_title(&folders));
     let session = ProjectSession::new(new_session_id(), title, folders, now_rfc3339());
     ensure_artifact(&state, &session, None).await?;
+    // Every session is kept on disk from the moment it exists, so it
+    // survives a restart and shows on Home.
+    if let Err(e) = crate::session_history::save_project(&session) {
+        log::warn!("create_project_session: couldn't persist {}: {e}", session.id);
+    }
     let view = build_view(&state, &session, None);
     state.project_sessions.lock().map_err(|e| e.to_string())?.insert(session.id.clone(), session);
     Ok(view)
@@ -342,12 +347,9 @@ pub async fn send_project_session<R: tauri::Runtime>(
             view: build_view(&state, &session, Some(&artifact.commits)),
         });
     };
-    // A session the user already chose to save stays current on disk - they
-    // opted in to that copy existing; an unsaved one is never written.
-    if crate::session_history::find_project(&updated.id).ok().flatten().is_some() {
-        if let Err(e) = crate::session_history::save_project(&updated) {
-            log::warn!("send_project_session: couldn't update the saved copy of {}: {e}", updated.id);
-        }
+    // Every session stays current on disk.
+    if let Err(e) = crate::session_history::save_project(&updated) {
+        log::warn!("send_project_session: couldn't update the saved copy of {}: {e}", updated.id);
     }
     // A per-device diff artifact has done its job; only the plain one stays cached.
     if since.is_some() {

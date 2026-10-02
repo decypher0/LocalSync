@@ -78,6 +78,22 @@ pub fn project_running(project: &str) -> Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).lines().any(|l| !l.trim().is_empty()))
 }
 
+/// Every compose project with at least one running container, in one
+/// `podman ps` - so a list of N sessions costs one query, not N. Blocking.
+pub fn running_compose_projects() -> Result<std::collections::HashSet<String>> {
+    let output = sync_command("podman")
+        .args(["ps", "--filter", "status=running", "--format", "{{index .Labels \"io.podman.compose.project\"}}"])
+        .output()
+        .context("running podman ps")?;
+    ensure_success(&output, "podman ps")?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "<no value>")
+        .map(String::from)
+        .collect())
+}
+
 /// `podman volume rm -f` - succeeds if the volume is already gone.
 pub async fn volume_remove(name: &str) -> Result<()> {
     let output = command("podman").args(["volume", "rm", "-f", name]).output().await.context("running podman volume rm")?;

@@ -352,6 +352,12 @@ async fn wait_for_database(project: &str, service: &str, timeout: std::time::Dur
 
 /// Whether the compose project `project_name`@`git_commit` (the same naming
 /// `run_snapshot`/`run_existing` use) has a running container right now.
+/// Every running compose project's name (see `compose_project_name`), in
+/// one blocking `podman ps`.
+pub fn running_compose_projects() -> Result<std::collections::HashSet<String>> {
+    podman::running_compose_projects()
+}
+
 /// Blocking (a quick `podman ps`).
 pub fn project_running(project_name: &str, git_commit: &str) -> Result<bool> {
     podman::project_running(&compose_project_name(project_name, git_commit))

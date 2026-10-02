@@ -205,16 +205,17 @@ async fn a_session_is_created_once_reused_across_devices_and_retries_and_tracks_
     assert!(none.up_to_date);
     assert!(!none.view.devices.iter().find(|d| d.key == key_a).unwrap().up_to_date, "A is still behind");
 
-    // ---- save is opt-in: a never-saved session leaves nothing behind ----
-    assert!(localsync_desktop::session_history::find_project(&sid).unwrap().is_none(), "nothing saved yet");
+    // ---- every session is persisted from the start; Close removes it for good ----
+    assert!(localsync_desktop::session_history::find_project(&sid).unwrap().is_some(), "persisted without an explicit Save");
     session_commands::discard_project_session(sender.state::<AppState>(), sid.clone()).unwrap();
     {
         let state = sender.state::<AppState>();
         assert!(state.project_sessions.lock().unwrap().is_empty());
         assert!(state.artifacts.lock().unwrap().is_empty(), "a discarded session's artifacts go with it");
     }
+    localsync_desktop::session_list_commands::close_session(sender.state::<AppState>(), sid.clone()).await.unwrap();
     let gone = session_commands::open_saved_project_session(sender.state::<AppState>(), sid.clone()).await;
-    assert!(gone.is_err(), "a discarded, never-saved session cannot be reopened");
+    assert!(gone.is_err(), "a closed session cannot be reopened");
 
     // ---- ...and a saved one comes back whole, with its per-device markers ----
     let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];

@@ -4,7 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use localsync_desktop::{commands, compose_wizard, receiver_session_commands, send_log, session_commands, setup_commands, state::AppState};
+use localsync_desktop::{commands, compose_wizard, receiver_session_commands, send_log, session_commands, session_list_commands, setup_commands, state::AppState};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
@@ -314,6 +314,9 @@ fn main() {
             receiver_session_commands::run_received_session,
             receiver_session_commands::save_received_session,
             receiver_session_commands::stop_received_session,
+            session_list_commands::list_sessions,
+            session_list_commands::rename_session,
+            session_list_commands::close_session,
             receiver_session_commands::discard_received_session,
             receiver_session_commands::delete_saved_received_session,
             receiver_session_commands::open_saved_received_session,
