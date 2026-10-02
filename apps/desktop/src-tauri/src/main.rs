@@ -89,7 +89,7 @@ fn preload_snapshot(state: &AppState) -> Option<commands::IncomingSnapshotInfo> 
         let diff = ls_security::diff_summary(&verified)?;
         let manifest = verified.snapshot().manifest.clone();
         let snapshot_id = format!("{}@{}", manifest.project_name, manifest.git_commit);
-        let sender_pubkey_hex = manifest.sender_pubkey.iter().map(|b| format!("{b:02x}")).collect();
+        let sender_pubkey_hex: String = manifest.sender_pubkey.iter().map(|b| format!("{b:02x}")).collect();
 
         // Same non-fatal, informational-only lookup commands::receive_snapshot
         // does — see its doc comment.
@@ -107,13 +107,30 @@ fn preload_snapshot(state: &AppState) -> Option<commands::IncomingSnapshotInfo> 
             }
         };
 
+        // File it as a ReceivedSession like a real receive does, so Run (which
+        // is keyed by the session id) works for a preloaded snapshot too.
+        let outcome = receiver_session_commands::track_received_snapshot(
+            state,
+            &manifest,
+            &snapshot_id,
+            &sender_pubkey_hex,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
         state
             .verified
             .lock()
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .insert(snapshot_id.clone(), verified);
 
-        Ok(commands::IncomingSnapshotInfo { snapshot_id, manifest, diff, sender_pubkey_hex, recognized_peer })
+        Ok(commands::IncomingSnapshotInfo {
+            snapshot_id,
+            manifest,
+            diff,
+            sender_pubkey_hex,
+            recognized_peer,
+            received_session_id: outcome.session_id().to_string(),
+        })
     };
 
     match load() {
