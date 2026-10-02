@@ -16,8 +16,9 @@
 //! fixed by a `wsl --shutdown` + restart (a real, reproduced-more-than-once
 //! stuck WSL2 user-session state, not a hypothetical).
 
-use super::ProvisioningLog;
-use anyhow::{Context, Result};
+use super::{output_text, run_logged, ProvisioningLog};
+use crate::provisioning::setup::{parse_machine_list, StepCheck};
+use anyhow::Result;
 use std::os::windows::process::CommandExt;
 
 /// Prevents a spawned console-mode child (`winget`, `podman`, `wsl.exe`,
@@ -40,32 +41,6 @@ fn sync_command(program: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
-}
-
-/// Runs `program args...`, logging the command line and its exit
-/// status/stdout/stderr before returning the raw [`std::process::Output`].
-/// Only errors (via `Context`) on a spawn failure (binary not found etc) —
-/// a non-zero exit is left to the caller to turn into a specific `ensure!`
-/// with its own actionable message.
-async fn run_logged(
-    log: &ProvisioningLog,
-    program: &str,
-    args: &[&str],
-) -> Result<std::process::Output> {
-    let cmdline = format!("{program} {}", args.join(" "));
-    log.info(&format!("running: {cmdline}"));
-    let output = tokio_command(program)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to run `{cmdline}` — is it on PATH?"))?;
-    log.info(&format!(
-        "`{cmdline}` exited {} — stdout: {:?} stderr: {:?}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim(),
-    ));
-    Ok(output)
 }
 
 /// Reads one `REG_SZ`/`REG_EXPAND_SZ` value via the `reg.exe` that ships
@@ -93,23 +68,88 @@ fn reg_query_value(key: &str, name: &str) -> Option<String> {
 /// this. Without this, every install step below would "succeed" and then
 /// have the immediately-following verification check fail for a completely
 /// unrelated reason.
+///
+/// Setup-wizard change: registry entries are *appended* to the current PATH
+/// (only the ones it doesn't already have, with `%VAR%`s expanded) instead
+/// of replacing it, so whatever this process was started with (e.g. a pip
+/// Scripts dir added earlier) stays reachable.
 fn refresh_path_from_registry(log: &ProvisioningLog) {
     let machine =
         reg_query_value(r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment", "Path");
     let user = reg_query_value(r"HKCU\Environment", "Path");
-    let mut combined = machine.unwrap_or_default();
-    if let Some(u) = user {
-        if !combined.is_empty() && !combined.ends_with(';') {
-            combined.push(';');
+    let registry = format!("{};{}", machine.unwrap_or_default(), user.unwrap_or_default());
+    let current = std::env::var("PATH").unwrap_or_default();
+    let merged = merge_path(&current, &expand_env(&registry));
+    if merged != current {
+        log.info("refreshed this process's PATH from the registry");
+        std::env::set_var("PATH", merged);
+    }
+}
+
+/// `current` plus every entry of `extra` it doesn't already contain
+/// (case-insensitive, trailing `\` ignored - Windows paths).
+fn merge_path(current: &str, extra: &str) -> String {
+    let norm = |p: &str| p.trim().trim_end_matches('\\').to_lowercase();
+    let mut out: Vec<String> =
+        current.split(';').filter(|p| !p.trim().is_empty()).map(String::from).collect();
+    for p in extra.split(';').filter(|p| !p.trim().is_empty()) {
+        if !out.iter().any(|o| norm(o) == norm(p)) {
+            out.push(p.trim().to_string());
         }
-        combined.push_str(&u);
     }
-    if combined.is_empty() {
-        log.info("PATH refresh: could not read PATH from the registry, leaving it unchanged");
-        return;
+    out.join(";")
+}
+
+/// Expands `%NAME%` references (REG_EXPAND_SZ values come back unexpanded
+/// from `reg query`); unknown names are left as-is.
+fn expand_env(s: &str) -> String {
+    let parts: Vec<&str> = s.split('%').collect();
+    let mut out = String::from(parts[0]);
+    let mut i = 1;
+    while i < parts.len() {
+        match (parts.get(i + 1), std::env::var(parts[i])) {
+            (Some(rest), Ok(v)) if !parts[i].is_empty() => {
+                out.push_str(&v);
+                out.push_str(rest);
+                i += 2;
+            }
+            _ => {
+                out.push('%');
+                out.push_str(parts[i]);
+                i += 1;
+            }
+        }
     }
-    log.info("refreshed this process's PATH from the registry after an install");
-    std::env::set_var("PATH", combined);
+    out
+}
+
+/// pip's per-user Scripts dir (where pip puts `podman-compose.exe`; see
+/// `ensure_compose_installed` for why it's asked, not guessed), if Python
+/// is available.
+fn pip_user_scripts_dir() -> Option<String> {
+    let out = sync_command("python")
+        .args(["-c", "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))"])
+        .output()
+        .ok()?;
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !dir.is_empty()).then_some(dir)
+}
+
+/// Before any setup check/fix: pick up what installers registered since this
+/// process started, and pip's user Scripts dir if podman-compose is only
+/// reachable from there (pip never adds it to PATH itself).
+pub(crate) fn prepare_path(log: &ProvisioningLog) {
+    refresh_path_from_registry(log);
+    if !crate::podman::podman_compose_available() {
+        if let Some(dir) = pip_user_scripts_dir() {
+            let current = std::env::var("PATH").unwrap_or_default();
+            let merged = merge_path(&current, &dir);
+            if merged != current {
+                log.info(&format!("added pip's user Scripts dir {dir} to this process's PATH"));
+                std::env::set_var("PATH", merged);
+            }
+        }
+    }
 }
 
 /// Step 1 (called from `provisioning.rs`, before `ensure_ready`):
@@ -211,13 +251,8 @@ async fn check_wsl2_usable(log: &ProvisioningLog) -> Result<()> {
             );
         }
     };
-    let decode = |bytes: &[u8]| -> String {
-        let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-        let u16s: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        String::from_utf16_lossy(&u16s)
-    };
-    let stdout = decode(&output.stdout);
-    let stderr = decode(&output.stderr);
+    let stdout = decode_wsl_output(&output.stdout);
+    let stderr = decode_wsl_output(&output.stderr);
     log.info(&format!(
         "`wsl --status` exited {} — stdout: {:?} stderr: {:?}",
         output.status,
@@ -268,6 +303,21 @@ async fn check_wsl2_usable(log: &ProvisioningLog) -> Result<()> {
     Ok(())
 }
 
+/// `wsl.exe` writes UTF-16LE when captured, sometimes behind a stray UTF-8
+/// BOM (see `check_wsl2_usable`); on this machine in October 2026 it came
+/// with no BOM, and with `WSL_UTF8=1` set it writes plain UTF-8. So: strip
+/// a BOM if present, then decode as UTF-16LE only if the bytes contain NULs
+/// (ASCII-range UTF-16 always does), else as UTF-8.
+fn decode_wsl_output(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    if bytes.contains(&0) {
+        let u16s: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&u16s)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 /// Step 5: `podman machine list` — init a machine if none exists, start it
 /// if one exists but isn't running. Same `{{.Name}}\t{{.Running}}` template
 /// used across platforms (Podman abstracts the WSL2-vs-QEMU/AppleHV backend
@@ -284,10 +334,7 @@ async fn ensure_machine_running(log: &ProvisioningLog) -> Result<()> {
         "`podman machine list` failed:\n{}",
         String::from_utf8_lossy(&list.stderr).trim()
     );
-    let stdout = String::from_utf8_lossy(&list.stdout);
-    let first_machine = stdout.lines().find(|l| !l.trim().is_empty()).map(str::to_string);
-
-    let already_running = match first_machine {
+    let already_running = match parse_machine_list(&String::from_utf8_lossy(&list.stdout)) {
         None => {
             log.info("no podman machine found — running `podman machine init`");
             let init = run_logged(log, "podman", &["machine", "init"]).await?;
@@ -298,8 +345,7 @@ async fn ensure_machine_running(log: &ProvisioningLog) -> Result<()> {
             );
             false
         }
-        Some(line) => {
-            let running = line.split('\t').nth(1).map(str::trim) == Some("true");
+        Some(running) => {
             log.info(&format!("podman machine already exists (running: {running})"));
             running
         }
@@ -332,11 +378,22 @@ async fn ensure_machine_running(log: &ProvisioningLog) -> Result<()> {
 /// was tried. This is one bounded retry, not a loop — if it doesn't clear
 /// up after that, it's surfaced as a real failure instead of retried
 /// blindly forever.
-async fn verify_podman_info(log: &ProvisioningLog) -> Result<()> {
+///
+/// `allow_wsl_shutdown` is false on the setup-wizard path: `wsl --shutdown`
+/// stops every WSL distro the person has, so it's never done silently there
+/// (the error and the MachineReady manual instructions mention it instead).
+async fn verify_podman_info(log: &ProvisioningLog, allow_wsl_shutdown: bool) -> Result<()> {
     let info = run_logged(log, "podman", &["info"]).await?;
     if info.status.success() {
         return Ok(());
     }
+    anyhow::ensure!(
+        allow_wsl_shutdown,
+        "The Podman machine started, but `podman info` can't reach it:\n{}\n\
+         Running `wsl --shutdown` (this stops all running WSL distributions) and trying again \
+         usually fixes this.",
+        output_text(&info)
+    );
     log.error(&format!(
         "`podman info` failed on the first try: {}",
         String::from_utf8_lossy(&info.stderr).trim()
@@ -399,19 +456,12 @@ async fn ensure_compose_installed(log: &ProvisioningLog) -> Result<()> {
     // `<user base>\Python313\Scripts`. `sysconfig.get_path('scripts',
     // 'nt_user')` is the one API that reports the real, version-correct
     // path, so that's what's actually asked here instead of guessing again.
-    let scripts_query = run_logged(
-        log,
-        "python",
-        &["-c", "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))"],
-    )
-    .await?;
-    anyhow::ensure!(
-        scripts_query.status.success(),
-        "installed podman-compose via pip, but locating its install directory via \
-         `sysconfig.get_path('scripts', 'nt_user')` failed afterwards:\n{}",
-        String::from_utf8_lossy(&scripts_query.stderr).trim()
-    );
-    let scripts_dir = String::from_utf8_lossy(&scripts_query.stdout).trim().to_string();
+    let Some(scripts_dir) = pip_user_scripts_dir() else {
+        anyhow::bail!(
+            "installed podman-compose via pip, but locating its install directory via \
+             `sysconfig.get_path('scripts', 'nt_user')` failed afterwards"
+        );
+    };
     log.info(&format!("adding {scripts_dir} to this process's PATH"));
     let existing = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{scripts_dir};{existing}"));
@@ -422,6 +472,134 @@ async fn ensure_compose_installed(log: &ProvisioningLog) -> Result<()> {
          after adding {scripts_dir} to PATH. Restart your terminal and re-run."
     );
     log.info("podman-compose installed via pip");
+    Ok(())
+}
+
+// --- Setup wizard steps (called from `setup.rs`) ---
+
+/// `WslEnabled` check (read-only): `wsl --status` succeeds and doesn't say
+/// Virtual Machine Platform is missing. Unlike `check_wsl2_usable`, a
+/// default distribution is NOT required: the fix is `wsl --install
+/// --no-distribution`, and `podman machine init` imports its own WSL2 distro
+/// (always as version 2, so the default version doesn't matter either).
+pub(crate) async fn check_wsl(log: &ProvisioningLog) -> StepCheck {
+    log.info("running: wsl --status");
+    let output = match tokio_command("wsl").arg("--status").output().await {
+        Ok(o) => o,
+        Err(e) => {
+            return StepCheck {
+                ok: false,
+                summary: "The Windows Subsystem for Linux isn't installed yet.".into(),
+                details: format!("`wsl --status` could not be run: {e}"),
+            }
+        }
+    };
+    let text = format!("{}\n{}", decode_wsl_output(&output.stdout), decode_wsl_output(&output.stderr))
+        .trim()
+        .to_string();
+    log.info(&format!("`wsl --status` exited {} — output: {text:?}", output.status));
+    let (ok, summary) = classify_wsl_status(output.status.success(), &text);
+    StepCheck { ok, summary: summary.into(), details: text }
+}
+
+/// ponytail: matches English `wsl --status` text only; on a localized
+/// Windows only the exit code and the error code count.
+fn classify_wsl_status(success: bool, text: &str) -> (bool, &'static str) {
+    if text.contains("0x80370102") || text.contains("HYPERV_NOT_INSTALLED") {
+        return (
+            false,
+            "Virtualization is turned off on this computer (check Virtual Machine Platform and your BIOS/UEFI settings).",
+        );
+    }
+    if !success || text.to_lowercase().contains("virtual machine platform") {
+        return (false, "The Windows Subsystem for Linux isn't turned on yet.");
+    }
+    (true, "The Windows Subsystem for Linux is turned on.")
+}
+
+/// `PodmanInstalled` fix: Podman via winget, Python via winget (per-user)
+/// only if it's missing, then podman-compose via pip.
+pub(crate) async fn fix_podman_installed(log: &ProvisioningLog) -> Result<()> {
+    ensure_podman_installed(log).await?;
+    if !crate::podman::podman_compose_available() && !crate::podman::binary_available("python") {
+        anyhow::ensure!(
+            crate::podman::binary_available("winget"),
+            "Python (needed to install podman-compose) is missing and winget isn't available. \
+             Install Python from https://python.org, then try again."
+        );
+        // ponytail: unverified on real hardware (this machine already has
+        // Python). PrependPath=1 because the python.org installer leaves PATH
+        // alone by default.
+        let install = run_logged(
+            log,
+            "winget",
+            &[
+                "install",
+                "-e",
+                "--id",
+                "Python.Python.3.13",
+                "--scope",
+                "user",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+                "--override",
+                "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1",
+            ],
+        )
+        .await?;
+        anyhow::ensure!(
+            install.status.success(),
+            "`winget install Python.Python.3.13` failed (exit code {:?}):\n{}",
+            install.status.code(),
+            output_text(&install)
+        );
+        refresh_path_from_registry(log);
+    }
+    ensure_compose_installed(log).await
+}
+
+/// The PowerShell that runs `wsl --install --no-distribution` elevated
+/// (UAC prompt via `Start-Process -Verb RunAs`) and exits with its real
+/// exit code. A declined prompt makes Start-Process throw; that exits 1223
+/// (ERROR_CANCELLED). `$ErrorActionPreference = 'Stop'` matters: without it
+/// the throw is non-terminating, `$p` is null and `exit $null` exits 0.
+const WSL_INSTALL_PS: &str = "$ErrorActionPreference = 'Stop'; try { \
+    $p = Start-Process -FilePath 'wsl.exe' -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait -PassThru; \
+    exit $p.ExitCode } catch { Write-Output $_.Exception.Message; exit 1223 }";
+
+/// `WslEnabled` fix. The elevated process's output can't be captured, only
+/// its exit code.
+pub(crate) async fn fix_wsl(log: &ProvisioningLog) -> Result<()> {
+    let out = run_logged(log, "powershell", &["-NoProfile", "-NonInteractive", "-Command", WSL_INSTALL_PS]).await?;
+    match out.status.code() {
+        // 3010 = ERROR_SUCCESS_REBOOT_REQUIRED; the restart step follows anyway.
+        Some(0) | Some(3010) => Ok(()),
+        Some(1223) => anyhow::bail!(
+            "The administrator prompt was declined, so WSL wasn't turned on.\n{}",
+            output_text(&out)
+        ),
+        code => anyhow::bail!(
+            "`wsl --install --no-distribution` failed (exit code {code:?}).\n{}",
+            output_text(&out)
+        ),
+    }
+}
+
+/// `MachineReady` fix: init (if none) + start + `podman info`, without the
+/// silent `wsl --shutdown` retry `ensure_ready` does.
+pub(crate) async fn fix_machine(log: &ProvisioningLog) -> Result<()> {
+    ensure_machine_running(log).await?;
+    verify_podman_info(log, false).await
+}
+
+pub(crate) fn restart_computer() -> Result<()> {
+    let out = sync_command("shutdown").args(["/r", "/t", "5", "/c", "LocalSync setup"]).output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`shutdown /r` failed (exit code {:?}):\n{}",
+        out.status.code(),
+        output_text(&out)
+    );
     Ok(())
 }
 
@@ -436,7 +614,7 @@ pub async fn ensure_ready(log: &ProvisioningLog) -> Result<()> {
     ensure_podman_installed(log).await?;
     check_wsl2_usable(log).await?;
     ensure_machine_running(log).await?;
-    verify_podman_info(log).await?;
+    verify_podman_info(log, true).await?;
     ensure_compose_installed(log).await?;
     Ok(())
 }
@@ -464,6 +642,51 @@ mod tests {
         assert!(result.is_ok(), "provisioning failed: {result:?}\nlog:\n{contents}");
         assert!(crate::podman::podman_available());
         assert!(crate::podman::podman_compose_available());
+    }
+
+    #[test]
+    fn wsl_output_decoding_handles_utf16_with_and_without_bom_and_utf8() {
+        let utf16: Vec<u8> = "Default Version: 2".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let with_bom = [&[0xEF, 0xBB, 0xBF][..], &utf16].concat();
+        assert_eq!(decode_wsl_output(&utf16), "Default Version: 2");
+        assert_eq!(decode_wsl_output(&with_bom), "Default Version: 2");
+        assert_eq!(decode_wsl_output(b"Default Version: 2"), "Default Version: 2");
+    }
+
+    #[test]
+    fn wsl_status_classification() {
+        assert!(classify_wsl_status(true, "Default Version: 2").0);
+        // No default distribution is fine (podman brings its own).
+        assert!(classify_wsl_status(true, "Default Version: 2\nNo default distribution").0);
+        assert!(!classify_wsl_status(false, "WSL is not installed").0);
+        assert!(!classify_wsl_status(true, "Please enable the Virtual Machine Platform feature").0);
+        assert!(!classify_wsl_status(false, "Error code: Wsl/0x80370102").0);
+    }
+
+    #[test]
+    fn path_merge_appends_only_missing_entries() {
+        assert_eq!(merge_path(r"C:\a;C:\B\", r"c:\b;C:\c;"), r"C:\a;C:\B\;C:\c");
+        std::env::set_var("LS_TEST_EXPAND_VAR", r"C:\x");
+        assert_eq!(
+            expand_env(r"%LS_TEST_EXPAND_VAR%\bin;%LS_NOT_SET_XYZ%;50%"),
+            r"C:\x\bin;%LS_NOT_SET_XYZ%;50%"
+        );
+    }
+
+    /// The exit-code plumbing of `WSL_INSTALL_PS`, with the elevated
+    /// `wsl.exe` swapped for an unelevated `cmd /c exit 7` (no UAC prompt):
+    /// the real child exit code must come through.
+    #[test]
+    fn wsl_install_script_propagates_exit_code() {
+        let script = WSL_INSTALL_PS
+            .replace("'wsl.exe'", "'cmd.exe'")
+            .replace("'--install','--no-distribution'", "'/c','exit 7'")
+            .replace(" -Verb RunAs", " -WindowStyle Hidden");
+        let out = sync_command("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().unwrap();
+        assert_eq!(out.status.code(), Some(7));
+        let failing = WSL_INSTALL_PS.replace("'wsl.exe'", "'definitely-not-a-real-exe-xyz.exe'").replace(" -Verb RunAs", "");
+        let out = sync_command("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &failing]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1223), "a Start-Process failure must not exit 0");
     }
 
     #[test]

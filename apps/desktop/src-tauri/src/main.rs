@@ -4,7 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use localsync_desktop::{commands, compose_wizard, receiver_session_commands, send_log, session_commands, state::AppState};
+use localsync_desktop::{commands, compose_wizard, receiver_session_commands, send_log, session_commands, setup_commands, state::AppState};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
@@ -31,6 +31,7 @@ use tauri::{Emitter, Manager};
 fn build_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let app_menu = SubmenuBuilder::new(app, "LocalSync")
         .text("menu-check-updates", "Check for updates…")
+        .text("menu-check-setup", "Check Podman setup…")
         .separator()
         .text("menu-settings", "Settings")
         .separator()
@@ -274,6 +275,10 @@ fn main() {
             session_commands::create_project_session,
             session_commands::refresh_project_session,
             session_commands::send_project_session,
+            setup_commands::setup_state,
+            setup_commands::setup_verify,
+            setup_commands::setup_fix,
+            setup_commands::setup_restart,
             session_commands::save_project_session,
             session_commands::discard_project_session,
             session_commands::delete_saved_project_session,
