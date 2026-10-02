@@ -55,6 +55,23 @@ pub struct DeviceRecord {
     pub name: String,
     pub marker: Option<DeviceMarker>,
     pub history: Vec<SendRecord>,
+    /// Size and duration of the last completed transfer to this device, for
+    /// its transfer speed. `None` for records saved before this existed.
+    #[serde(default)]
+    pub last_transfer: Option<TransferStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TransferStats {
+    pub bytes: u64,
+    pub duration_ms: u64,
+}
+
+impl TransferStats {
+    /// Bytes per second; `None` for a transfer too quick to time.
+    pub fn bytes_per_sec(&self) -> Option<u64> {
+        (self.duration_ms > 0).then(|| self.bytes * 1000 / self.duration_ms)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,8 +114,24 @@ impl ProjectSession {
                 name: name.to_string(),
                 marker: Some(marker),
                 history: vec![record],
+                last_transfer: None,
             }),
         }
+    }
+
+    /// Records how big and how long the last transfer to `key` was.
+    pub fn set_last_transfer(&mut self, key: &str, stats: TransferStats) {
+        if let Some(d) = self.devices.iter_mut().find(|d| d.key == key) {
+            d.last_transfer = Some(stats);
+        }
+    }
+
+    /// The device this session most recently sent to, if any.
+    pub fn last_device(&self) -> Option<&DeviceRecord> {
+        self.devices
+            .iter()
+            .filter(|d| d.marker.is_some())
+            .max_by(|a, b| a.marker.as_ref().unwrap().sent_at.cmp(&b.marker.as_ref().unwrap().sent_at))
     }
 
     /// For each of this session's folders, in order, the commit `key` last
@@ -196,6 +229,31 @@ mod tests {
         assert_eq!(d.history.len(), MAX_SEND_HISTORY);
         assert_eq!(d.name, format!("Name {}", MAX_SEND_HISTORY + 4));
         assert_eq!(d.history.last().unwrap().snapshot_id, format!("p@{}", MAX_SEND_HISTORY + 4));
+    }
+
+    #[test]
+    fn the_last_device_is_the_newest_send_and_keeps_its_transfer_speed() {
+        let mut s = session();
+        assert!(s.last_device().is_none(), "nothing sent yet: no previous recipient");
+        let mut older = marker("p@v1", &[("/a", "a1")]);
+        older.sent_at = "2026-01-01T00:00:00Z".into();
+        let mut newer = marker("p@v1", &[("/a", "a1")]);
+        newer.sent_at = "2026-02-01T00:00:00Z".into();
+        s.record_send("dev-b", "Bob", newer);
+        s.record_send("dev-a", "Alice", older);
+        assert_eq!(s.last_device().unwrap().key, "dev-b");
+
+        s.set_last_transfer("dev-b", TransferStats { bytes: 10_000_000, duration_ms: 4_000 });
+        s.set_last_transfer("nobody", TransferStats { bytes: 1, duration_ms: 1 });
+        assert_eq!(s.device("dev-b").unwrap().last_transfer.unwrap().bytes_per_sec(), Some(2_500_000));
+        assert_eq!(s.device("dev-a").unwrap().last_transfer, None);
+        assert_eq!(TransferStats { bytes: 5, duration_ms: 0 }.bytes_per_sec(), None);
+    }
+
+    #[test]
+    fn a_record_saved_before_transfer_stats_still_loads() {
+        let json = r#"{"key":"k","name":"n","marker":null,"history":[]}"#;
+        assert_eq!(serde_json::from_str::<DeviceRecord>(json).unwrap().last_transfer, None);
     }
 
     #[test]

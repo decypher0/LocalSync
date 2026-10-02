@@ -1084,3 +1084,13 @@ body.lsv-on #firewall-banner:not(.hidden), body.lsv-on #app-update-banner:not(.h
 .lsv-device.is-waiting .lsv-device-name { color: var(--text2); }
 .lsv-device-sub { display: block; font-size: 11.5px; color: var(--text2); }
 .lsv-pill-red { background: #3a1717; color: var(--danger-text); }
+
+.lsv-subhead { font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text2); margin: 10px 0 4px; }
+.lsv-small { font-size: 12.5px; line-height: 1.5; margin: 0; }
+.lsv-btn-small { min-height: 32px; padding: 4px 14px; font-size: 13px; width: auto; }
+
+.lsv-radio-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.lsv-radio { flex: 1; min-width: 150px; display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-radius: 8px; background: var(--surface2); border: 1px solid var(--border); font-size: 13.5px; cursor: pointer; }
+.lsv-radio:has(input:checked) { border-color: var(--accent); font-weight: 600; }
+/* The receive form inside the receive Transfer step: the mode choice replaces its heading and Cloud drop checkbox. */
+#ntr-code-slot #receive-idle > h2, #ntr-code-slot label:has(> #cloud-drop-receive-toggle) { display: none; }
