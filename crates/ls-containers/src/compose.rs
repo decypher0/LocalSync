@@ -39,6 +39,28 @@ pub fn database_service_names(manifest: &Manifest) -> Vec<String> {
         .collect()
 }
 
+/// (service, volume name) for every database service (by image, the same
+/// keywords as `database_service_names`) whose named data volume
+/// `apply_policy` pinned to a fixed name. Read from an already-rewritten
+/// compose file, so it works for `run_existing` too (no manifest there).
+pub fn pinned_db_volumes(yaml: &str) -> Result<Vec<(String, String)>> {
+    let doc: Value = serde_yaml::from_str(yaml).context("parsing docker-compose.yml as YAML")?;
+    let mut out = Vec::new();
+    let Some(services) = doc.get("services").and_then(Value::as_mapping) else { return Ok(out) };
+    for (name, svc) in services {
+        let (Some(name), Some(svc_map)) = (name.as_str(), svc.as_mapping()) else { continue };
+        let image = svc_map.get("image").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+        if !DATABASE_IMAGE_KEYWORDS.iter().any(|kw| image.contains(kw)) {
+            continue;
+        }
+        let Some(key) = named_volume_key(svc_map) else { continue };
+        if let Some(volume) = doc.get("volumes").and_then(|v| v.get(key.as_str())).and_then(|v| v.get("name")).and_then(Value::as_str) {
+            out.push((name.to_string(), volume.to_string()));
+        }
+    }
+    Ok(out)
+}
+
 /// Extract (service_name, "host:container") pairs from a compose file's
 /// `ports:` lists. Handles the common string forms: "8080:8080" and
 /// "127.0.0.1:8080:8080" (host IP dropped). A bare "8080" (container-only,

@@ -232,21 +232,36 @@ pub async fn service_state(project: &str, service: &str) -> Result<ServiceState>
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Healthy,
+    /// Not healthy (yet), or no container.
+    NotYet,
+    /// The container defines no health check, so there's nothing to wait on.
+    NoCheck,
+}
+
 /// Runs the service container's own health check once, now (`podman
 /// healthcheck run`), instead of reading a status that only podman's
 /// health-check *timer* updates - rootless podman without a systemd user
 /// session (WSL, some setups) may never run that timer, leaving the status
-/// stuck at "starting". `Ok(true)` = healthy; `Ok(false)` = not (yet)
-/// healthy, no container, or no health check defined.
-pub async fn service_healthy(project: &str, service: &str) -> Result<bool> {
-    let Some((name, _, _)) = service_container(project, service).await? else { return Ok(false) };
+/// stuck at "starting". Exit 0 = healthy, 1 = unhealthy, 125 with "no
+/// defined healthcheck" = none defined (checked against podman 4.9).
+pub async fn service_health(project: &str, service: &str) -> Result<Health> {
+    let Some((name, _, _)) = service_container(project, service).await? else { return Ok(Health::NotYet) };
     let output = command("podman")
         .args(["healthcheck", "run"])
         .arg(&name)
         .output()
         .await
         .context("running podman healthcheck run")?;
-    Ok(output.status.success())
+    Ok(if output.status.success() {
+        Health::Healthy
+    } else if String::from_utf8_lossy(&output.stderr).contains("no defined healthcheck") {
+        Health::NoCheck
+    } else {
+        Health::NotYet
+    })
 }
 
 /// The last `tail` lines the service's container wrote (stdout and stderr
