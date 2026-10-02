@@ -1,0 +1,831 @@
+// Page navigation: Home -> New Session (Name, Mode, Setup, Transfer) -> one
+// session page per kind (sender/receiver) and state (running/stopped).
+//
+// Loaded after app.js. It owns no transfer or run logic: the existing send
+// wizard, receive form, transfers list, devices list and review panel are
+// MOVED into these views (their ids and handlers keep working), the page's
+// action buttons press the existing (hidden) buttons, and a few app.js
+// functions are wrapped so the views follow what the session model does.
+(() => {
+  "use strict";
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+  const $id = (id) => document.getElementById(id);
+
+  const V = {
+    view: "home", // home | new-name | new-mode | new-setup | new-transfer | session
+    session: null, // the session object the session page shows (by reference: ids can change)
+    flow: null, // the New Session wizard: { name, mode, phase, sessionId?, again? }
+    layout: null, // which session-page skeleton is built ("send-running", ...)
+    homeItems: [], // last list_sessions result
+    closeArmed: null, // session id whose "Close session" is waiting for a second click
+  };
+
+  const holding = document.createElement("div");
+  holding.id = "lsv-holding";
+  holding.hidden = true;
+  document.body.appendChild(holding);
+  document.body.classList.add("lsv-on");
+
+  // ---------- small helpers ----------
+  function timeAgo(iso) {
+    if (!iso) return "";
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 86400) return `${Math.round(s / 3600)} hour${Math.round(s / 3600) === 1 ? "" : "s"} ago`;
+    const d = Math.round(s / 86400);
+    return d === 1 ? "yesterday" : `${d} days ago`;
+  }
+  const displayName = (s) => s.displayName || s.title || "Untitled session";
+  const sendIsRunning = (s) => s.transfers.some((t) => t.status === "connecting" || t.status === "active");
+  function receiveState(s) {
+    if (s.status === "connecting" || s.status === "active") return "receiving";
+    if (s.status === "reviewing") return "reviewing";
+    if (s.status === "running") return "running";
+    return "stopped";
+  }
+  const icon = {
+    send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>',
+    receive: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7 7 17M15 17H7V9"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+    sendAgain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>',
+    save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>',
+    down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>',
+    up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+    stop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+    play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l14 8-14 8z"/></svg>',
+    box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>',
+  };
+  const pill = (state) => {
+    const text = { running: "Running", stopped: "Stopped", receiving: "Receiving", reviewing: "Needs review", connecting: "Waiting", failed: "Transfer failed" }[state] || state;
+    const cls = state === "running" ? "lsv-pill-green" : state === "stopped" ? "lsv-pill-gray" : state === "failed" ? "lsv-pill-red" : "lsv-pill-blue";
+    return `<span class="lsv-pill ${cls}"><span class="lsv-dot"></span>${text}</span>`;
+  };
+  const row = (label, value) =>
+    `<div class="lsv-row"><span class="lsv-label">${escapeHtml(label)}</span><span class="lsv-val">${escapeHtml(value ?? "—")}</span></div>`;
+
+  // ---------- router ----------
+  function navigate(view, session) {
+    V.view = view;
+    if (session !== undefined) V.session = session;
+    for (const el of document.querySelectorAll("#app-views .lsv-view")) el.classList.add("hidden");
+    if (view === "home") {
+      $id("view-home").classList.remove("hidden");
+      renderHome();
+    } else if (view === "session") {
+      $id("view-session").classList.remove("hidden");
+      V.layout = null;
+      renderSessionPage();
+    } else {
+      $id("view-new").classList.remove("hidden");
+      for (const p of ["name", "mode", "setup", "transfer"]) $id(`new-${p}-panel`).classList.toggle("hidden", view !== `new-${p}`);
+      renderSteps(view.slice(4));
+    }
+    window.scrollTo(0, 0);
+  }
+  window.lsvNavigate = navigate;
+
+  function renderSteps(current) {
+    const order = ["name", "mode", "setup", "transfer"];
+    const at = order.indexOf(current);
+    for (const li of document.querySelectorAll(".lsv-steps li[data-step]")) {
+      const i = order.indexOf(li.dataset.step);
+      li.classList.toggle("is-current", i === at);
+      li.classList.toggle("is-done", i < at);
+      li.querySelector(".lsv-step-dot").textContent = i < at ? "✓" : String(i + 1);
+      if (i === at) li.setAttribute("aria-current", "step");
+      else li.removeAttribute("aria-current");
+    }
+    const lines = document.querySelectorAll(".lsv-steps .lsv-step-line");
+    lines.forEach((l, i) => l.classList.toggle("is-done", i < at));
+    $id("new-name-echo").textContent = V.flow && V.flow.name && current !== "name" ? `"${V.flow.name}"` : "";
+  }
+
+  // ---------- Home ----------
+  async function renderHome() {
+    let items = [];
+    try {
+      items = await invoke("list_sessions");
+      $id("home-error").classList.add("hidden");
+    } catch (err) {
+      $id("home-error").textContent = `Couldn't load your sessions: ${err}`;
+      $id("home-error").classList.remove("hidden");
+    }
+    V.homeItems = items || [];
+    // What only this window knows: live sends, and receives still in flight.
+    const byId = new Map(V.homeItems.map((i) => [i.id, { ...i }]));
+    for (const s of sessions.values()) {
+      const known = byId.get(s.id);
+      if (s.kind === "send") {
+        if (known) known.running = sendIsRunning(s);
+      } else if (!known) {
+        byId.set(s.id, { id: s.id, kind: "receive", name: displayName(s), running: s.status === "running", inFlight: receiveState(s) === "receiving", updated_at: s.startedAt });
+      } else if (s.status === "running") {
+        known.running = true;
+      }
+    }
+    const list = [...byId.values()].sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+    $id("home-empty").classList.toggle("hidden", list.length > 0);
+    $id("home-list").innerHTML = list
+      .map((i) => {
+        const state = i.inFlight ? "receiving" : i.running ? "running" : "stopped";
+        return `
+        <button type="button" class="lsv-card" data-open="${escapeHtml(i.id)}" data-kind="${escapeHtml(i.kind)}">
+          <span class="lsv-card-icon ${i.running ? "is-live" : ""}">${icon[i.kind === "send" ? "send" : "receive"]}</span>
+          <span class="lsv-card-main">
+            <span class="lsv-card-name">${escapeHtml(i.name)}</span>
+            <span class="lsv-card-sub"><span>${i.kind === "send" ? "Sending" : "Received"}</span><span class="lsv-sep">•</span>${pill(state)}</span>
+          </span>
+          <span class="lsv-card-time">${i.running ? "Updated" : "Saved"} ${escapeHtml(timeAgo(i.updated_at))}</span>
+          <span class="lsv-card-chevron" aria-hidden="true">${icon.chevron}</span>
+        </button>`;
+      })
+      .join("");
+  }
+
+  $id("home-list").addEventListener("click", async (e) => {
+    const card = e.target.closest("[data-open]");
+    if (!card) return;
+    const id = card.dataset.open;
+    const item = V.homeItems.find((i) => i.id === id);
+    try {
+      let s = sessions.get(id);
+      if (!s) {
+        if (card.dataset.kind === "send") await openSavedSession(id);
+        else await openSavedReceivedSession(id);
+        s = sessions.get(id);
+      }
+      if (!s) return;
+      if (item && s.kind === "receive") s.displayName = item.name;
+      setActiveSession(s.id);
+      navigate("session", s);
+    } catch (err) {
+      $id("home-error").textContent = String(err);
+      $id("home-error").classList.remove("hidden");
+    }
+  });
+
+  $id("home-new-btn").addEventListener("click", () => {
+    V.flow = { name: "", mode: null, phase: "name" };
+    $id("new-name-input").value = "";
+    $id("new-name-error").classList.add("hidden");
+    navigate("new-name");
+    $id("new-name-input").focus();
+  });
+
+  setInterval(() => {
+    if (V.view === "home" && !document.hidden) renderHome();
+  }, 10000);
+
+  // ---------- New Session: Name ----------
+  $id("new-name-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = $id("new-name-input").value.trim();
+    if (!name) {
+      $id("new-name-error").textContent = "Give the session a name - it's how you'll find it later.";
+      $id("new-name-error").classList.remove("hidden");
+      $id("new-name-input").focus();
+      return;
+    }
+    V.flow.name = name;
+    navigate("new-mode");
+    renderModeCards();
+  });
+
+  // ---------- New Session: Mode ----------
+  function renderModeCards() {
+    for (const card of document.querySelectorAll(".lsv-mode-card")) {
+      const on = V.flow.mode === card.dataset.mode;
+      card.classList.toggle("is-selected", on);
+      card.setAttribute("aria-checked", on ? "true" : "false");
+    }
+  }
+  for (const card of document.querySelectorAll(".lsv-mode-card")) {
+    card.addEventListener("click", () => {
+      V.flow.mode = card.dataset.mode;
+      $id("new-mode-error").classList.add("hidden");
+      renderModeCards();
+    });
+  }
+  $id("new-mode-continue").addEventListener("click", () => {
+    if (!V.flow.mode) {
+      $id("new-mode-error").textContent = "Choose Send or Receive.";
+      $id("new-mode-error").classList.remove("hidden");
+      return;
+    }
+    if (V.flow.mode === "send") startSendSetup();
+    else startReceiveSetup();
+  });
+
+  // ---------- New Session: Setup + Transfer (send) ----------
+  // The existing send wizard, shown inline. Its Step 1 (transfer mode +
+  // target) is this flow's Transfer step, so Setup starts at the folders.
+  const wizardModal = document.querySelector("#send-wizard-overlay .wizard-modal");
+  function placeWizard(slotId) {
+    $id(slotId).appendChild(wizardModal);
+    $id("send-wizard-overlay").classList.add("hidden"); // the overlay shell stays empty
+  }
+
+  function startSendSetup() {
+    V.flow.phase = "setup";
+    placeWizard("new-setup-slot");
+    $id("new-setup-slot").classList.remove("hidden");
+    $id("new-setup-receive").classList.add("hidden");
+    openSendWizard();
+    $id("send-wizard-overlay").classList.add("hidden");
+    showWizardStep("wiz-step-folders");
+    navigate("new-setup");
+  }
+
+  async function finishSendSetup() {
+    const err = $id("wiz-folders-error");
+    if (wizardFolders.length === 0) {
+      showWizardStep("wiz-step-folders");
+      err.textContent = "Select at least one project folder.";
+      return;
+    }
+    if (composeActive && !composeTestIsCurrent()) {
+      origShowWizardStep("wiz-step-compose-review");
+      return;
+    }
+    try {
+      const session = await sessionForFolders(buildWizardFoldersPayload(wizardFolders), V.flow.name);
+      resetSendWizard();
+      startSendTransfer(session, false);
+    } catch (e) {
+      origShowWizardStep("wiz-step-folders");
+      err.textContent = String(e);
+    }
+  }
+
+  // Transfer: the existing "send this session to a device" step (mode +
+  // target, Send). Also what "Send again" on the session page uses.
+  function startSendTransfer(session, again) {
+    V.flow = V.flow && !again ? { ...V.flow, phase: "transfer", sessionId: session.id } : { name: session.title, mode: "send", phase: "transfer", sessionId: session.id, again };
+    placeWizard("new-transfer-slot");
+    openSendWizard({ sessionId: session.id });
+    $id("send-wizard-overlay").classList.add("hidden");
+    navigate("new-transfer");
+  }
+
+  const origShowWizardStep = window.showWizardStep;
+  window.showWizardStep = function (id) {
+    if (V.flow && V.flow.mode === "send" && V.flow.phase === "setup") {
+      if (id === "wiz-step-mode") {
+        // "Back" from the folders step: back to choosing Send/Receive.
+        navigate("new-mode");
+        renderModeCards();
+        return;
+      }
+      if (id === "wiz-step-ready") {
+        finishSendSetup();
+        return;
+      }
+    }
+    origShowWizardStep(id);
+  };
+
+  const origCloseSendWizard = window.closeSendWizard;
+  window.closeSendWizard = function () {
+    origCloseSendWizard();
+    // The wizard's own Cancel while it's a step of this flow = leave the flow.
+    if (V.flow && (V.view === "new-setup" || V.view === "new-transfer") && !V.sendingNow) {
+      const back = V.flow.sessionId && sessions.get(V.flow.sessionId);
+      V.flow = null;
+      if (back) navigate("session", back);
+      else navigate("home");
+    }
+  };
+
+  const origStartTransfer = window.startTransfer;
+  window.startTransfer = function (session, spec, opts) {
+    V.sendingNow = true;
+    try {
+      const tr = origStartTransfer(session, spec, opts);
+      if (V.flow && V.flow.phase === "transfer") {
+        V.flow = null;
+        navigate("session", session);
+      }
+      return tr;
+    } finally {
+      V.sendingNow = false;
+    }
+  };
+  // The Transfer step's Send closes the wizard before starting the transfer.
+  $id("wiz-mode-next-btn").addEventListener("click", () => (V.sendingNow = true), true);
+  $id("wiz-mode-next-btn").addEventListener("click", () => setTimeout(() => (V.sendingNow = false), 0));
+
+  // ---------- New Session: Setup + Transfer (receive) ----------
+  const discoverWrap = $id("discoverability-wrap");
+  const receiveForm = $id("receive-idle");
+  function startReceiveSetup() {
+    V.flow.phase = "setup";
+    $id("new-setup-slot").classList.add("hidden");
+    $id("new-setup-receive").classList.remove("hidden");
+    $id("new-setup-receive-slot").appendChild(discoverWrap);
+    $id("new-work-dir").value = $id("work-dir").value || "/tmp/localsync-work";
+    navigate("new-setup");
+  }
+  $id("new-setup-receive-continue").addEventListener("click", () => {
+    const dir = $id("new-work-dir").value.trim() || "/tmp/localsync-work";
+    $id("work-dir").value = dir;
+    $id("resume-work-dir").value = dir;
+    V.flow.phase = "transfer";
+    V.flow.workDir = dir;
+    $id("new-transfer-slot").appendChild(receiveForm);
+    navigate("new-transfer");
+    $id("receive-room-code").focus();
+  });
+
+  $id("new-back-btn").addEventListener("click", () => {
+    const v = V.view;
+    if (v === "new-name") {
+      V.flow = null;
+      navigate("home");
+    } else if (v === "new-mode") navigate("new-name");
+    else if (v === "new-setup") {
+      if (V.flow.mode === "send") origCloseSendWizard();
+      navigate("new-mode");
+      renderModeCards();
+    } else if (v === "new-transfer") {
+      if (V.flow.mode === "send") {
+        // The session exists (and is saved) by now: its page is the way back.
+        const s = V.flow.sessionId && sessions.get(V.flow.sessionId);
+        origCloseSendWizard();
+        V.flow = null;
+        if (s) navigate("session", s);
+        else navigate("home");
+      } else {
+        $id("new-setup-receive-slot").appendChild(discoverWrap);
+        V.flow.phase = "setup";
+        navigate("new-setup");
+      }
+    }
+  });
+
+  // ---------- following the session model ----------
+  const origAddSession = window.addSession;
+  window.addSession = function (session) {
+    origAddSession(session);
+    if (session.kind !== "receive") return;
+    if (V.flow && V.flow.mode === "receive" && V.flow.phase === "transfer") {
+      // The receive this flow started: named as the person named it.
+      session.displayName = V.flow.name;
+      V.flow.pending = session;
+      navigate("session", session);
+    } else if (!V.flow) {
+      // A receive that arrived on its own (accepted nearby device, a pushed update).
+      navigate("session", session);
+    }
+  };
+
+  const origApplyReview = window.applyReviewInfoToSession;
+  window.applyReviewInfoToSession = function (session, info) {
+    origApplyReview(session, info);
+    if (V.flow && V.flow.pending === session) {
+      V.flow = null;
+      if (info.received_session_id) {
+        invoke("rename_session", { sessionId: info.received_session_id, name: session.displayName }).catch((e) =>
+          console.warn("couldn't name the received session:", e)
+        );
+      }
+    }
+  };
+
+  const origRenderActive = window.renderActiveSession;
+  let pageRefresh = null;
+  window.renderActiveSession = function () {
+    origRenderActive();
+    if (V.view !== "session") return;
+    renderSessionPage();
+    // app.js sometimes redraws before clearing session.busy (e.g. right
+    // after a Run), so look again once the current task has finished.
+    if (!pageRefresh) pageRefresh = setTimeout(() => ((pageRefresh = null), V.view === "session" && renderSessionPage()), 0);
+  };
+
+  // A failed Run updates only the old panel's elements, never redraws:
+  // redraw the page whenever a Run finishes, whichever way it went.
+  const origRunReceive = window.runReceiveSession;
+  window.runReceiveSession = async function (...args) {
+    try {
+      return await origRunReceive(...args);
+    } finally {
+      if (V.view === "session") renderSessionPage();
+    }
+  };
+
+  const origRenderTabs = window.renderSessionTabs;
+  let homeRefresh = null;
+  window.renderSessionTabs = function () {
+    origRenderTabs();
+    if (V.view === "home" && !homeRefresh) homeRefresh = setTimeout(() => ((homeRefresh = null), renderHome()), 300);
+  };
+
+  // Live run log lines for the receiver page (app.js appends them to the
+  // session; this just redraws the panel after it has).
+  listen("run-progress", (evt) => {
+    const s = V.session;
+    if (V.view !== "session" || !s || evt.payload.session_id !== s.snapshotId) return;
+    setTimeout(renderLogs, 0);
+  });
+
+  // A receiver page keeps its running/stopped state honest: asks the
+  // backend (which asks Podman) every 15 s while it's on screen.
+  setInterval(async () => {
+    const s = V.session;
+    if (V.view !== "session" || document.hidden || !s || s.kind !== "receive" || s.busy || s.runInProgress) return;
+    if (!s.snapshotId || receiveState(s) === "receiving" || receiveState(s) === "reviewing") return;
+    try {
+      const view = await invoke("open_saved_received_session", { sessionId: s.id });
+      if (view.running && s.status !== "running") {
+        s.status = "running";
+        s.servicePorts = view.service_ports || s.servicePorts;
+        s.dbCacheHit = view.db_cache_hit;
+      } else if (!view.running && s.status === "running") {
+        s.status = "done";
+      } else return;
+      renderSessionPage();
+    } catch (_) {
+      /* not saved yet / gone: leave the page as it is */
+    }
+  }, 15000);
+
+  // ---------- session page ----------
+  // Panels that already exist in app.js's DOM and are kept up to date by it.
+  const reuse = {
+    transfers: $id("send-transfers"),
+    transfersEmpty: $id("send-transfers-empty"),
+    devices: $id("send-devices-list"),
+    devicesEmpty: $id("send-devices-empty"),
+    review: $id("review-panel"),
+    pushStatus: $id("send-push-status"),
+  };
+
+  function pageState(s) {
+    if (s.kind === "send") {
+      if (sendIsRunning(s)) return "running";
+      // A transfer that failed or whose code expired stays visible (error + Retry).
+      const last = s.transfers[s.transfers.length - 1];
+      return last && (last.status === "error" || last.status === "expired") ? "failed" : "stopped";
+    }
+    return receiveState(s);
+  }
+
+  function renderSessionPage() {
+    const s = V.session;
+    if (!s) return navigate("home");
+    // Existing buttons act on the active session.
+    if (activeSessionId !== s.id && sessions.has(s.id)) activeSessionId = s.id;
+    const state = pageState(s);
+    const layout = `${s.kind}-${state}`;
+    if (V.layout !== layout) {
+      for (const el of Object.values(reuse)) holding.appendChild(el);
+      $id("sp-left").innerHTML = "";
+      $id("sp-right").innerHTML = "";
+      (s.kind === "send" ? buildSend : buildReceive)(state);
+      V.layout = layout;
+    }
+    renderHeader(s, state);
+    (s.kind === "send" ? updateSend : updateReceive)(s, state);
+  }
+
+  function renderHeader(s, state) {
+    const name = displayName(s);
+    const avatar = $id("sp-avatar");
+    avatar.textContent = (name.trim()[0] || "?").toUpperCase();
+    avatar.className = `lsv-avatar ${state === "running" ? (s.kind === "send" ? "is-send" : "is-receive") : ""}`;
+    $id("sp-name").textContent = name;
+    if (s.kind === "send") {
+      $id("sp-subtitle").textContent = "Sending";
+    } else {
+      const from = s.recognizedPeer ? ` from ${s.recognizedPeer.name}` : "";
+      const when = s.lastReceivedAt || s.startedAt;
+      $id("sp-subtitle").textContent = `Received${from}${when ? ` · ${timeAgo(when)}` : ""}`;
+    }
+    $id("sp-status").outerHTML = pill(state).replace('class="lsv-pill', 'id="sp-status" class="lsv-pill');
+    let meta = "";
+    if (s.kind === "send") meta = state === "running" ? `Session started ${timeAgo(s.startedAt)}` : `Saved ${timeAgo(s.startedAt)}`;
+    else if (state === "running" && s.servicePorts) meta = s.servicePorts.map(([, p]) => `localhost:${p.split(":")[0]}`).join(" · ");
+    $id("sp-meta").textContent = meta;
+  }
+
+  function panel(title, bodyId, extraClass = "") {
+    return `<section class="lsv-panel ${extraClass}"><div class="lsv-panel-title">${title}</div><div id="${bodyId}"></div></section>`;
+  }
+  function actionsPanel(buttons, note, extraClass = "") {
+    return `<section class="lsv-panel lsv-actions ${extraClass}"><div class="lsv-panel-title">Actions</div>${buttons}</section>${
+      note ? `<div class="lsv-grow"></div><p class="lsv-note">${note}</p>` : ""
+    }`;
+  }
+  const btn = (id, label, ic, cls = "") => `<button id="${id}" type="button" class="lsv-btn ${cls}">${ic || ""}<span>${label}</span></button>`;
+
+  // ----- sender -----
+  function buildSend(state) {
+    const left = $id("sp-left");
+    const right = $id("sp-right");
+    left.innerHTML = panel("Project", "sp-project");
+    if (state === "running") {
+      left.insertAdjacentHTML(
+        "beforeend",
+        `<section class="lsv-panel lsv-fill"><div class="lsv-panel-title">Transfer method</div>
+          <div id="sp-method" class="lsv-segments" role="list"></div>
+          <div id="sp-transfers-slot" class="lsv-scroll"></div></section>`
+      );
+      $id("sp-transfers-slot").append(reuse.transfers, reuse.transfersEmpty);
+      right.innerHTML =
+        `<section class="lsv-panel lsv-fill"><div class="lsv-panel-title">Devices</div><div id="sp-devices-slot" class="lsv-scroll"></div></section>` +
+        actionsPanel(
+          btn("sp-send-again", "Send again", icon.sendAgain, "lsv-btn-primary") +
+            btn("sp-save", "Saved automatically", icon.save) +
+            btn("sp-pull", "Pull from receiver", icon.down) +
+            btn("sp-push", "Push update", icon.up) +
+            btn("sp-close", "Close session", "", "lsv-btn-danger"),
+          "",
+          "is-send"
+        );
+      $id("sp-devices-slot").insertAdjacentHTML("beforeend", `<div id="sp-live-devices" class="lsv-live-devices"></div>`);
+      $id("sp-devices-slot").append(reuse.devices, reuse.devicesEmpty);
+      $id("sp-save").disabled = true;
+      $id("sp-pull").disabled = true;
+      $id("sp-pull").title = "Not available yet - LocalSync can't pull changes back from a receiver.";
+    } else if (state === "failed") {
+      left.insertAdjacentHTML(
+        "beforeend",
+        `<section class="lsv-panel lsv-fill"><div class="lsv-panel-title">Transfers</div><div id="sp-transfers-slot" class="lsv-scroll"></div></section>`
+      );
+      $id("sp-transfers-slot").append(reuse.transfers);
+      // The failed one is the newest, at the end: show it.
+      requestAnimationFrame(() => { const slot = $id("sp-transfers-slot"); if (slot) slot.scrollTop = slot.scrollHeight; });
+      right.innerHTML =
+        panel("Last known device", "sp-last-device") +
+        actionsPanel(
+          btn("sp-send-again", "Send again", icon.sendAgain, "lsv-btn-primary") + btn("sp-push", "Push update", icon.up) + btn("sp-close", "Close session", "", "lsv-btn-danger"),
+          "",
+          "is-send"
+        );
+    } else {
+      left.insertAdjacentHTML(
+        "beforeend",
+        `<section class="lsv-panel lsv-fill lsv-placeholder"><span class="lsv-ph-icon">${icon.up}</span>
+          <div class="lsv-ph-title">No active transfer</div>
+          <div id="sp-ph-text" class="lsv-ph-text">Send again to generate a fresh connection code.</div></section>`
+      );
+      right.innerHTML =
+        panel("Last known device", "sp-last-device") +
+        actionsPanel(
+          btn("sp-send-again", "Send again", icon.sendAgain, "lsv-btn-primary") + btn("sp-push", "Push update", icon.up) + btn("sp-close", "Close session", "", "lsv-btn-danger"),
+          "Pull only appears once a device has connected this session - there's nothing to pull from until then.",
+          "is-send"
+        );
+    }
+    $id("sp-send-again").addEventListener("click", () => startSendTransfer(V.session, true));
+    $id("sp-push").addEventListener("click", pushUpdate);
+    // The push flow's progress ("Looking for the devices on the network…").
+    $id("sp-push").after(reuse.pushStatus);
+    $id("sp-close").addEventListener("click", closeCurrent);
+  }
+
+  function updateSend(s, state) {
+    const a = s.artifact;
+    const commit = a && a.snapshot_id ? a.snapshot_id.split("@").pop() : null;
+    const dumps = (s.folders || []).filter((f) => f.dump).map((f) => `${f.dump.engine} · ${f.dump.schema}`);
+    const lastSent = s.devices.map((d) => d.marker && d.marker.sent_at).filter(Boolean).sort().pop();
+    $id("sp-project").innerHTML =
+      row("Local path", (s.folders || []).map((f) => f.path).join(", ") || "—") +
+      row("Commit", commit ? shortCommit(commit) : "—") +
+      row("Database", dumps.join(", ") || "None") +
+      (state === "running" ? row("Snapshot size", a ? formatBytes(a.size_bytes) : "Preparing…") : row("Last sent", lastSent ? timeAgo(lastSent) : "Not sent yet"));
+    if (state === "running") {
+      const tr = [...s.transfers].reverse().find((t) => t.status === "connecting" || t.status === "active") || s.transfers[s.transfers.length - 1];
+      const method = !tr ? null : tr.spec.kind === "cloud" ? "cloud" : tr.spec.kind === "code" && tr.spec.mode === "remote" ? "relay" : "lan";
+      $id("sp-method").innerHTML = [
+        ["lan", "P2P (LAN)"],
+        ["relay", "Relay"],
+        ["cloud", "Cloud drop"],
+      ]
+        .map(([k, label]) => `<span role="listitem" class="lsv-segment ${k === method ? "is-on" : ""}" ${k === method ? 'aria-current="true"' : ""}>${label}</span>`)
+        .join("");
+      const live = s.transfers.filter((t) => t.status === "connecting" || t.status === "active");
+      $id("sp-live-devices").innerHTML =
+        live
+          .map((t) => {
+            const name = t.deviceName || (t.spec.kind === "cloud" ? "Cloud drop" : "Device via code");
+            const status = t.status === "active" ? "connected · receiving now" : t.receiverJoined ? "connected" : "waiting for it to connect";
+            return `<div class="lsv-device ${t.status === "active" || t.receiverJoined ? "is-live" : ""}"><span class="lsv-device-dot"></span><span><span class="lsv-device-name">${escapeHtml(name)}</span><span class="lsv-device-sub">${status}</span></span></div>`;
+          })
+          .join("") + `<div class="lsv-device is-waiting"><span class="lsv-device-dot"></span><span class="lsv-device-name">Waiting for another device…</span></div>`;
+    } else {
+      const last = [...s.devices].filter((d) => d.marker).sort((x, y) => (x.marker.sent_at || "").localeCompare(y.marker.sent_at || "")).pop();
+      $id("sp-last-device").innerHTML = last ? row("Name", last.name) + row("Last seen", timeAgo(last.marker.sent_at)) : `<p class="lsv-muted">Not sent to any device yet.</p>`;
+      if (state === "failed") return void updatePushButtons(s);
+      $id("sp-ph-text").textContent = last
+        ? `The last transfer to this device finished ${timeAgo(last.marker.sent_at)}. Send again to generate a fresh connection code.`
+        : "This session hasn't been sent yet. Send again to generate a connection code.";
+    }
+    updatePushButtons(s);
+  }
+
+  function updatePushButtons(s) {
+    const behind = s.devices.filter((d) => !d.up_to_date);
+    $id("sp-push").disabled = s.busy || behind.length === 0;
+    $id("sp-push").title = behind.length === 0 ? "Every device already has the latest version." : `Send the latest version to ${behind.map((d) => d.name).join(", ")}.`;
+    $id("sp-send-again").disabled = s.busy;
+  }
+
+  function pushUpdate() {
+    const s = V.session;
+    // The existing push sends to the selected devices: select every device that's behind.
+    s.pushSelection = new Set(s.devices.filter((d) => !d.up_to_date).map((d) => d.key));
+    renderActiveSession();
+    const push = $id("send-push-btn");
+    if (!push.disabled) push.click();
+  }
+
+  // ----- receiver -----
+  function buildReceive(state) {
+    const left = $id("sp-left");
+    const right = $id("sp-right");
+    left.innerHTML = panel("Project", "sp-project", "lsv-shrink");
+    if (state === "running") {
+      left.insertAdjacentHTML("beforeend", logsPanel(true));
+      right.innerHTML =
+        panel("Service", "sp-service") +
+        actionsPanel(
+          btn("sp-stop", "Stop", icon.stop, "lsv-btn-danger") + btn("sp-arm", "Pull update", icon.down) + btn("sp-save", "Saved automatically", icon.save) + btn("sp-close", "Close session", "", "lsv-btn-danger")
+        );
+      $id("sp-save").disabled = true;
+      $id("sp-stop").addEventListener("click", () => pressExisting("stop-btn"));
+    } else if (state === "reviewing") {
+      left.insertAdjacentHTML("beforeend", `<div id="sp-review-slot" class="lsv-review"></div>`);
+      $id("sp-review-slot").appendChild(reuse.review);
+      left.insertAdjacentHTML("beforeend", logsPanel(false));
+      right.innerHTML = actionsPanel(
+        btn("sp-run", "Run", icon.play, "lsv-btn-primary") +
+          `<p id="sp-run-error" class="lsv-error hidden"></p><button id="sp-fix-setup" type="button" class="lsv-btn hidden">Fix setup</button>` +
+          btn("sp-reject", "Reject", "") +
+          btn("sp-close", "Close session", "", "lsv-btn-danger"),
+        "Nothing from this project runs until you press Run, after reviewing what changed."
+      );
+      $id("sp-run").addEventListener("click", runCurrent);
+      $id("sp-fix-setup").addEventListener("click", () => openSetup());
+      $id("sp-reject").addEventListener("click", () => pressExisting("reject-btn"));
+    } else if (state === "receiving") {
+      left.insertAdjacentHTML(
+        "beforeend",
+        `<section class="lsv-panel lsv-fill lsv-placeholder"><span class="lsv-ph-icon">${icon.down}</span>
+          <div id="sp-ph-title" class="lsv-ph-title">Waiting for the sender…</div><div id="sp-ph-text" class="lsv-ph-text"></div></section>`
+      );
+      right.innerHTML = actionsPanel(btn("sp-close", "Close session", "", "lsv-btn-danger"));
+    } else {
+      left.insertAdjacentHTML(
+        "beforeend",
+        `<section id="sp-stopped-ph" class="lsv-panel lsv-fill lsv-placeholder"><span class="lsv-ph-icon">${icon.box}</span>
+          <div class="lsv-ph-title">Containers aren't running</div>
+          <div class="lsv-ph-text">Press Run to bring this project back up with the database exactly as it was saved.</div>
+          <p id="sp-run-error" class="lsv-error hidden"></p>
+          <button id="sp-fix-setup" type="button" class="lsv-btn lsv-btn-inline hidden">Fix setup</button></section>` + logsPanel(false)
+      );
+      right.innerHTML =
+        panel("Last run", "sp-last-run") +
+        actionsPanel(
+          btn("sp-run", "Run", icon.play, "lsv-btn-primary") + btn("sp-arm", "Receive update", icon.down) + btn("sp-close", "Close session", "", "lsv-btn-danger"),
+          "A stopped session only shows what you can actually do right now - run it again, pull the latest update, or remove it."
+        );
+      $id("sp-run").addEventListener("click", runCurrent);
+      $id("sp-fix-setup").addEventListener("click", () => openSetup());
+    }
+    const arm = $id("sp-arm");
+    if (arm) arm.addEventListener("click", () => pressExisting("receive-arm-toggle"));
+    $id("sp-close").addEventListener("click", closeCurrent);
+  }
+
+  function logsPanel(live) {
+    return `<section id="sp-logs-panel" class="lsv-panel lsv-fill ${live ? "" : "hidden"}">
+      <div class="lsv-panel-title lsv-title-row"><span>Logs</span><span id="sp-logs-live" class="lsv-live"><span class="lsv-dot"></span> live</span></div>
+      <pre id="sp-logs" class="lsv-logs" tabindex="0" aria-label="Run log"></pre></section>`;
+  }
+
+  function renderLogs() {
+    const s = V.session;
+    const box = $id("sp-logs");
+    if (!s || !box) return;
+    const wrap = $id("sp-logs-panel");
+    // Live while starting/running; on a stopped page only to explain a failed Run.
+    const show = receiveState(s) === "running" || s.runInProgress || (!!s.runErrorText && !!s.runLogText);
+    wrap.classList.toggle("hidden", !show);
+    $id("sp-logs-live").classList.toggle("hidden", !s.runInProgress && receiveState(s) !== "running");
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+    box.textContent =
+      s.runLogText ||
+      (receiveState(s) === "running"
+        ? "No log for this run - it was started before this window opened. Stop and Run again to watch it start."
+        : "Starting…");
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  function updateReceive(s, state) {
+    const m = s.manifest;
+    const dumps = m && m.database_dumps && m.database_dumps.length ? m.database_dumps.map((d) => `${d.engine} · ${d.schema}`).join(", ") : m ? "None" : "—";
+    $id("sp-project").innerHTML =
+      row("Received from", s.recognizedPeer ? s.recognizedPeer.name : "Unknown sender") +
+      row("Project", s.title || "—") +
+      row("Commit", s.gitCommit || (m && m.git_commit) ? shortCommit(s.gitCommit || m.git_commit) : "—") +
+      row("Database", dumps) +
+      row("Saved locally", s.workDir ? `Yes · ${s.workDir}` : "Yes");
+    if (state === "running") {
+      const ports = s.servicePorts || [];
+      $id("sp-service").innerHTML = ports.length
+        ? ports.map(([svc, p]) => row(svc, `localhost:${p.split(":")[0]}`)).join("") +
+          row("Containers", `${ports.length} running`) +
+          row("Database cache", s.dbCacheHit === true ? "Reused" : s.dbCacheHit === false ? "Seeded fresh" : "Unknown (reopened)")
+        : `<p class="lsv-muted">Ports unknown for this run.</p>`;
+      $id("sp-stop").disabled = s.busy;
+    } else if (state === "receiving") {
+      const pct = s.progressTotal ? Math.round((s.progressBytes / s.progressTotal) * 100) : null;
+      $id("sp-ph-title").textContent = s.status === "active" ? "Receiving…" : "Waiting for the sender…";
+      $id("sp-ph-text").textContent = s.status === "active" && s.progressTotal ? `${formatBytes(s.progressBytes)} of ${formatBytes(s.progressTotal)} (${pct}%)` : "Share-code receives wait here until the sender starts the transfer.";
+    } else if (state === "stopped") {
+      const failed = !!s.runErrorText;
+      $id("sp-last-run").innerHTML = row("Stopped", s.endedAt ? timeAgo(s.endedAt) : "—") + row("Exit reason", failed ? "Failed to start" : s.endedAt ? "Stopped" : s.status === "error" ? "Receive failed" : "—");
+      const errEl = $id("sp-run-error");
+      errEl.textContent = s.runErrorText || (s.status === "error" ? s.errorText : "");
+      errEl.classList.toggle("hidden", !errEl.textContent);
+      $id("sp-fix-setup").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(s.runErrorText));
+      $id("sp-stopped-ph").classList.toggle("hidden", s.runInProgress);
+      $id("sp-run").disabled = s.busy || s.runInProgress || s.status === "error";
+      $id("sp-run").querySelector("span").textContent = s.runInProgress ? "Starting…" : "Run";
+    }
+    if (state === "reviewing") {
+      const errEl = $id("sp-run-error");
+      errEl.textContent = s.runErrorText || "";
+      errEl.classList.toggle("hidden", !s.runErrorText);
+      $id("sp-fix-setup").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(s.runErrorText));
+      $id("sp-run").disabled = s.busy || s.runInProgress;
+      $id("sp-run").querySelector("span").textContent = s.runInProgress ? "Starting…" : "Run";
+    }
+    const arm = $id("sp-arm");
+    if (arm) {
+      arm.disabled = s.busy || !(s.hasRunBefore || s.status === "running");
+      arm.querySelector("span").textContent = s.armed ? "Waiting for an update… (cancel)" : state === "running" ? "Pull update" : "Receive update";
+      arm.title = $id("discoverable-toggle").checked ? "" : "This device isn't discoverable, so a sender can't push an update to it until it is.";
+    }
+    renderLogs();
+  }
+
+  function runCurrent() {
+    const s = V.session;
+    if (!$id("work-dir").value.trim()) $id("work-dir").value = s.workDir || "/tmp/localsync-work";
+    if (!$id("resume-work-dir").value.trim()) $id("resume-work-dir").value = s.workDir || $id("work-dir").value;
+    pressExisting(s.status === "reviewing" ? "run-btn" : "resume-run-btn");
+  }
+
+  function pressExisting(id) {
+    // Refresh the existing controls first: they may still carry a stale
+    // busy-disabled state from app.js's last redraw.
+    origRenderActive();
+    const el = $id(id);
+    if (el && !el.disabled) el.click();
+  }
+
+  async function closeCurrent() {
+    const s = V.session;
+    const button = $id("sp-close");
+    if (V.closeArmed !== s.id) {
+      V.closeArmed = s.id;
+      button.querySelector("span").textContent =
+        s.kind === "receive" && s.status === "running" ? "Click again to stop and close" : "Click again to close";
+      setTimeout(() => {
+        if (V.closeArmed === s.id && $id("sp-close")) {
+          V.closeArmed = null;
+          $id("sp-close").querySelector("span").textContent = "Close session";
+        }
+      }, 4000);
+      return;
+    }
+    V.closeArmed = null;
+    button.disabled = true;
+    try {
+      // A receive still in flight has no stored session yet - just drop it.
+      if (!(s.kind === "receive" && receiveState(s) === "receiving")) await invoke("close_session", { sessionId: s.id });
+      if (s.progressUnlisten) s.progressUnlisten();
+      for (const tr of s.transfers || []) for (const u of tr.unlisten || []) u();
+      sessions.delete(s.id);
+      if (activeSessionId === s.id) activeSessionId = null;
+      origRenderTabs();
+      V.session = null;
+      navigate("home");
+    } catch (err) {
+      button.disabled = false;
+      button.querySelector("span").textContent = "Close session";
+      const note = document.createElement("p");
+      note.className = "lsv-error";
+      note.textContent = String(err);
+      button.after(note);
+    }
+  }
+
+  $id("session-back-btn").addEventListener("click", () => navigate("home"));
+
+  navigate("home");
+})();

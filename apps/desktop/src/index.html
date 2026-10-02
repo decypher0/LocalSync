@@ -221,6 +221,127 @@
 
   <!-- ---- Pull requests from connected receivers (sender-side, can arrive on any tab) ---- -->
   <div id="pull-requests" class="pull-requests"></div>
+  <!-- ---- Page navigation (views.js): Home, the New Session wizard, and one
+       session page per kind and state. Replaces the single dashboard; the
+       older Send/Receive tabs and session-tab strip stay in the DOM, hidden,
+       and their working panels are moved into these views at startup. ---- -->
+  <div id="app-views" class="lsv">
+    <!-- 1. Home -->
+    <section id="view-home" class="lsv-view" data-view="home">
+      <header class="lsv-topbar">
+        <div class="lsv-brand">
+          <span class="lsv-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg></span>
+          <span class="lsv-brand-name">LocalSync</span>
+        </div>
+        <button id="home-new-btn" class="lsv-btn-primary lsv-btn-inline" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          New Session
+        </button>
+      </header>
+      <div class="lsv-home-body">
+        <div class="lsv-section-label">Sessions</div>
+        <p id="home-error" class="lsv-error hidden"></p>
+        <div id="home-empty" class="lsv-home-empty hidden">
+          <div class="lsv-empty-title">No sessions yet</div>
+          <div class="lsv-muted">Start one with New Session - send a project to someone, or receive theirs.</div>
+        </div>
+        <div id="home-list" class="lsv-home-list"></div>
+      </div>
+      <div class="lsv-footnote">Every session shows the name you gave it, not its folder or project name.</div>
+    </section>
+
+    <!-- 2-3 (+ Setup, Transfer). New Session -->
+    <section id="view-new" class="lsv-view hidden" data-view="new">
+      <header class="lsv-topbar lsv-topbar-start">
+        <button id="new-back-btn" class="lsv-icon-btn" type="button" aria-label="Back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <span class="lsv-topbar-title">New Session</span>
+        <span id="new-name-echo" class="lsv-muted lsv-name-echo"></span>
+      </header>
+      <ol class="lsv-steps" aria-label="New session steps">
+        <li data-step="name"><span class="lsv-step-dot">1</span><span class="lsv-step-label">Name</span></li>
+        <li class="lsv-step-line" aria-hidden="true"></li>
+        <li data-step="mode"><span class="lsv-step-dot">2</span><span class="lsv-step-label">Mode</span></li>
+        <li class="lsv-step-line" aria-hidden="true"></li>
+        <li data-step="setup"><span class="lsv-step-dot">3</span><span class="lsv-step-label">Setup</span></li>
+        <li class="lsv-step-line" aria-hidden="true"></li>
+        <li data-step="transfer"><span class="lsv-step-dot">4</span><span class="lsv-step-label">Transfer</span></li>
+      </ol>
+
+      <div id="new-name-panel" class="lsv-new-body lsv-center">
+        <form id="new-name-form" class="lsv-name-card" novalidate>
+          <label for="new-name-input" class="lsv-h2">What should we call this session?</label>
+          <p class="lsv-muted lsv-lead">This is the name you'll see in your session list later - not the project's folder name. Pick something you and the other person will both recognize.</p>
+          <input id="new-name-input" class="lsv-input" type="text" autocomplete="off" placeholder="e.g. Client Demo Backend" />
+          <p id="new-name-error" class="lsv-error hidden"></p>
+          <button class="lsv-btn-primary lsv-btn-block" type="submit">Continue</button>
+        </form>
+      </div>
+
+      <div id="new-mode-panel" class="lsv-new-body hidden">
+        <div class="lsv-mode-cards" role="radiogroup" aria-label="Send or receive">
+          <button id="new-mode-send" class="lsv-mode-card" type="button" role="radio" aria-checked="false" data-mode="send">
+            <span class="lsv-mode-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span>
+            <span class="lsv-mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>
+            <span class="lsv-mode-title">Send a project</span>
+            <span class="lsv-mode-text">Pick a project and (optionally) a database on this machine. LocalSync packages a snapshot and transfers it to someone else.</span>
+          </button>
+          <button id="new-mode-receive" class="lsv-mode-card" type="button" role="radio" aria-checked="false" data-mode="receive">
+            <span class="lsv-mode-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span>
+            <span class="lsv-mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></span>
+            <span class="lsv-mode-title">Receive a project</span>
+            <span class="lsv-mode-text">Wait for a connection code, or join an existing one someone shares with you, and receive their project onto this machine.</span>
+          </button>
+        </div>
+        <p id="new-mode-error" class="lsv-error lsv-center-text hidden"></p>
+        <div class="lsv-new-footer">
+          <button id="new-mode-continue" class="lsv-btn-primary" type="button">Continue</button>
+        </div>
+      </div>
+
+      <!-- Steps 3 and 4 host the existing send wizard / receive form (moved here by views.js). -->
+      <div id="new-setup-panel" class="lsv-new-body lsv-slot-body hidden">
+        <div id="new-setup-slot" class="lsv-slot"></div>
+        <div id="new-setup-receive" class="lsv-slot hidden">
+          <div class="lsv-panel">
+            <div class="lsv-panel-title">Where to run it</div>
+            <label class="lsv-field">Work folder (received projects are unpacked and run from here)
+              <input id="new-work-dir" class="lsv-input" type="text" value="/tmp/localsync-work" />
+            </label>
+          </div>
+          <div id="new-setup-receive-slot"></div>
+          <div class="lsv-new-footer lsv-new-footer-inline">
+            <button id="new-setup-receive-continue" class="lsv-btn-primary" type="button">Continue</button>
+          </div>
+        </div>
+      </div>
+      <div id="new-transfer-panel" class="lsv-new-body lsv-slot-body hidden">
+        <div id="new-transfer-slot" class="lsv-slot"></div>
+      </div>
+    </section>
+
+    <!-- 4-7. Session page: sender or receiver, running or stopped. -->
+    <section id="view-session" class="lsv-view hidden" data-view="session">
+      <header class="lsv-topbar lsv-topbar-start">
+        <button id="session-back-btn" class="lsv-icon-btn" type="button" aria-label="Back to sessions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <span id="sp-avatar" class="lsv-avatar" aria-hidden="true"></span>
+        <div class="lsv-title-block">
+          <div id="sp-name" class="lsv-title"></div>
+          <div id="sp-subtitle" class="lsv-subtitle"></div>
+        </div>
+        <span id="sp-status" class="lsv-pill"></span>
+        <span class="lsv-grow"></span>
+        <span id="sp-meta" class="lsv-muted lsv-meta"></span>
+      </header>
+      <div class="lsv-columns">
+        <div id="sp-left" class="lsv-col lsv-col-left"></div>
+        <div id="sp-right" class="lsv-col lsv-col-right"></div>
+      </div>
+    </section>
+  </div>
 
   <section id="settings-panel" class="settings-panel hidden">
     <div>
@@ -1128,5 +1249,6 @@
   <script src="compose-wizard.js"></script>
   <script src="setup-wizard.js"></script>
   <script src="app.js"></script>
+  <script src="views.js"></script>
 </body>
 </html>
