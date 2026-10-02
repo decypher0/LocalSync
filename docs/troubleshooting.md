@@ -4,7 +4,9 @@
 
 LocalSync's sandbox gives every container a 1 GB memory limit. If Podman
 can't apply it, no container can start, and Run (and the compose wizard's
-test run) fails with this message. The raw error underneath looks like:
+test run) fails with this message. The setup screen's last check ("A test container
+starts") fails the same way, and Run's error has a "Fix setup" button that
+reopens it - after fixing Podman, use Recheck there. The raw error underneath looks like:
 
     crun: open `memory.max` for writing: No such file or directory
 
