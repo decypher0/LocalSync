@@ -245,12 +245,33 @@ pub struct RunReceivedResult {
 /// `stop_session` keeps working against it with no changes of its own.
 #[tauri::command]
 pub async fn run_received_session<R: tauri::Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     session_id: String,
     work_dir: String,
 ) -> Result<RunReceivedResult, String> {
     let session = get_session(&state, &session_id)?;
+
+    // Live progress for the session page's Logs panel: every line the Run
+    // writes to the provisioning log (the readiness check, podman-compose's
+    // image pulls and container starts, the database health wait) goes out
+    // as a `run-progress` event tagged with this session's snapshot id -
+    // the same events and tagging `commands::run_snapshot` uses.
+    let tail = tauri::async_runtime::spawn(crate::commands::tail_provisioning_log(app.clone(), session.snapshot_id.clone()));
+    let result = run_received_session_inner(&state, &session, &session_id, work_dir).await;
+    // Let the tailer pick up the Run's last lines before it stops.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tail.abort();
+    result
+}
+
+async fn run_received_session_inner(
+    state: &State<'_, AppState>,
+    session: &ReceivedSession,
+    session_id: &str,
+    work_dir: String,
+) -> Result<RunReceivedResult, String> {
+    let session_id = session_id.to_string();
 
     let held = state.verified.lock().map_err(|e| e.to_string())?.remove(&session.snapshot_id);
 

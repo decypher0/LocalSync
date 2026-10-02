@@ -1183,7 +1183,7 @@ pub fn reject_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Resul
 // unique compose project names; only this live-log-tailing convenience
 // view can blend two truly-simultaneous Runs' output. Flagged rather than
 // silently presented as fully solved - see this round's own report.
-async fn tail_provisioning_log<R: tauri::Runtime>(app: AppHandle<R>, session_id: String) {
+pub(crate) async fn tail_provisioning_log<R: tauri::Runtime>(app: AppHandle<R>, session_id: String) {
     let path = match ls_containers::ProvisioningLog::open_default() {
         Ok(log) => log.path().to_path_buf(),
         Err(_) => return,
