@@ -221,7 +221,7 @@ pub async fn run_compose_test<R: tauri::Runtime>(
 
     let work_dir = fresh_work_dir();
     let db_service = spec.database.as_ref().map(|db| ls_composegen::catalog::db_service_name(db.engine));
-    let outcome = boot_and_wait(&app, &verified, &work_dir, host_port, db_service, wait, &mut notes).await;
+    let outcome = boot_and_wait(&app, &verified, &work_dir, host_port, wait, &mut notes).await;
     // Leave no database state behind: a later test run of the same dump must
     // import it again rather than find this run's volume and skip the import.
     if db_service.is_some() {
@@ -263,7 +263,6 @@ async fn boot_and_wait<R: tauri::Runtime>(
     verified: &ls_security::VerifiedSnapshot,
     work_dir: &Path,
     host_port: u16,
-    db_service: Option<&str>,
     timeout: Duration,
     notes: &mut Vec<String>,
 ) -> Result<String, (String, String)> {
@@ -298,22 +297,6 @@ async fn boot_and_wait<R: tauri::Runtime>(
             "{names} could not be started - usually its image failed to build (the build output is below) or a port it needs is already in use.\n\n{log_tail}"
         );
         return Err((reason, log_tail));
-    }
-
-    // The database has to really be up - including its first-boot import of
-    // the dump - before the app's port counts as success. Checked here, not
-    // left to compose's `depends_on: condition: service_healthy`: podman-compose
-    // 1.0.6 ignores the condition and starts the app anyway, so a database that
-    // crashed importing its seed data used to pass as ok.
-    if let Some(db) = db_service {
-        emit_line(app, format!("Waiting for the database ({db}) to finish starting and loading its data..."));
-        if let Err(reason) = wait_for_database(&session, db, timeout).await {
-            let db_output = ls_containers::service_logs(&session, db, KEPT_LINES).await.unwrap_or_default();
-            if let Err(e) = ls_containers::stop_session(&session).await {
-                notes.push(format!("Cleaning up the test containers failed ({e:#}); check `podman ps -a` for leftovers."));
-            }
-            return Err((with_output(reason, &db_output), db_output));
-        }
     }
 
     emit_line(app, format!("Containers started. Waiting for the app on port {host_port}..."));
@@ -428,39 +411,6 @@ enum Wait {
 /// Polls until the port serves, `stop_reason` returns a reason, or `timeout`
 /// passes. The port is checked first, so a reason only counts if the app isn't
 /// already serving.
-/// Polls the database container until its own health check passes. `Err`
-/// (a plain reason) if the container exits - with a dump, almost always
-/// because the import failed - or isn't healthy within `timeout`.
-async fn wait_for_database(session: &ls_containers::RunningSession, db: &str, timeout: Duration) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match ls_containers::service_state(session, db).await {
-            Ok(ls_containers::ServiceState::Exited(code)) => {
-                return Err(format!(
-                    "The database (`{db}`) stopped with exit code {code} while starting. When a database dump is \
-                     included this almost always means the dump failed to import - the database's own log below \
-                     shows the exact SQL error."
-                ));
-            }
-            Ok(ls_containers::ServiceState::Missing | ls_containers::ServiceState::NotStarted) => {
-                return Err(format!("The database's container (`{db}`) is not running."));
-            }
-            _ => {}
-        }
-        if ls_containers::service_healthy(session, db).await.unwrap_or(false) {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(format!(
-                "The database (`{db}`) didn't become ready within {}s. A large dump can take longer to import - \
-                 its log below shows how far it got.",
-                timeout.as_secs()
-            ));
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-}
-
 async fn wait_for_port<F, Fut>(port: u16, timeout: Duration, poll: Duration, mut stop_reason: F) -> Wait
 where
     F: FnMut() -> Fut,
