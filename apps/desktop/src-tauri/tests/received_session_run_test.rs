@@ -136,11 +136,18 @@ async fn run_like_the_ui(receiver: &Handle, info: &IncomingSnapshotInfo, port: u
     commands::stop_session(receiver.state::<AppState>(), run.running.session_id.clone()).await.unwrap();
 }
 
-fn isolate_home() -> tempfile::TempDir {
-    let home = tempfile::tempdir().unwrap();
-    std::env::set_var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, home.path());
-    std::env::set_var("XDG_DATA_HOME", home.path().join("data"));
-    home
+/// One home for every test in this file: they run in parallel, and each
+/// pointing HOME somewhere new mid-run made them race writing the sender
+/// identity ("identity key file ... is corrupt").
+fn isolate_home() -> &'static Path {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, home.path());
+        std::env::set_var("XDG_DATA_HOME", home.path().join("data"));
+        home
+    });
+    home.path()
 }
 
 #[tokio::test]
