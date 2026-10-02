@@ -89,6 +89,11 @@ pub struct IncomingSnapshotInfo {
     /// informational — this never affects verification (already done above,
     /// unconditionally) or the diff-review-then-Run gate below.
     pub recognized_peer: Option<RecognizedPeer>,
+    /// The `ReceivedSession` this receive was filed under - the id
+    /// `run_received_session`/`save_received_session`/arming are keyed by.
+    /// Not the same value as `snapshot_id` (nor the room code a tab may
+    /// have been opened under), so the frontend must key its tab by this.
+    pub received_session_id: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -1103,7 +1108,11 @@ pub fn finalize_received_snapshot_tracked(
         .map_err(|e| e.to_string())?
         .insert(snapshot_id.clone(), verified);
 
-    Ok((IncomingSnapshotInfo { snapshot_id, manifest, diff, sender_pubkey_hex, recognized_peer }, outcome))
+    let received_session_id = outcome.session_id().to_string();
+    Ok((
+        IncomingSnapshotInfo { snapshot_id, manifest, diff, sender_pubkey_hex, recognized_peer, received_session_id },
+        outcome,
+    ))
 }
 
 fn to_hex(bytes: &[u8]) -> String {
