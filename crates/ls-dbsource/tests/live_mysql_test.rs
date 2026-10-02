@@ -448,3 +448,74 @@ fn live_mysql_export_round_trip() -> Result<()> {
 
     Ok(())
 }
+
+/// Replays `dump` into `database` through the real `mysql` CLI (the same way
+/// the round-trip test above does), returning its stderr on failure.
+fn replay_dump(server: &TestServer, database: &str, dump: &[u8]) -> std::result::Result<(), String> {
+    let mut cli = Command::new("mysql")
+        .args(["-h127.0.0.1", "-P", &server.port.to_string(), "-uroot", database])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn the mysql CLI: {e}"))?;
+    cli.stdin.take().expect("piped stdin").write_all(dump).map_err(|e| e.to_string())?;
+    let out = cli.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// The real-world break: table A has a FOREIGN KEY to table B, and A comes
+/// first in the export. Without FK checks disabled for the restore, A's
+/// CREATE TABLE fails ("Failed to open the referenced table" on MySQL 8,
+/// errno 150 on MariaDB). It must import cleanly - into an empty database,
+/// and again over the existing tables (DROP of a referenced table).
+#[test]
+fn live_mysql_export_imports_when_a_foreign_key_references_a_later_table() -> Result<()> {
+    let server = TestServer::start()?;
+    let mut admin = server.admin_conn()?;
+    admin.query_drop("CREATE DATABASE fk_src").context("create fk_src")?;
+    admin.query_drop("CREATE DATABASE fk_dst").context("create fk_dst")?;
+
+    let mut src = server.conn_to(Some("fk_src"))?;
+    src.query_drop("CREATE TABLE parents (id INT PRIMARY KEY, name VARCHAR(50) NOT NULL) ENGINE=InnoDB")?;
+    src.query_drop(
+        "CREATE TABLE children (
+            id INT PRIMARY KEY,
+            parent_id INT NOT NULL,
+            CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES parents(id)
+        ) ENGINE=InnoDB",
+    )?;
+    src.query_drop("INSERT INTO parents VALUES (1, 'p1'), (2, 'p2')")?;
+    src.query_drop("INSERT INTO children VALUES (10, 1), (11, 2), (12, 2)")?;
+    drop(src);
+
+    // A (children, which references B) listed BEFORE B (parents).
+    let dump = export::export_tables(&server.details("fk_src"), &["children".to_string(), "parents".to_string()])
+        .context("export_tables children, parents")?;
+    let text = String::from_utf8(dump.clone()).expect("dump is UTF-8 SQL");
+    assert!(text.starts_with("SET FOREIGN_KEY_CHECKS=0;"), "checks must be off before any table:\n{text}");
+    assert!(text.trim_end().ends_with("SET FOREIGN_KEY_CHECKS=1;"), "and back on at the end:\n{text}");
+    assert!(
+        text.find("CREATE TABLE `children`").unwrap() < text.find("CREATE TABLE `parents`").unwrap(),
+        "the referencing table really is created first in this dump"
+    );
+
+    replay_dump(&server, "fk_dst", &dump).map_err(|e| anyhow::anyhow!("import into an empty database failed:\n{e}"))?;
+    replay_dump(&server, "fk_dst", &dump)
+        .map_err(|e| anyhow::anyhow!("re-import over existing tables failed:\n{e}"))?;
+
+    let mut dst = server.conn_to(Some("fk_dst"))?;
+    let parents: u64 = dst.query_first("SELECT COUNT(*) FROM parents")?.unwrap();
+    let children: u64 = dst.query_first("SELECT COUNT(*) FROM children")?.unwrap();
+    assert_eq!((parents, children), (2, 3), "every row imported, once");
+    let (_, create): (String, String) = dst.query_first("SHOW CREATE TABLE children")?.unwrap();
+    assert!(create.contains("FOREIGN KEY") && create.contains("REFERENCES `parents`"), "the FK survives:\n{create}");
+    // And it's enforced again after the import (checks are per-session, but
+    // prove the restored constraint is real, not dropped).
+    assert!(dst.query_drop("INSERT INTO children VALUES (99, 404)").is_err(), "the restored FK must reject an orphan");
+    Ok(())
+}

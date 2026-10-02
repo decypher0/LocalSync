@@ -232,6 +232,19 @@ async fn bring_up(
     let service_ports = compose::parse_service_ports(&rewritten)?;
 
     let compose_project_name = compose_project_name(project_name, git_commit);
+
+    // Database volumes that don't exist yet are created - and seeded - by
+    // this Run. Only those may be discarded if the database then fails to
+    // start: an existing volume is the cache of an import that already
+    // finished.
+    let databases = compose::pinned_db_volumes(&rewritten)?;
+    let mut fresh_volumes = Vec::new();
+    for (_, volume) in &databases {
+        if !podman::volume_exists(volume).await.unwrap_or(true) {
+            fresh_volumes.push(volume.clone());
+        }
+    }
+
     // podman-compose resolves docker-compose.yml (and any relative `build:`
     // context inside it) from its own current directory, not from an
     // explicit -f flag - compose_root, not the unpacked payload's own root,
@@ -251,6 +264,28 @@ async fn bring_up(
         return Err(explain_up_failure(e));
     }
 
+    // A database that crashes during its first-boot import (a bad dump, an
+    // interrupted run) must fail the Run, not leave a half-imported volume
+    // that the next Run would reuse - MySQL/Postgres skip their init scripts
+    // when the data directory already exists, so the import would never be
+    // retried. podman-compose 1.0.6 ignores `depends_on: condition:
+    // service_healthy`, so this is checked here rather than left to compose.
+    for (service, _) in &databases {
+        if let Err(reason) = wait_for_database(&compose_project_name, service, database_start_timeout()).await {
+            let logs = podman::service_logs(&compose_project_name, service, 60).await.unwrap_or_default();
+            if let Err(down_err) = podman::compose_down(compose_root, &compose_project_name, log).await {
+                eprintln!("cleanup after a database failed to start also failed: {down_err:#}");
+            }
+            for volume in &fresh_volumes {
+                if let Err(e) = podman::volume_remove(volume).await {
+                    eprintln!("couldn't discard the half-initialized database volume {volume}: {e:#}");
+                }
+            }
+            let logs = if logs.trim().is_empty() { String::new() } else { format!("\n\nThe database's log:\n{logs}") };
+            anyhow::bail!("{reason}{logs}");
+        }
+    }
+
     Ok(RunningSession {
         project_name: project_name.to_string(),
         compose_project_name,
@@ -263,6 +298,45 @@ async fn bring_up(
         compose_dir: compose_root.to_path_buf(),
         started_by_default: default_services(&rewritten),
     })
+}
+
+/// How long a database gets to start (and import its dump) before the Run
+/// fails. Generous: a large dump takes a while. `LOCALSYNC_DB_START_TIMEOUT_SECS`
+/// overrides it.
+fn database_start_timeout() -> std::time::Duration {
+    let secs = std::env::var("LOCALSYNC_DB_START_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Polls `service`'s container until its own health check passes. `Err` (a
+/// plain reason) if it exits or isn't healthy within `timeout`. A database
+/// with no health check defined can't be waited on, so it isn't.
+async fn wait_for_database(project: &str, service: &str, timeout: std::time::Duration) -> std::result::Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match podman::service_state(project, service).await {
+            Ok(ServiceState::Exited(code)) => {
+                return Err(format!(
+                    "The database (`{service}`) stopped with exit code {code} while starting. When a database dump is included this almost always means the dump failed to import - the database's own log below shows the exact SQL error."
+                ))
+            }
+            Ok(ServiceState::Missing | ServiceState::NotStarted) => {
+                return Err(format!("The database's container (`{service}`) is not running."))
+            }
+            _ => {}
+        }
+        match podman::service_health(project, service).await {
+            Ok(podman::Health::Healthy | podman::Health::NoCheck) => return Ok(()),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "The database (`{service}`) didn't become ready within {}s. A large dump can take longer to import - its log below shows how far it got.",
+                timeout.as_secs()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// Tear down this run's containers/network. The named DB volume is
@@ -319,6 +393,14 @@ pub async fn service_state(session: &RunningSession, service: &str) -> Result<Se
 
 /// The last `tail` lines of `service`'s container output (stdout then
 /// stderr) - the real reason an app that started but isn't reachable failed.
+/// Removes the database volume a snapshot with this `db_seed_hash` uses
+/// (no-op if there is none). For throwaway runs like the compose wizard's
+/// test run: a failed first-boot import leaves a half-initialized volume
+/// behind, and reusing it would skip the import next time and look healthy.
+pub async fn remove_db_volume(db_seed_hash: &str) -> Result<()> {
+    podman::volume_remove(&compose::db_volume_name(db_seed_hash)).await
+}
+
 pub async fn service_logs(session: &RunningSession, service: &str, tail: usize) -> Result<String> {
     podman::service_logs(&session.compose_project_name, service, tail).await
 }
