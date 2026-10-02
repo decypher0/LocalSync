@@ -270,8 +270,19 @@ async fn bring_up(
     // when the data directory already exists, so the import would never be
     // retried. podman-compose 1.0.6 ignores `depends_on: condition:
     // service_healthy`, so this is checked here rather than left to compose.
+    let say = |msg: String| match log {
+        Some(l) => l.info(&msg),
+        None => eprintln!("[info] {msg}"),
+    };
+    say("containers started".to_string());
     for (service, _) in &databases {
-        if let Err(reason) = wait_for_database(&compose_project_name, service, database_start_timeout()).await {
+        say(format!("waiting for the database ({service}) to pass its health check"));
+        let waited = wait_for_database(&compose_project_name, service, database_start_timeout()).await;
+        match &waited {
+            Ok(()) => say(format!("database ({service}) is healthy")),
+            Err(reason) => say(format!("database ({service}) failed to start: {reason}")),
+        }
+        if let Err(reason) = waited {
             let logs = podman::service_logs(&compose_project_name, service, 60).await.unwrap_or_default();
             if let Err(down_err) = podman::compose_down(compose_root, &compose_project_name, log).await {
                 eprintln!("cleanup after a database failed to start also failed: {down_err:#}");
