@@ -339,6 +339,32 @@ async fn wait_for_database(project: &str, service: &str, timeout: std::time::Dur
     }
 }
 
+/// Whether the compose project `project_name`@`git_commit` (the same naming
+/// `run_snapshot`/`run_existing` use) has a running container right now.
+/// Blocking (a quick `podman ps`).
+pub fn project_running(project_name: &str, git_commit: &str) -> Result<bool> {
+    podman::project_running(&compose_project_name(project_name, git_commit))
+}
+
+/// The ("service", "host:container") ports declared in the already-unpacked,
+/// policy-rewritten compose file at `compose_dir` - what a Run of it
+/// published. For a session reopened after a restart, with no
+/// `RunningSession` left in memory.
+pub fn declared_service_ports(compose_dir: &Path) -> Result<Vec<(String, String)>> {
+    let path = compose_dir.join("docker-compose.yml");
+    let yaml = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    compose::parse_service_ports(&yaml)
+}
+
+/// Tears down `project_name`@`git_commit`'s containers by its compose project
+/// directly, from the directory it was brought up in - no `RunningSession`
+/// handle needed (e.g. after an app restart). The DB volume is kept (the
+/// cache), same as `stop_session`.
+pub async fn stop_project(compose_dir: &Path, project_name: &str, git_commit: &str) -> Result<()> {
+    let log = ProvisioningLog::open_default().ok();
+    podman::compose_down(compose_dir, &compose_project_name(project_name, git_commit), log.as_ref()).await
+}
+
 /// Tear down this run's containers/network. The named DB volume is
 /// intentionally left alone — it's the cache.
 pub async fn stop_session(session: &RunningSession) -> Result<()> {

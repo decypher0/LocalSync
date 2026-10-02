@@ -3023,7 +3023,15 @@ async function openSavedReceivedSession(sessionId) {
     setActiveSession(existing.id);
     return;
   }
-  const session = receivedSessionFromView(await invoke("open_saved_received_session", { sessionId }));
+  const view = await invoke("open_saved_received_session", { sessionId });
+  const session = receivedSessionFromView(view);
+  // Already running (e.g. its containers outlived an app restart): show it
+  // as running, with what the backend found, and let Stop act on it.
+  if (view.running) {
+    session.status = "running";
+    session.servicePorts = view.service_ports || null;
+    session.dbCacheHit = view.db_cache_hit;
+  }
   addSession(session);
   lastReceiveSessionId = session.id;
 }
@@ -3243,19 +3251,31 @@ function renderResumePanel(session) {
   }
 }
 
+// Works for a session that just came from a live receive (has a manifest)
+// and for one reopened from Session History (only its title; ports/cache may
+// be unknown, e.g. after an app restart).
 function renderRunningPanel(session) {
-  $("s-project").textContent = session.manifest.project_name;
+  $("s-project").textContent = (session.manifest && session.manifest.project_name) || session.title || "(unknown project)";
   const cacheEl = $("s-cache");
-  if (session.dbCacheHit) {
+  if (session.dbCacheHit === true) {
     cacheEl.textContent = "Hit — reused seeded volume (fast start)";
     cacheEl.className = "v cache-hit";
-  } else {
+  } else if (session.dbCacheHit === false) {
     cacheEl.textContent = "Miss — cold start, seeded from scratch";
     cacheEl.className = "v cache-cold";
+  } else {
+    cacheEl.textContent = "Unknown — this session was reopened";
+    cacheEl.className = "v";
   }
 
   const list = $("s-ports");
   list.innerHTML = "";
+  if (!session.servicePorts || session.servicePorts.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "Ports unknown";
+    list.appendChild(li);
+    return;
+  }
   for (const [service, ports] of session.servicePorts) {
     const hostPort = ports.split(":")[0];
     const li = document.createElement("li");
@@ -3565,11 +3585,13 @@ $("resume-run-btn").addEventListener("click", () => {
 $("stop-btn").addEventListener("click", async () => {
   $("stop-error").textContent = "";
   const session = activeSession();
-  if (!session || !session.runningSessionId) return;
+  if (!session) return;
   session.busy = true;
   $("stop-btn").disabled = true;
   try {
-    await invoke("stop_session", { sessionId: session.runningSessionId });
+    // By the receive session's own id: works whether or not this process
+    // still holds the handle from the Run (it doesn't after a restart).
+    await invoke("stop_received_session", { sessionId: session.id });
     endSession(session, "done"); // also re-renders the active view
   } catch (err) {
     $("stop-error").textContent = String(err);
