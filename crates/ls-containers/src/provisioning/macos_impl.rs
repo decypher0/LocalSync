@@ -15,34 +15,9 @@
 //! `docs/round5-manual-test-checklist.md`. Treat a failure there as more
 //! credible than anything asserted in this comment.
 
-use super::ProvisioningLog;
-use anyhow::{Context, Result};
-
-/// Runs `program args...`, logging the command line and its exit
-/// status/stdout/stderr before returning the raw [`std::process::Output`].
-/// Only errors (via `Context`) on a spawn failure (binary not found etc) —
-/// a non-zero exit is left to the caller to turn into a specific `ensure!`
-/// with its own actionable message.
-async fn run_logged(
-    log: &ProvisioningLog,
-    program: &str,
-    args: &[&str],
-) -> Result<std::process::Output> {
-    let cmdline = format!("{program} {}", args.join(" "));
-    log.info(&format!("running: {cmdline}"));
-    let output = tokio::process::Command::new(program)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to run `{cmdline}` — is it on PATH?"))?;
-    log.info(&format!(
-        "`{cmdline}` exited {} — stdout: {:?} stderr: {:?}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim(),
-    ));
-    Ok(output)
-}
+use super::{run_logged, ProvisioningLog};
+use crate::provisioning::setup::parse_machine_list;
+use anyhow::Result;
 
 /// Step 2/3: `podman --version` (via the same [`crate::podman::podman_available`]
 /// check round 1 used); if missing, install via Homebrew.
@@ -115,10 +90,7 @@ async fn ensure_machine_running(log: &ProvisioningLog) -> Result<()> {
         "`podman machine list` failed:\n{}",
         String::from_utf8_lossy(&list.stderr).trim()
     );
-    let stdout = String::from_utf8_lossy(&list.stdout);
-    let first_machine = stdout.lines().find(|l| !l.trim().is_empty()).map(str::to_string);
-
-    let already_running = match first_machine {
+    let already_running = match parse_machine_list(&String::from_utf8_lossy(&list.stdout)) {
         None => {
             log.info("no podman machine found — running `podman machine init`");
             let init = run_logged(log, "podman", &["machine", "init"]).await?;
@@ -129,11 +101,8 @@ async fn ensure_machine_running(log: &ProvisioningLog) -> Result<()> {
             );
             false
         }
-        Some(line) => {
-            let running = line.split('\t').nth(1).map(str::trim) == Some("true");
-            log.info(&format!(
-                "podman machine already exists (running: {running})"
-            ));
+        Some(running) => {
+            log.info(&format!("podman machine already exists (running: {running})"));
             running
         }
     };
@@ -199,6 +168,44 @@ async fn ensure_compose_installed(log: &ProvisioningLog) -> Result<()> {
     );
     log.info("podman-compose installed via Homebrew");
     Ok(())
+}
+
+// --- Setup wizard steps (called from `setup.rs`) ---
+
+/// An app launched from Finder/Dock gets launchd's minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), which has neither Homebrew prefix, so
+/// `brew`/`podman` installed by Homebrew look missing. Appends whichever
+/// prefix exists and isn't on PATH yet. (Unverified: no Mac here.)
+pub(crate) fn add_homebrew_to_path(log: &ProvisioningLog) {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
+    let before = dirs.len();
+    for d in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let d = std::path::PathBuf::from(d);
+        if d.is_dir() && !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    if dirs.len() != before {
+        if let Ok(p) = std::env::join_paths(&dirs) {
+            log.info("added Homebrew's bin directory to this process's PATH");
+            std::env::set_var("PATH", p);
+        }
+    }
+}
+
+/// `PodmanInstalled` fix: `brew install` whichever of podman /
+/// podman-compose is missing.
+pub(crate) async fn fix_podman_installed(log: &ProvisioningLog) -> Result<()> {
+    ensure_podman_installed(log).await?;
+    ensure_compose_installed(log).await
+}
+
+/// `MachineReady` fix: init (if none; Podman 5's default provider on macOS
+/// is applehv, i.e. Virtualization.framework) + start + `podman info`.
+pub(crate) async fn fix_machine(log: &ProvisioningLog) -> Result<()> {
+    ensure_machine_running(log).await?;
+    verify_podman_info(log).await
 }
 
 /// The macOS entry point called from `provisioning.rs`'s

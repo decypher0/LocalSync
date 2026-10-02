@@ -464,6 +464,7 @@
         </div>
 
         <p id="run-error" class="error"></p>
+        <button id="run-fix-setup-btn" class="ghost-btn hidden" type="button"><svg class="icon"><use href="#icon-settings"></use></svg> Fix setup</button>
       </div>
 
       <!-- ---- A reopened saved receive session: "resume", not "review
@@ -499,6 +500,7 @@
           <pre id="resume-run-log" class="run-log hidden"></pre>
         </div>
         <p id="resume-run-error" class="error"></p>
+        <button id="resume-run-fix-setup-btn" class="ghost-btn hidden" type="button"><svg class="icon"><use href="#icon-settings"></use></svg> Fix setup</button>
       </div>
 
       <!-- ---- Running session status ---- -->
@@ -1056,6 +1058,67 @@
   </section>
   </div>
 
+  <!-- ---- Dependency setup: the first thing a new user sees. Covers the
+       whole app (which keeps starting up normally behind it) until the
+       checklist passes or the user chooses "Continue without Podman".
+       Visible from the first paint on purpose so the app never flashes
+       before setup_state answers; app.js hides it once setup is done.
+       Logic lives in setup-wizard.js (pure) + the setup section of app.js. -->
+  <div id="setup-screen" class="setup-screen">
+    <div class="wizard-modal setup-card">
+      <div class="wizard-modal-header">
+        <span class="wizard-progress">LocalSync setup</span>
+      </div>
+      <div class="wizard-modal-body">
+        <div id="setup-welcome" class="hidden">
+          <h2 id="setup-welcome-title" tabindex="-1">Welcome to LocalSync</h2>
+          <p>
+            LocalSync sends your projects to other computers and runs them there safely, inside
+            Podman containers. First, let's make sure this computer is ready.
+          </p>
+          <button id="setup-start-btn" class="primary-btn" type="button">Get started <svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+        </div>
+        <div id="setup-checklist">
+          <h2 id="setup-checklist-title" tabindex="-1">Getting this computer ready</h2>
+          <p class="hint">LocalSync runs projects in Podman. We check it by really starting a small test container.</p>
+          <ol id="setup-steps" class="setup-steps"></ol>
+          <p id="setup-status" class="setup-status" role="status"></p>
+          <div id="setup-skip-wrap" class="hidden">
+            <button id="setup-skip-btn" class="link-btn" type="button">Continue without Podman</button>
+            <p class="hint">Sending projects works without it. Run checks again before it starts anything.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="setup-consent-overlay" class="wizard-overlay setup-dialog hidden">
+    <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="setup-consent-title" aria-describedby="setup-consent-text">
+      <div class="wizard-modal-body">
+        <h3 id="setup-consent-title"></h3>
+        <p id="setup-consent-text"></p>
+        <span class="inline-row">
+          <button id="setup-consent-continue" class="primary-btn" type="button">Continue</button>
+          <button id="setup-consent-cancel" class="ghost-btn" type="button">Cancel</button>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div id="setup-restart-overlay" class="wizard-overlay setup-dialog hidden">
+    <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="setup-restart-title">
+      <div class="wizard-modal-body">
+        <h3 id="setup-restart-title">A restart is needed to finish setup.</h3>
+        <p class="hint">Save anything you have open first. LocalSync picks up where it left off after the restart.</p>
+        <span class="inline-row">
+          <button id="setup-restart-now" class="primary-btn" type="button">Restart now</button>
+          <button id="setup-restart-later" class="ghost-btn" type="button">Exit and restart later</button>
+        </span>
+        <p id="setup-restart-error" class="error"></p>
+      </div>
+    </div>
+  </div>
+
   <!-- Round 25: plain data-shaping logic pulled out specifically so it's
        testable from Node (see that file's own comment) - loaded before
        app.js, which calls its one exported function directly as a global,
@@ -1063,6 +1126,7 @@
   <script src="wizard-payload.js"></script>
   <script src="session-model.js"></script>
   <script src="compose-wizard.js"></script>
+  <script src="setup-wizard.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

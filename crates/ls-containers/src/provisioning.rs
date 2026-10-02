@@ -156,12 +156,83 @@ mod linux_impl {
         log.info("podman-compose found on PATH");
         Ok(())
     }
+
+    /// Setup wizard's `PodmanInstalled` fix: installs both packages through
+    /// the detected package manager under `pkexec` (graphical polkit
+    /// prompt). Only reachable when `step_info` offered a consent, i.e. a
+    /// known package manager and pkexec both exist.
+    pub async fn fix_podman_installed(log: &ProvisioningLog) -> Result<()> {
+        let plan = super::setup::linux_install_plan(&super::setup::on_path);
+        let Some(cmd) = plan.command else {
+            anyhow::bail!("No automatic install is available on this system. {}", plan.manual);
+        };
+        let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+        let out = super::run_logged(log, &cmd[0], &args).await?;
+        anyhow::ensure!(
+            out.status.success(),
+            "`{}` failed (exit code {:?}):
+{}",
+            cmd.join(" "),
+            out.status.code(),
+            super::output_text(&out)
+        );
+        anyhow::ensure!(
+            crate::podman::podman_available() && crate::podman::podman_compose_available(),
+            "The install finished, but `podman --version` or `podman-compose --version` still fails."
+        );
+        Ok(())
+    }
+}
+
+/// Spawns `program` without a console window on Windows (same reason as
+/// `podman.rs`'s `command`).
+#[cfg_attr(not(windows), allow(unused_mut))]
+pub(crate) fn command(program: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW (tokio's inherent method)
+    cmd
+}
+
+/// Runs `program args...`, logging the command line and its exit
+/// status/stdout/stderr before returning the raw [`std::process::Output`].
+/// Only errors on a spawn failure (binary not found etc) — a non-zero exit
+/// is left to the caller.
+pub(crate) async fn run_logged(
+    log: &ProvisioningLog,
+    program: &str,
+    args: &[&str],
+) -> Result<std::process::Output> {
+    let cmdline = format!("{program} {}", args.join(" "));
+    log.info(&format!("running: {cmdline}"));
+    let output = command(program)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to run `{cmdline}` — is it on PATH?"))?;
+    log.info(&format!(
+        "`{cmdline}` exited {} — stdout: {:?} stderr: {:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim(),
+    ));
+    Ok(output)
+}
+
+/// stdout + stderr, trimmed, for error messages and "Show details".
+pub(crate) fn output_text(out: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    [stdout.trim(), stderr.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("
+")
 }
 
 // --- Windows and macOS implementations below this line are what this
 // round's platform agents fill in. Keep the same shape: log every step,
 // never swallow a command's real error text, and end with podman machine
 // actually running and podman-compose reachable. ---
+
+pub mod setup;
 
 #[cfg(target_os = "windows")]
 mod windows_impl;

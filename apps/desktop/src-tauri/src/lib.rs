@@ -15,4 +15,6 @@ pub mod receiver_session_commands;
 pub mod session_commands;
 pub mod send_log;
 pub mod session_history;
+pub mod setup_commands;
+pub mod setup_state;
 pub mod state;
