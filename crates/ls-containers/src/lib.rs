@@ -319,6 +319,20 @@ pub async fn service_state(session: &RunningSession, service: &str) -> Result<Se
 
 /// The last `tail` lines of `service`'s container output (stdout then
 /// stderr) - the real reason an app that started but isn't reachable failed.
+/// Removes the database volume a snapshot with this `db_seed_hash` uses
+/// (no-op if there is none). For throwaway runs like the compose wizard's
+/// test run: a failed first-boot import leaves a half-initialized volume
+/// behind, and reusing it would skip the import next time and look healthy.
+pub async fn remove_db_volume(db_seed_hash: &str) -> Result<()> {
+    podman::volume_remove(&compose::db_volume_name(db_seed_hash)).await
+}
+
+/// Whether the service's own health check passes right now (see
+/// `podman::service_healthy`).
+pub async fn service_healthy(session: &RunningSession, service: &str) -> Result<bool> {
+    podman::service_healthy(&session.compose_project_name, service).await
+}
+
 pub async fn service_logs(session: &RunningSession, service: &str, tail: usize) -> Result<String> {
     podman::service_logs(&session.compose_project_name, service, tail).await
 }
