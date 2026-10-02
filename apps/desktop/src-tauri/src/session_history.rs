@@ -3,9 +3,8 @@
 //! (`ls_security::peers`'s `known_peers.json`, `ls_clouddrop::store`'s
 //! `google_tokens.json`). Originally round 29's automatic session history.
 //!
-//! Session-model refactor: nothing is written here automatically any more.
-//! An entry exists only because the user explicitly chose "Save this
-//! session" - and an entry that carries a `project` is a whole saved
+//! Every session is persisted here automatically (the Home screen lists
+//! them) - an entry that carries a `project` is a whole saved
 //! [`ProjectSession`] (folders + database plan + per-device history) that can
 //! be opened again later. This module is purely storage: load the whole
 //! list, upsert one entry by id, or delete one. Upsert, not append-only:
@@ -13,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::project_session::ProjectSession;
 use crate::received_session::ReceivedSession;
@@ -53,6 +53,19 @@ const FILE_NAME: &str = "session-history.json";
 /// Caps the file from growing forever on a long-lived install - keeps the
 /// most recent entries, drops the oldest once this is exceeded.
 const MAX_ENTRIES: usize = 200;
+/// Serialises every load-modify-write: commands run concurrently, and two
+/// interleaved upserts would otherwise drop one of the two entries.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Replaces the file atomically (temp file + rename), so a concurrent reader
+/// never sees a half-written list.
+fn write_all(dir: &Path, entries: &[SessionHistoryEntry]) -> Result<(), String> {
+    let path = dir.join(FILE_NAME);
+    let tmp = dir.join(format!("{FILE_NAME}.tmp"));
+    let bytes = serde_json::to_vec_pretty(entries).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, bytes).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("writing {}: {e}", path.display()))
+}
 
 fn default_dir() -> Result<PathBuf, String> {
     let base = dirs::data_dir().ok_or("could not determine the OS data directory")?;
@@ -144,19 +157,19 @@ fn find_received_in(dir: &Path, id: &str) -> Result<Option<ReceivedSession>, Str
 }
 
 fn remove_in(dir: &Path, id: &str) -> Result<(), String> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load_in(dir)?;
     let before = entries.len();
     entries.retain(|e| e.id != id);
     if entries.len() == before {
         return Ok(());
     }
-    let path = dir.join(FILE_NAME);
-    let bytes = serde_json::to_vec_pretty(&entries).map_err(|e| e.to_string())?;
-    std::fs::write(&path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
+    write_all(dir, &entries)
 }
 
 fn upsert_in(dir: &Path, entry: SessionHistoryEntry) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load_in(dir)?;
     if let Some(existing) = entries.iter_mut().find(|e| e.id == entry.id) {
         *existing = entry;
@@ -167,14 +180,41 @@ fn upsert_in(dir: &Path, entry: SessionHistoryEntry) -> Result<(), String> {
             entries.drain(0..excess);
         }
     }
-    let path = dir.join(FILE_NAME);
-    let bytes = serde_json::to_vec_pretty(&entries).map_err(|e| e.to_string())?;
-    std::fs::write(&path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
+    write_all(dir, &entries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_upserts_keep_every_entry_and_readers_never_see_a_torn_file() {
+        let dir = std::env::temp_dir().join(format!("ls-history-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let entry = |i: usize| SessionHistoryEntry {
+            id: format!("s{i}"),
+            kind: "send".into(),
+            title: "x".repeat(2000),
+            started_at: String::new(),
+            ended_at: None,
+            project: None,
+            received: None,
+        };
+        let writers: Vec<_> = (0..16)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || upsert_in(&dir, entry(i)).unwrap())
+            })
+            .collect();
+        let reader = {
+            let dir = dir.clone();
+            std::thread::spawn(move || (0..200).for_each(|_| { load_in(&dir).unwrap(); }))
+        };
+        writers.into_iter().for_each(|t| t.join().unwrap());
+        reader.join().unwrap();
+        assert_eq!(load_in(&dir).unwrap().len(), 16);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::commands::FolderPlanDto;
     use crate::project_session::{DeviceMarker, FolderCommit};
 
