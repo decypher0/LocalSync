@@ -23,7 +23,7 @@
 //! receiving in practice, even though the arming mechanism itself doesn't
 //! care how the connection was made.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use serde::Serialize;
@@ -145,18 +145,47 @@ pub struct ReceivedSessionView {
     /// This session is armed to receive its next push in place (see
     /// `state.armed_updates`).
     pub armed: bool,
-    /// This session's current version has a live entry in `state.sessions`
-    /// (i.e. `run_received_session` brought it up and it hasn't been
-    /// stopped).
+    /// This session's current version has running containers right now -
+    /// asked of Podman, so it's right after an app restart too (when nothing
+    /// from the original Run is left in memory).
     pub running: bool,
+    /// When running: the ("service", "host:container") ports it published,
+    /// read from the compose file it was brought up from. `None` when not
+    /// running (or the file is gone).
+    pub service_ports: Option<Vec<(String, String)>>,
+    /// When running and started by *this* app process: whether the database
+    /// volume was reused. `None` when unknown (e.g. after a restart - it isn't
+    /// recorded anywhere that survives one).
+    pub db_cache_hit: Option<bool>,
 }
 
+/// Asks Podman whether this session's compose project has running
+/// containers. If Podman can't be asked at all, falls back to what this
+/// process itself started (the pre-restart-aware behavior) rather than
+/// failing the whole view.
 fn is_running(state: &AppState, session: &ReceivedSession) -> Result<bool, String> {
-    let key = ls_containers::compose_project_name(&session.title, &session.git_commit);
-    Ok(state.sessions.lock().map_err(|e| e.to_string())?.contains_key(&key))
+    match ls_containers::project_running(&session.title, &session.git_commit) {
+        Ok(running) => Ok(running),
+        Err(e) => {
+            log::warn!("is_running: couldn't ask podman about {} ({e:#}); using in-memory state", session.id);
+            let key = ls_containers::compose_project_name(&session.title, &session.git_commit);
+            Ok(state.sessions.lock().map_err(|e| e.to_string())?.contains_key(&key))
+        }
+    }
 }
 
 fn build_view(state: &AppState, session: &ReceivedSession) -> Result<ReceivedSessionView, String> {
+    let running = is_running(state, session)?;
+    let (service_ports, db_cache_hit) = if running {
+        let key = ls_containers::compose_project_name(&session.title, &session.git_commit);
+        let live = state.sessions.lock().map_err(|e| e.to_string())?.get(&key).map(|r| (r.service_ports.clone(), r.db_cache_hit));
+        match live {
+            Some((ports, hit)) => (Some(ports), Some(hit)),
+            None => (ls_containers::declared_service_ports(Path::new(&session.compose_dir)).ok(), None),
+        }
+    } else {
+        (None, None)
+    };
     let armed = state
         .armed_updates
         .lock()
@@ -174,7 +203,9 @@ fn build_view(state: &AppState, session: &ReceivedSession) -> Result<ReceivedSes
         last_received_at: session.last_received_at.clone(),
         saved: crate::session_history::find_received(&session.id).ok().flatten().is_some(),
         armed,
-        running: is_running(state, session)?,
+        running,
+        service_ports,
+        db_cache_hit,
     })
 }
 
@@ -287,6 +318,25 @@ pub async fn run_received_session<R: tauri::Runtime>(
     Ok(RunReceivedResult { id: session_id, running: info })
 }
 
+/// Stops a received session's containers by its compose project directly -
+/// works for a session reopened after an app restart, when the
+/// `RunningSession` handle from the original Run is long gone (which
+/// `commands::stop_session` needs). Forgets that handle too if this process
+/// still has it.
+#[tauri::command]
+pub async fn stop_received_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let session = get_session(&state, &session_id)?;
+    if session.compose_dir.is_empty() {
+        return Err("this session hasn't been run, so there's nothing to stop".to_string());
+    }
+    ls_containers::stop_project(Path::new(&session.compose_dir), &session.title, &session.git_commit)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let key = ls_containers::compose_project_name(&session.title, &session.git_commit);
+    state.sessions.lock().map_err(|e| e.to_string())?.remove(&key);
+    Ok(())
+}
+
 /// "Save this session" - receiver side.
 #[tauri::command]
 pub fn save_received_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
@@ -315,9 +365,14 @@ pub fn delete_saved_received_session(session_id: String) -> Result<(), String> {
 /// Re-opens a saved received session: loads it and files it back into
 /// memory. Does **not** run anything - Run is still a separate, explicit
 /// step (`run_received_session`).
-#[tauri::command]
+///
+/// `async` in the attribute: it asks Podman whether the session is running (a
+/// blocking `podman ps`), so it runs off the main thread rather than freezing
+/// the window, while staying a plain `fn` for callers.
+#[tauri::command(async)]
 pub fn open_saved_received_session(state: State<'_, AppState>, session_id: String) -> Result<ReceivedSessionView, String> {
-    if let Some(open) = state.received_sessions.lock().map_err(|e| e.to_string())?.get(&session_id).cloned() {
+    let open = state.received_sessions.lock().map_err(|e| e.to_string())?.get(&session_id).cloned();
+    if let Some(open) = open {
         return build_view(&state, &open);
     }
     let session = crate::session_history::find_received(&session_id)?
