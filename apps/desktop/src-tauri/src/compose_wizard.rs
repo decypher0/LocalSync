@@ -220,7 +220,15 @@ pub async fn run_compose_test<R: tauri::Runtime>(
     };
 
     let work_dir = fresh_work_dir();
+    let db_service = spec.database.as_ref().map(|db| ls_composegen::catalog::db_service_name(db.engine));
     let outcome = boot_and_wait(&app, &verified, &work_dir, host_port, wait, &mut notes).await;
+    // Leave no database state behind: a later test run of the same dump must
+    // import it again rather than find this run's volume and skip the import.
+    if db_service.is_some() {
+        if let Err(e) = ls_containers::remove_db_volume(&verified.snapshot().manifest.db_seed_hash).await {
+            notes.push(format!("Couldn't remove the test database's volume ({e:#}); `podman volume ls` will show it."));
+        }
+    }
     if let Err(e) = std::fs::remove_dir_all(&work_dir) {
         // Not the person's problem, but worth knowing about.
         log::warn!("test run: couldn't remove {}: {e}", work_dir.display());
