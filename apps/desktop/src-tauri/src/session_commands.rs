@@ -38,19 +38,43 @@ fn new_session_id() -> String {
     format!("s{nanos:x}{:x}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
-/// The commit each folder is at right now. Cheap (`git rev-parse HEAD`), and
-/// what decides whether a cached artifact is still current.
+/// What each folder is at right now: its snapshot commit (HEAD, or HEAD plus
+/// uncommitted edits to tracked files - see `ls_snapshot::snapshot_commit`)
+/// and its dump's fingerprint. Cheap (git status, plus staging only when
+/// something is edited), and what decides whether a cached artifact is still
+/// current and whether a device is behind.
 async fn current_commits(folders: &[FolderPlanDto]) -> Result<Vec<FolderCommit>, String> {
     let mut out = Vec::with_capacity(folders.len());
     for f in folders {
         let path = f.path.clone();
-        let commit = tauri::async_runtime::spawn_blocking(move || ls_snapshot::head_commit(Path::new(&path)))
-            .await
-            .map_err(|e| format!("git task panicked: {e}"))?
-            .map_err(|e| format!("reading the current commit of {}: {e:#}", f.path))?;
-        out.push(FolderCommit { path: f.path.clone(), commit });
+        let (commit, tree) = tauri::async_runtime::spawn_blocking(move || {
+            let root = Path::new(&path);
+            let commit = ls_snapshot::snapshot_commit(root)?;
+            let tree = ls_snapshot::folder_tree(root, &commit).ok();
+            anyhow::Ok((commit, tree))
+        })
+        .await
+        .map_err(|e| format!("git task panicked: {e}"))?
+        .map_err(|e| format!("reading the current commit of {}: {e:#}", f.path))?;
+        out.push(FolderCommit { path: f.path.clone(), commit, dump: dump_fingerprint(f), tree });
     }
     Ok(out)
+}
+
+/// Size and modified time of the folder's dump file - changes whenever the
+/// dump is exported again. ponytail: not a content hash (re-hashing a
+/// multi-GB dump on every check is too slow); an identical re-export still
+/// counts as a change, which only costs one redundant push.
+fn dump_fingerprint(f: &FolderPlanDto) -> Option<String> {
+    let dump = f.dump.as_ref()?;
+    let meta = std::fs::metadata(&dump.file_path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    Some(format!("{}:{modified}", meta.len()))
 }
 
 fn artifact_key(session_id: &str, parents: &[Option<String>]) -> String {
@@ -75,7 +99,12 @@ async fn build_artifact(
     let commits = folders
         .iter()
         .zip(snapshot.manifest.folders.iter())
-        .map(|(f, info)| FolderCommit { path: f.path.clone(), commit: info.git_commit.clone() })
+        .map(|(f, info)| FolderCommit {
+            path: f.path.clone(),
+            commit: info.git_commit.clone(),
+            dump: dump_fingerprint(f),
+            tree: ls_snapshot::folder_tree(Path::new(&f.path), &info.git_commit).ok(),
+        })
         .collect();
     let bytes = tauri::async_runtime::spawn_blocking(move || serde_json::to_vec(&snapshot))
         .await
@@ -251,15 +280,15 @@ pub struct PushStatus {
     /// The device this session last sent to (Push update's target).
     pub last_device_key: Option<String>,
     pub last_device_name: Option<String>,
-    /// The project's folders are at different commits than what that device
-    /// last received - there is something to push.
+    /// The project differs from what that device last received - a new
+    /// commit, an uncommitted edit to a tracked file, or a re-exported
+    /// database dump. There is something to push.
     pub changed: bool,
 }
 
 /// Whether "Push update" has anything to do: compares each folder's current
-/// git commit with what the last-known device received. Cheap (git rev-parse
-/// only, no rebuild), so the session page can ask it regularly. Snapshots are
-/// built from commits, so uncommitted edits don't count as changes.
+/// state (`current_commits`) with what the last-known device received. Cheap
+/// (no rebuild), so the session page can ask it regularly.
 #[tauri::command]
 pub async fn project_push_status(state: State<'_, AppState>, session_id: String) -> Result<PushStatus, String> {
     let session = get_session(&state, &session_id)?;
