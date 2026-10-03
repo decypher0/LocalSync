@@ -2432,3 +2432,24 @@ backend. These need real machines:
    `podman machine stop` then remove the machine) and press Run - within 90
    seconds of the last good check it may still try; after that it must fail
    at the check with the plain message, not deep inside podman-compose.
+
+## Addendum: page navigation (Home, New Session, session pages)
+
+Automated: headless-Chrome harnesses against a mocked backend cover every
+view and flow. In the real app window, check:
+
+1. **Home** lists every session you've created or received, by the name you
+   gave it, with a live Running/Stopped pill - including after quitting and
+   reopening the app (sessions are now kept automatically, no Save needed).
+2. **New Session -> Send**: Name, Send, then Setup is the project/database
+   wizard (from the folder step), Transfer is the mode/target step; Send lands
+   on the sender page with the connection code.
+3. **New Session -> Receive**: Setup asks for the work folder and device name
+   / discoverability; Transfer is the room code (or Cloud drop). The receiver
+   page opens immediately, then shows the review; Run streams the Logs panel
+   live (podman-compose output, "containers started", database health).
+4. **Receiver running** shows ports and Stop/Pull update/Close; **stopped**
+   shows Run/Receive update/Close and no logs (unless the last Run failed).
+5. **Close session** (two clicks) stops a running receive and removes the
+   session from Home for good.
+6. Settings and Session history open from the app menu over the pages.
