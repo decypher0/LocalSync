@@ -6,7 +6,6 @@
 //! is on disk and survives restarts.
 
 use serde::Serialize;
-use std::path::Path;
 use tauri::State;
 
 use crate::project_session::ProjectSession;
@@ -117,13 +116,8 @@ pub async fn close_session(state: State<'_, AppState>, session_id: String) -> Re
         None => crate::session_history::find_received(&session_id)?,
     };
     if let Some(r) = received {
-        if !r.compose_dir.is_empty() && ls_containers::project_running(&r.title, &r.git_commit).unwrap_or(false) {
-            ls_containers::stop_project(Path::new(&r.compose_dir), &r.title, &r.git_commit)
-                .await
-                .map_err(|e| format!("couldn't stop its containers: {e:#}"))?;
-        }
-        let key = ls_containers::compose_project_name(&r.title, &r.git_commit);
-        state.sessions.lock().map_err(|e| e.to_string())?.remove(&key);
+        // Current version and, after an update, the one before it.
+        crate::receiver_session_commands::stop_session_containers(&state, &r).await?;
     }
     state.received_sessions.lock().map_err(|e| e.to_string())?.remove(&session_id);
     state.project_sessions.lock().map_err(|e| e.to_string())?.remove(&session_id);
