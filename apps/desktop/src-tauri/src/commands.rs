@@ -1620,6 +1620,29 @@ pub async fn link_google_account<R: tauri::Runtime>(app: AppHandle<R>) -> Result
     Ok(LinkedAccountInfo { email })
 }
 
+/// Opens a running session's app (`http://localhost:<port>`) in the system
+/// browser. Only local http(s) URLs: this is for the receiver page's service
+/// links, never a general "open anything" door for the webview.
+#[tauri::command]
+pub fn open_local_url<R: tauri::Runtime>(app: AppHandle<R>, url: String) -> Result<(), String> {
+    let local = ["http://localhost:", "http://127.0.0.1:", "https://localhost:", "https://127.0.0.1:"];
+    if !local.iter().any(|p| url.starts_with(p)) || url.chars().any(|c| c.is_whitespace()) {
+        return Err(format!("not a local app address: {url}"));
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Whether this build can do Cloud drop at all: it needs the Google OAuth
+/// client the app is built/launched with (`GOOGLE_OAUTH_CLIENT_ID` and
+/// `_SECRET` - see docs/google-drive-setup.md). That's an app-level setting,
+/// not something a user can enter, so the UI greys Cloud drop out instead of
+/// letting a transfer start and fail on it.
+#[tauri::command]
+pub fn cloud_drop_available() -> bool {
+    cloud_drop_config().is_ok()
+}
+
 /// `None` if no account is linked yet — Settings shows a "Link Google
 /// account" action either way, this just decides whether to also show whose
 /// account it already is.
