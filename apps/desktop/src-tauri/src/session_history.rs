@@ -255,7 +255,7 @@ mod tests {
             "Alice",
             DeviceMarker {
                 snapshot_id: "xusom-admin@abc".to_string(),
-                commits: vec![FolderCommit { path: "/work/xusom-admin".to_string(), commit: "abc".to_string() }],
+                commits: vec![FolderCommit { path: "/work/xusom-admin".to_string(), commit: "abc".to_string(), dump: None, tree: None }],
                 sent_at: "2026-01-01T00:01:00Z".to_string(),
             },
         );
