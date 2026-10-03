@@ -202,13 +202,13 @@ listen("cloud-access-request", (evt) => {
 // once. Falls back to a fresh tab if that session is gone (e.g. closed, or
 // this is a restart) so the update is never silently dropped.
 listen("snapshot-updated", (evt) => {
-  const session = lastReceiveSessionId && sessions.get(lastReceiveSessionId);
+  let session = lastReceiveSessionId && sessions.get(lastReceiveSessionId);
   if (!session) {
     startReceiveSessionFromInfo(evt.payload);
     return;
   }
   // The push was filed as its own ReceivedSession; Run must target that one.
-  rekeySession(session, evt.payload.received_session_id);
+  session = rekeySession(session, evt.payload.received_session_id);
   applyReviewInfoToSession(session, evt.payload);
   renderSessionTabs();
   if (session.id === activeSessionId) renderActiveSession();
@@ -240,6 +240,17 @@ listen("session-update-available", (evt) => {
 // ---------- settings ----------
 $("settings-toggle").addEventListener("click", () => {
   $("settings-panel").classList.toggle("hidden");
+});
+$("settings-close-btn").addEventListener("click", () => $("settings-panel").classList.add("hidden"));
+// Esc closes whichever overlay (Settings, Session history) is open.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const id of ["settings-panel", "session-history-panel"]) {
+    if (!$(id).classList.contains("hidden")) {
+      $(id).classList.add("hidden");
+      e.preventDefault();
+    }
+  }
 });
 $("data-dir-display").value = "(read at launch; not editable here)";
 
@@ -3060,6 +3071,9 @@ function applyReviewInfoToSession(session, info) {
   session.title = info.manifest.project_name;
   session.status = "reviewing";
   session.errorText = "";
+  // The backend consumes the arming when an update lands on it.
+  session.armed = false;
+  session.endedAt = null;
   // A fresh diff to review is never a resolved state - re-arms the
   // close-tab "save?" prompt if this session had previously been rejected
   // or run to completion (e.g. an armed session's next push arriving).
@@ -3298,7 +3312,17 @@ function renderRunningPanel(session) {
 function startReceiveSessionFromInfo(info, sessionId) {
   // The tab is keyed by the backend's ReceivedSession id - what Run/Save/arming
   // look sessions up by - never the snapshot id or a room code.
-  const session = newSession("receive", sessionId || info.received_session_id || info.snapshot_id, info.manifest.project_name);
+  const id = sessionId || info.received_session_id || info.snapshot_id;
+  // An update that landed on a session already open (it was armed): show it
+  // there, rather than a second copy of the same session replacing it.
+  const existing = sessions.get(id);
+  if (existing) {
+    applyReviewInfoToSession(existing, info);
+    renderSessionTabs();
+    if (existing.id === activeSessionId) renderActiveSession();
+    return existing;
+  }
+  const session = newSession("receive", id, info.manifest.project_name);
   applyReviewInfoToSession(session, info);
   addSession(session);
   lastReceiveSessionId = session.id;
@@ -3307,14 +3331,25 @@ function startReceiveSessionFromInfo(info, sessionId) {
 
 // A receive tab opened before the backend answered (keyed by its room code or
 // a placeholder) takes the real ReceivedSession id once the info arrives.
+// Returns the session to carry on with: if that id is already open (an armed
+// session the update landed on), the placeholder goes and the open one stays.
 function rekeySession(session, newId) {
-  if (!newId || newId === session.id) return;
+  if (!newId || newId === session.id) return session;
+  const existing = sessions.get(newId);
+  if (existing && existing !== session) {
+    if (session.progressUnlisten) session.progressUnlisten();
+    sessions.delete(session.id);
+    if (activeSessionId === session.id) activeSessionId = existing.id;
+    if (lastReceiveSessionId === session.id) lastReceiveSessionId = existing.id;
+    return existing;
+  }
   sessions.delete(session.id);
   const wasActive = activeSessionId === session.id;
   if (lastReceiveSessionId === session.id) lastReceiveSessionId = newId;
   session.id = newId;
   sessions.set(session.id, session);
   if (wasActive) activeSessionId = session.id;
+  return session;
 }
 
 $("cloud-drop-receive-toggle").addEventListener("change", () => {
@@ -3352,7 +3387,7 @@ $("receive-btn").addEventListener("click", async () => {
   // progress on). The tab appears immediately (before the sender has even
   // responded) so this wait doesn't block starting anything else.
   if ($("cloud-drop-receive-toggle").checked) {
-    const session = newSession("receive", `clouddrop-${roomCode}-${Date.now()}`, "Cloud drop request");
+    let session = newSession("receive", `clouddrop-${roomCode}-${Date.now()}`, "Cloud drop request");
     addSession(session);
     $("receive-room-code").value = "";
     try {
@@ -3361,7 +3396,7 @@ $("receive-btn").addEventListener("click", async () => {
         session.errorText = "The sender declined this request.";
         endSession(session, "error");
       } else {
-        rekeySession(session, outcome.info.received_session_id);
+        session = rekeySession(session, outcome.info.received_session_id);
         applyReviewInfoToSession(session, outcome.info);
         renderSessionTabs();
         if (session.id === activeSessionId) renderActiveSession();
@@ -3397,7 +3432,7 @@ $("receive-btn").addEventListener("click", async () => {
     // This only verifies + diffs. Nothing from the snapshot executes until
     // the user reviews it below and clicks Run.
     const info = await invoke("receive_snapshot", { roomCode: decoded.room_id, signalingUrl: decoded.signaling_url });
-    rekeySession(session, info.received_session_id);
+    session = rekeySession(session, info.received_session_id);
     applyReviewInfoToSession(session, info);
     renderSessionTabs();
     if (session.id === activeSessionId) renderActiveSession();
@@ -3524,6 +3559,7 @@ async function runReceiveSession(session, workDir, ids) {
     session.servicePorts = runInfo.service_ports;
     session.dbCacheHit = runInfo.db_cache_hit;
     session.status = "running";
+    session.endedAt = null; // endSession ignores a session that already ended once
     session.runInProgress = false;
     session.hasRunBefore = true;
     session.workDir = workDir;

@@ -42,7 +42,7 @@ fn make_project(base: &Path) -> PathBuf {
     std::fs::write(root.join("README.md"), "v1\n").unwrap();
     std::fs::write(
         root.join("docker-compose.yml"),
-        "services:\n  web:\n    image: docker.io/library/nginx:alpine\n    ports:\n      - \"8099:80\"\n",
+        "services:\n  web:\n    image: docker.io/library/python:3.12-slim\n    command: [\"python\", \"-m\", \"http.server\", \"80\"]\n    ports:\n      - \"8099:80\"\n",
     )
     .unwrap();
     sh(&root, &["init", "-q"]);

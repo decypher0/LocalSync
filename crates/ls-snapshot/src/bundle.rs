@@ -142,15 +142,15 @@ pub fn bundle_project_with(
     generated: Option<&crate::types::GeneratedFiles>,
 ) -> Result<GitBundle> {
     log::info!("bundling started: project_root={}", project_root.display());
-    let git_commit = git_text(project_root, &["rev-parse", "HEAD"])?
-        .trim()
-        .to_string();
+    // HEAD, or a commit of HEAD plus the folder's uncommitted changes - see
+    // `snapshot_commit`. Everything below (archive, diff, diff stat) is of it.
+    let git_commit = snapshot_commit(project_root)?;
 
-    let diff_stat = build_diff_stat(project_root, parent_commit)?;
+    let diff_stat = build_diff_stat(project_root, parent_commit, &git_commit)?;
     let diff_stat_json = serde_json::to_vec_pretty(&diff_stat)?;
 
     let diff_patch = match parent_commit {
-        Some(parent) => filter_noise_from_patch(&git_text(project_root, &["diff", "--relative", &format!("{parent}..HEAD")])?),
+        Some(parent) => filter_noise_from_patch(&git_text(project_root, &["diff", "--relative", &format!("{parent}..{git_commit}")])?),
         None => String::new(),
     };
 
@@ -172,7 +172,7 @@ pub fn bundle_project_with(
     let zstd = zstd_encoder(Vec::new())?;
     let mut tb = tar::Builder::new(zstd);
 
-    let archive_bytes = git_bytes(project_root, &["archive", "--format=tar", "HEAD"])?;
+    let archive_bytes = git_bytes(project_root, &["archive", "--format=tar", &git_commit])?;
     append_git_archive(&mut tb, &archive_bytes, "source", generated.is_some())?;
     if let Some(g) = generated {
         for (rel, bytes) in &g.files {
@@ -244,7 +244,7 @@ pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn build_diff_stat(project_root: &Path, parent_commit: Option<&str>) -> Result<Vec<DiffStatEntry>> {
+fn build_diff_stat(project_root: &Path, parent_commit: Option<&str>, commit: &str) -> Result<Vec<DiffStatEntry>> {
     let base = parent_commit.unwrap_or(EMPTY_TREE);
 
     // --no-renames: diff_stat's change_type is only added/modified/deleted
@@ -255,8 +255,8 @@ fn build_diff_stat(project_root: &Path, parent_commit: Option<&str>) -> Result<V
     // the selected folder and makes paths relative to it, matching what `git
     // archive` (which already only takes the current folder) ships. At a repo
     // root it changes nothing.
-    let numstat = git_text(project_root, &["diff", "--relative", "--no-renames", "--numstat", base, "HEAD"])?;
-    let name_status = git_text(project_root, &["diff", "--relative", "--no-renames", "--name-status", base, "HEAD"])?;
+    let numstat = git_text(project_root, &["diff", "--relative", "--no-renames", "--numstat", base, commit])?;
+    let name_status = git_text(project_root, &["diff", "--relative", "--no-renames", "--name-status", base, commit])?;
 
     let mut status_map: HashMap<String, &str> = HashMap::new();
     for line in name_status.lines() {
@@ -544,8 +544,77 @@ pub fn head_commit(project_root: &Path) -> Result<String> {
     Ok(git_text(project_root, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
+/// The commit a snapshot of `project_root` is built from - and what decides
+/// whether the project changed since a device last received it.
+///
+/// HEAD when the folder has no uncommitted changes to tracked files.
+/// Otherwise a commit of HEAD plus those changes, made the way `git stash
+/// create` does: nothing the developer sees is touched (no branch, ref, index
+/// or file changes). Their index is copied to a temporary one, the folder's
+/// edits to tracked files are staged there, and that tree is committed with a
+/// fixed author and date, so the same content always gives the same id.
+/// Untracked files are left out unless they were `git add`ed - an untracked
+/// `.env` must never ship just because it exists.
+///
+/// ponytail: the commit is unreachable, so `git gc` may prune it after ~2
+/// weeks; a later push diffing against it then falls back to a full diff
+/// (`ensure_artifact` already handles a parent that no longer exists).
+pub fn snapshot_commit(project_root: &Path) -> Result<String> {
+    let head = head_commit(project_root)?;
+    let dirty = git_text(project_root, &["status", "--porcelain", "--untracked-files=no", "--", "."])?;
+    if dirty.trim().is_empty() {
+        return Ok(head);
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp_index = std::env::temp_dir().join(format!(
+        "localsync-index-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let real_index = git_text(project_root, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+    let real_index = Path::new(real_index.trim());
+    if real_index.is_file() {
+        // Starting from the real index keeps git's stat cache: only files
+        // that actually changed get re-hashed.
+        fs::copy(real_index, &tmp_index).with_context(|| format!("copying {}", real_index.display()))?;
+    }
+    let index_env = [("GIT_INDEX_FILE", tmp_index.as_os_str())];
+    let made = (|| -> Result<String> {
+        git_bytes_with(project_root, &["add", "-u", "--", "."], &index_env)?;
+        let tree = String::from_utf8(git_bytes_with(project_root, &["write-tree"], &index_env)?)?;
+        let fixed = std::ffi::OsStr::new;
+        let author = [
+            ("GIT_AUTHOR_NAME", fixed("LocalSync")),
+            ("GIT_AUTHOR_EMAIL", fixed("localsync@localhost")),
+            ("GIT_AUTHOR_DATE", fixed("1970-01-01T00:00:00Z")),
+            ("GIT_COMMITTER_NAME", fixed("LocalSync")),
+            ("GIT_COMMITTER_EMAIL", fixed("localsync@localhost")),
+            ("GIT_COMMITTER_DATE", fixed("1970-01-01T00:00:00Z")),
+        ];
+        let commit = git_bytes_with(
+            project_root,
+            &["commit-tree", "--no-gpg-sign", tree.trim(), "-p", &head, "-m", "LocalSync: uncommitted changes"],
+            &author,
+        )?;
+        Ok(String::from_utf8(commit)?.trim().to_string())
+    })();
+    let _ = fs::remove_file(&tmp_index);
+    made
+}
+
+/// The id of `project_root`'s own tree (just this folder's files) at
+/// `commit`: equal for two commits with the same content - e.g. the snapshot
+/// commit of an uncommitted edit, and the real commit made of it afterwards.
+pub fn folder_tree(project_root: &Path, commit: &str) -> Result<String> {
+    Ok(git_text(project_root, &["rev-parse", &format!("{commit}:./")])?.trim().to_string())
+}
+
 fn git_text(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(git_bytes(root, args)?)?)
+}
+
+fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    git_bytes_with(root, args, &[])
 }
 
 /// Runs one read-only `git` subprocess and returns its stdout.
@@ -573,13 +642,14 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 ///      approach would suggest — because a large `git archive` can write
 ///      more than the OS pipe buffer holds; reading only after `wait`
 ///      returns would deadlock the exact way this function exists to avoid.
-fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+fn git_bytes_with(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)]) -> Result<Vec<u8>> {
     let start = Instant::now();
     let mut child = git_command("git")
         .arg("-C")
         .arg(root)
         .arg("--no-pager")
         .args(args)
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

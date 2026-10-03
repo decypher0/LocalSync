@@ -22,10 +22,29 @@ use crate::commands::FolderPlanDto;
 const MAX_SEND_HISTORY: usize = 50;
 
 /// One folder's commit, keyed by the folder's path as the user chose it.
+/// `commit` covers uncommitted edits too (`ls_snapshot::snapshot_commit`);
+/// `dump` fingerprints the folder's database dump file, so a re-exported
+/// dump is a change to push even when no code changed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FolderCommit {
     pub path: String,
     pub commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump: Option<String>,
+    /// The folder's own tree id at `commit` (`ls_snapshot::folder_tree`):
+    /// committing an edit that was already sent changes `commit` but not
+    /// this, and is not a change to push. `None` on markers from before this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+}
+
+impl FolderCommit {
+    /// Same folder with the same content (same commit, or same tree) and dump.
+    pub fn same_content(&self, other: &FolderCommit) -> bool {
+        self.path == other.path
+            && self.dump == other.dump
+            && (self.commit == other.commit || (self.tree.is_some() && self.tree == other.tree))
+    }
 }
 
 /// What one specific device last received from this session - the point a
@@ -152,7 +171,7 @@ impl ProjectSession {
         match self.device(key).and_then(|d| d.marker.as_ref()) {
             Some(marker) => {
                 current.len() == marker.commits.len()
-                    && current.iter().all(|c| marker.commits.iter().any(|m| m == c))
+                    && current.iter().all(|c| marker.commits.iter().any(|m| m.same_content(c)))
             }
             None => false,
         }
@@ -168,7 +187,7 @@ mod tests {
     }
 
     fn commits(pairs: &[(&str, &str)]) -> Vec<FolderCommit> {
-        pairs.iter().map(|(p, c)| FolderCommit { path: p.to_string(), commit: c.to_string() }).collect()
+        pairs.iter().map(|(p, c)| FolderCommit { path: p.to_string(), commit: c.to_string(), dump: None, tree: None }).collect()
     }
 
     fn marker(id: &str, pairs: &[(&str, &str)]) -> DeviceMarker {
@@ -210,6 +229,23 @@ mod tests {
         let now = commits(&[("/a", "a2"), ("/b", "b1")]);
         assert!(s.is_up_to_date("dev-a", &now), "A already has the current version");
         assert!(!s.is_up_to_date("dev-b", &now), "B is behind and still needs a push");
+    }
+
+    #[test]
+    fn same_content_under_a_new_commit_is_up_to_date_but_a_new_dump_is_not() {
+        let mut s = session();
+        let fc = |commit: &str, tree: Option<&str>, dump: Option<&str>| FolderCommit {
+            path: "/a".into(),
+            commit: commit.into(),
+            dump: dump.map(Into::into),
+            tree: tree.map(Into::into),
+        };
+        let sent = DeviceMarker { snapshot_id: "p@wt".into(), commits: vec![fc("wt1", Some("t1"), Some("10:1"))], sent_at: "2026-01-01T00:00:00Z".into() };
+        s.record_send("dev-a", "Alice", sent);
+        assert!(s.is_up_to_date("dev-a", &[fc("c2", Some("t1"), Some("10:1"))]), "the sent edit, committed since");
+        assert!(!s.is_up_to_date("dev-a", &[fc("c3", Some("t2"), Some("10:1"))]), "new content");
+        assert!(!s.is_up_to_date("dev-a", &[fc("wt1", Some("t1"), Some("11:2"))]), "a re-exported dump");
+        assert!(!s.is_up_to_date("dev-a", &[fc("c2", None, Some("10:1"))]), "unknown tree: only the commit can say");
     }
 
     #[test]

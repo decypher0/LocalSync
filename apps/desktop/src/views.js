@@ -21,6 +21,12 @@
     closeArmed: null, // session id whose "Close session" is waiting for a second click
   };
 
+  // Banners (firewall, app update) go above the views, in the flow - never over them.
+  const banners = document.createElement("div");
+  banners.id = "lsv-banners";
+  banners.append($id("firewall-banner"), $id("app-update-banner"));
+  $id("app-views").prepend(banners);
+
   const holding = document.createElement("div");
   holding.id = "lsv-holding";
   holding.hidden = true;
@@ -412,6 +418,26 @@
     }
   });
 
+  // ---------- Cloud drop needs the app's Google sign-in client ----------
+  // It's set when the app is built/launched (not something a user can enter),
+  // so without it both mode pickers show Cloud drop greyed out, with why,
+  // instead of letting a transfer start and fail on it.
+  const CLOUD_DROP_OFF =
+    "Cloud drop isn't available in this build of LocalSync: it needs a Google sign-in client that is set up when the app is built - it can't be turned on from Settings.";
+  invoke("cloud_drop_available")
+    .then((available) => {
+      if (available) return;
+      for (const input of [$id("wiz-mode-cloud"), document.querySelector('input[name="ntr-mode"][value="cloud"]')]) {
+        if (!input) continue;
+        input.disabled = true;
+        const label = input.closest("label");
+        label.title = CLOUD_DROP_OFF;
+        label.classList.add("is-unavailable");
+        label.insertAdjacentHTML("beforeend", ` <span class="lsv-unavailable">(not available in this build)</span>`);
+      }
+    })
+    .catch(() => {});
+
   // ---------- following the session model ----------
   const origAddSession = window.addSession;
   window.addSession = function (session) {
@@ -456,8 +482,16 @@
   // redraw the page whenever a Run finishes, whichever way it went.
   const origRunReceive = window.runReceiveSession;
   window.runReceiveSession = async function (...args) {
+    // It marks the session as starting before its first await: show
+    // "Starting…" and the live log now, not once the whole project is up.
+    const run = origRunReceive(...args);
+    if (V.view === "session") {
+      renderSessionPage();
+      const logs = $id("sp-logs-panel");
+      if (logs) logs.scrollIntoView({ block: "nearest" });
+    }
     try {
-      return await origRunReceive(...args);
+      return await run;
     } finally {
       if (V.view === "session") renderSessionPage();
     }
@@ -482,7 +516,7 @@
   // backend (which asks Podman) every 15 s while it's on screen.
   setInterval(async () => {
     const s = V.session;
-    if (V.view !== "session" || document.hidden || !s || s.kind !== "receive" || s.busy || s.runInProgress) return;
+    if (V.view !== "session" || document.hidden || !s || s.kind !== "receive" || s.busy || s.runInProgress || s.stopping || s.armBusy) return;
     if (!s.snapshotId || receiveState(s) === "receiving" || receiveState(s) === "reviewing") return;
     try {
       const view = await invoke("open_saved_received_session", { sessionId: s.id });
@@ -780,10 +814,15 @@
       right.innerHTML =
         panel("Service", "sp-service") +
         actionsPanel(
-          btn("sp-stop", "Stop", icon.stop, "lsv-btn-danger") + btn("sp-arm", "Pull update", icon.down) + btn("sp-save", "Saved automatically", icon.save) + btn("sp-close", "Close session", "", "lsv-btn-danger")
+          btn("sp-stop", "Stop", icon.stop, "lsv-btn-danger") +
+            `<p id="sp-stop-error" class="lsv-error hidden"></p>` +
+            btn("sp-arm", "Pull update", icon.down) +
+            armedPanel() +
+            btn("sp-save", "Saved automatically", icon.save) +
+            btn("sp-close", "Close session", "", "lsv-btn-danger")
         );
       $id("sp-save").disabled = true;
-      $id("sp-stop").addEventListener("click", () => pressExisting("stop-btn"));
+      $id("sp-stop").addEventListener("click", stopCurrent);
     } else if (state === "reviewing") {
       left.insertAdjacentHTML("beforeend", `<div id="sp-review-slot" class="lsv-review"></div>`);
       $id("sp-review-slot").appendChild(reuse.review);
@@ -817,15 +856,106 @@
       right.innerHTML =
         panel("Last run", "sp-last-run") +
         actionsPanel(
-          btn("sp-run", "Run", icon.play, "lsv-btn-primary") + btn("sp-arm", "Receive update", icon.down) + btn("sp-close", "Close session", "", "lsv-btn-danger"),
+          btn("sp-run", "Run", icon.play, "lsv-btn-primary") + btn("sp-arm", "Receive update", icon.down) + armedPanel() + btn("sp-close", "Close session", "", "lsv-btn-danger"),
           "A stopped session only shows what you can actually do right now - run it again, pull the latest update, or remove it."
         );
       $id("sp-run").addEventListener("click", runCurrent);
       $id("sp-fix-setup").addEventListener("click", () => openSetup());
     }
     const arm = $id("sp-arm");
-    if (arm) arm.addEventListener("click", () => pressExisting("receive-arm-toggle"));
+    if (arm) {
+      arm.addEventListener("click", toggleArm);
+      $id("sp-arm-receive").addEventListener("click", receiveUpdateByCode);
+      $id("sp-arm-code").addEventListener("keydown", (e) => e.key === "Enter" && receiveUpdateByCode());
+      $id("sp-arm-discoverable").addEventListener("click", () => {
+        const t = $id("discoverable-toggle");
+        if (!t.checked && !t.disabled) {
+          t.checked = true;
+          t.dispatchEvent(new Event("change"));
+        }
+        setTimeout(() => V.view === "session" && renderSessionPage(), 600);
+      });
+    }
     $id("sp-close").addEventListener("click", closeCurrent);
+  }
+
+  // Shown under "Pull update" while the session waits for the sender's next
+  // push: it arrives on its own from a nearby sender (discoverable), or by
+  // the code the sender's Push update shows.
+  function armedPanel() {
+    return `<div id="sp-armed" class="lsv-armed hidden">
+      <p id="sp-armed-text" class="lsv-small"></p>
+      <button id="sp-arm-discoverable" type="button" class="lsv-btn lsv-btn-small hidden">Make this device discoverable</button>
+      <label class="lsv-field">Or paste the code from the sender's Push update
+        <span class="lsv-inline-row"><input id="sp-arm-code" class="lsv-input" type="text" placeholder="e.g. 4XzmFsM6ggcAJ8" autocomplete="off" />
+        <button id="sp-arm-receive" type="button" class="lsv-btn lsv-btn-small lsv-btn-primary">Receive update</button></span>
+      </label>
+    </div><p id="sp-arm-error" class="lsv-error hidden"></p>`;
+  }
+
+  async function toggleArm() {
+    const s = V.session;
+    s.armError = "";
+    s.armBusy = true;
+    renderSessionPage();
+    try {
+      await invoke(s.armed ? "disarm_received_session_for_update" : "arm_received_session_for_update", { sessionId: s.id });
+      s.armed = !s.armed;
+    } catch (err) {
+      s.armError = `Couldn't ${s.armed ? "cancel waiting for" : "get ready for"} an update: ${err}`;
+    } finally {
+      s.armBusy = false;
+      if (V.session === s && V.view === "session") renderSessionPage();
+    }
+  }
+
+  // The update by code: received straight onto this session (it's armed, so
+  // the backend files the push under it) and shown here for review.
+  async function receiveUpdateByCode() {
+    const s = V.session;
+    const code = $id("sp-arm-code").value.trim();
+    s.armError = code ? "" : "Paste the code the sender's Push update shows.";
+    if (!code) return renderSessionPage();
+    s.armBusy = true;
+    renderSessionPage();
+    try {
+      const decoded = await invoke("decode_room_code", { code, relayUrl: relayUrl() || null });
+      const info = await invoke("receive_snapshot", { roomCode: decoded.room_id, signalingUrl: decoded.signaling_url });
+      if (info.received_session_id && info.received_session_id !== s.id) {
+        // Not this project/sender: it became a session of its own.
+        startReceiveSessionFromInfo(info, info.received_session_id);
+        s.armError = "That code was for a different project or sender, so it opened as its own session.";
+      } else {
+        applyReviewInfoToSession(s, info);
+        renderSessionTabs();
+      }
+    } catch (err) {
+      s.armError = `Couldn't receive the update: ${err}`;
+    } finally {
+      s.armBusy = false;
+      if (V.session === s && V.view === "session") renderSessionPage();
+    }
+  }
+
+  // Stop shows "Stopping…" the moment it's clicked, and "Run" only once the
+  // containers are really down.
+  async function stopCurrent() {
+    const s = V.session;
+    if (s.stopping) return;
+    s.stopping = true;
+    s.stopError = "";
+    renderSessionPage();
+    try {
+      await invoke("stop_received_session", { sessionId: s.id });
+      s.status = "done";
+      s.endedAt = new Date().toISOString();
+      renderSessionTabs();
+    } catch (err) {
+      s.stopError = `Couldn't stop it: ${err}`;
+    } finally {
+      s.stopping = false;
+      if (V.session === s && V.view === "session") renderSessionPage();
+    }
   }
 
   function logsPanel(live) {
@@ -862,13 +992,29 @@
       row("Database", dumps) +
       row("Saved locally", s.workDir ? `Yes · ${s.workDir}` : "Yes");
     if (state === "running") {
-      const ports = s.servicePorts || [];
-      $id("sp-service").innerHTML = ports.length
-        ? ports.map(([svc, p]) => row(svc, `localhost:${p.split(":")[0]}`)).join("") +
-          row("Containers", `${ports.length} running`) +
-          row("Database cache", s.dbCacheHit === true ? "Reused" : s.dbCacheHit === false ? "Seeded fresh" : "Unknown (reopened)")
-        : `<p class="lsv-muted">Ports unknown for this run.</p>`;
-      $id("sp-stop").disabled = s.busy;
+      // Published ports are "host:container"; a bare one has no fixed host port.
+      const ports = (s.servicePorts || []).filter(([, p]) => p.includes(":"));
+      const services = new Set((s.manifest && s.manifest.services ? s.manifest.services.map((x) => x.name) : []).concat(ports.map(([svc]) => svc)));
+      const internal = [...services].filter((svc) => !ports.some(([name]) => name === svc));
+      $id("sp-service").innerHTML =
+        (ports.length
+          ? ports
+              .map(([svc, p]) => {
+                const [host, container] = p.split(":");
+                const url = `http://localhost:${host}`;
+                return `<div class="lsv-row"><span class="lsv-label">${escapeHtml(svc)}</span><span class="lsv-val lsv-url-row">
+                  <a href="#" class="lsv-url" data-open-url="${escapeHtml(url)}" title="Open in your browser">${escapeHtml(url)}</a>
+                  <button type="button" class="lsv-btn lsv-btn-small" data-copy-url="${escapeHtml(url)}">Copy</button>
+                  <span class="lsv-muted lsv-small">→ ${escapeHtml(container)}</span></span></div>`;
+              })
+              .join("")
+          : `<p class="lsv-muted">This project publishes no ports to your computer, so there's no address to open.</p>`) +
+        (internal.length ? row("Inside the project only", internal.join(", ")) : "") +
+        row("Database cache", s.dbCacheHit === true ? "Reused" : s.dbCacheHit === false ? "Seeded fresh" : "Unknown (reopened)");
+      $id("sp-stop").disabled = s.busy || s.stopping;
+      $id("sp-stop").querySelector("span").textContent = s.stopping ? "Stopping…" : "Stop";
+      $id("sp-stop-error").textContent = s.stopError || "";
+      $id("sp-stop-error").classList.toggle("hidden", !s.stopError);
     } else if (state === "receiving") {
       const pct = s.progressTotal ? Math.round((s.progressBytes / s.progressTotal) * 100) : null;
       $id("sp-ph-title").textContent = s.status === "active" ? "Receiving…" : "Waiting for the sender…";
@@ -894,9 +1040,21 @@
     }
     const arm = $id("sp-arm");
     if (arm) {
-      arm.disabled = s.busy || !(s.hasRunBefore || s.status === "running");
-      arm.querySelector("span").textContent = s.armed ? "Waiting for an update… (cancel)" : state === "running" ? "Pull update" : "Receive update";
-      arm.title = $id("discoverable-toggle").checked ? "" : "This device isn't discoverable, so a sender can't push an update to it until it is.";
+      const discoverable = $id("discoverable-toggle").checked;
+      arm.disabled = s.busy || s.armBusy || s.stopping;
+      arm.querySelector("span").textContent = s.armed ? "Stop waiting for an update" : state === "running" ? "Pull update" : "Receive update";
+      arm.title = s.armed ? "" : "Get ready for the sender's next Push update - it lands on this session, for review before it runs.";
+      $id("sp-armed").classList.toggle("hidden", !s.armed);
+      $id("sp-armed-text").textContent =
+        `Waiting for ${s.recognizedPeer ? s.recognizedPeer.name : "the sender"}'s next Push update. ` +
+        (discoverable
+          ? "This device is discoverable, so a sender nearby can push it straight here."
+          : "This device isn't discoverable, so the update needs the code the sender's Push update shows - or make it discoverable.");
+      $id("sp-arm-discoverable").classList.toggle("hidden", discoverable);
+      $id("sp-arm-receive").disabled = !!s.armBusy;
+      $id("sp-arm-receive").textContent = s.armBusy && s.armed ? "Receiving…" : "Receive update";
+      $id("sp-arm-error").textContent = s.armError || "";
+      $id("sp-arm-error").classList.toggle("hidden", !s.armError);
     }
     renderLogs();
   }
@@ -954,6 +1112,21 @@
   }
 
   $id("session-back-btn").addEventListener("click", () => navigate("home"));
+  $id("view-session").addEventListener("click", (e) => {
+    const open = e.target.closest("[data-open-url]");
+    if (open) {
+      e.preventDefault();
+      invoke("open_local_url", { url: open.dataset.openUrl }).catch((err) => console.warn("couldn't open", err));
+      return;
+    }
+    const copy = e.target.closest("[data-copy-url]");
+    if (copy) {
+      writeClipboardText(copy.dataset.copyUrl).then(
+        () => ((copy.textContent = "Copied"), setTimeout(() => (copy.textContent = "Copy"), 1500)),
+        () => (copy.textContent = "Couldn't copy")
+      );
+    }
+  });
 
   navigate("home");
 })();

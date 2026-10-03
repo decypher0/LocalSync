@@ -3,7 +3,7 @@ mod hash;
 mod sign;
 mod types;
 
-pub use bundle::head_commit;
+pub use bundle::{folder_tree, head_commit, snapshot_commit};
 pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, GeneratedFiles, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};
@@ -362,6 +362,46 @@ mod tests {
             out.insert(path, buf);
         }
         out
+    }
+
+    #[test]
+    fn uncommitted_edits_to_tracked_files_ship_without_touching_the_repo() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        fs::write(root.join("README.md"), "v1\n").unwrap();
+        commit_all(root, "one");
+        let head = git_output(root, &["rev-parse", "HEAD"]);
+        assert_eq!(snapshot_commit(root).unwrap(), head, "a clean folder snapshots HEAD itself");
+
+        fs::write(root.join("README.md"), "v2 - not committed\n").unwrap();
+        fs::write(root.join("secret.env"), "TOKEN=x\n").unwrap(); // untracked, never git-added
+        let status_before = git_output(root, &["status", "--porcelain"]);
+        let wt = snapshot_commit(root).unwrap();
+        assert_ne!(wt, head);
+        assert_eq!(snapshot_commit(root).unwrap(), wt, "same content, same id - so 'changed?' can compare ids");
+        assert_eq!(git_output(root, &["rev-parse", "HEAD"]), head, "no branch moved");
+        assert_eq!(git_output(root, &["status", "--porcelain"]), status_before, "index and files untouched");
+
+        let snap = create_snapshot(root, Some(&head)).unwrap();
+        assert_eq!(snap.manifest.git_commit, wt);
+        let files = unpack(&snap.payload);
+        // (Windows git's core.autocrlf may turn the archived \n into \r\n.)
+        assert_eq!(String::from_utf8_lossy(files.get("source/README.md").unwrap()).replace("\r\n", "\n"), "v2 - not committed\n");
+        assert!(!files.contains_key("source/secret.env"), "untracked files stay out");
+        let patch = String::from_utf8(files.get("diff.patch").unwrap().clone()).unwrap();
+        assert!(patch.contains("+v2 - not committed"), "the push diff carries the edit: {patch}");
+
+        fs::write(root.join("README.md"), "v3\n").unwrap();
+        assert_ne!(snapshot_commit(root).unwrap(), wt, "a further edit is a further change");
+
+        // Committing exactly what was sent: a new commit id, the same tree.
+        fs::write(root.join("README.md"), "v2 - not committed\n").unwrap();
+        fs::remove_file(root.join("secret.env")).unwrap(); // commit_all adds everything
+        commit_all(root, "two");
+        let committed = git_output(root, &["rev-parse", "HEAD"]);
+        assert_ne!(committed, wt);
+        assert_eq!(folder_tree(root, &committed).unwrap(), folder_tree(root, &wt).unwrap());
     }
 
     #[test]

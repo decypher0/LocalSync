@@ -297,6 +297,35 @@ async fn bring_up(
         }
     }
 
+    // A service that crashes right after starting (e.g. it writes somewhere
+    // the sandbox's read-only filesystem doesn't allow) must fail the Run -
+    // not show as running, with an address that answers nothing. Exit code 0
+    // is a one-shot job that finished (a migration, say), not a crash.
+    // ponytail: one look after a short grace period; a service that crashes
+    // later than that is still reported running until the page's next check.
+    tokio::time::sleep(settle_time()).await;
+    for service in default_services(&rewritten) {
+        if databases.iter().any(|(db, _)| db == &service) {
+            continue;
+        }
+        if let Ok(ServiceState::Exited(code)) = podman::service_state(&compose_project_name, &service).await {
+            if code == 0 {
+                continue;
+            }
+            say(format!("service `{service}` stopped with exit code {code} right after starting"));
+            let logs = podman::service_logs(&compose_project_name, &service, 40).await.unwrap_or_default();
+            if let Err(down_err) = podman::compose_down(compose_root, &compose_project_name, log).await {
+                eprintln!("cleanup after a service crashed on start also failed: {down_err:#}");
+            }
+            let logs = if logs.trim().is_empty() { String::new() } else { format!("\n\nIts log:\n{logs}") };
+            anyhow::bail!(
+                "The `{service}` service stopped (exit code {code}) right after starting, so the project isn't running. \
+                 LocalSync runs containers with a read-only filesystem (only /tmp is writable) - a program that writes \
+                 anywhere else fails like this.{logs}"
+            );
+        }
+    }
+
     Ok(RunningSession {
         project_name: project_name.to_string(),
         compose_project_name,
@@ -309,6 +338,13 @@ async fn bring_up(
         compose_dir: compose_root.to_path_buf(),
         started_by_default: default_services(&rewritten),
     })
+}
+
+/// How long after starting a service must still be up to count as started.
+/// `LOCALSYNC_SETTLE_SECS` overrides it.
+fn settle_time() -> std::time::Duration {
+    let secs = std::env::var("LOCALSYNC_SETTLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    std::time::Duration::from_secs(secs)
 }
 
 /// How long a database gets to start (and import its dump) before the Run
@@ -688,7 +724,9 @@ mod tests {
     /// the same host port or the same deterministic compose project name.
     fn build_verified_snapshot_with(project_name: &str, git_commit: &str, port_mapping: &str) -> VerifiedSnapshot {
         let compose_yaml = format!(
-            "services:\n  web:\n    image: docker.io/library/nginx:alpine\n    ports:\n      - \"{port_mapping}\"\n"
+            // Python's server keeps running on the read-only root filesystem
+            // (nginx:alpine exits writing its cache, which fails the Run).
+            "services:\n  web:\n    image: docker.io/library/python:3.12-slim\n    command: [\"python\", \"-m\", \"http.server\", \"80\"]\n    ports:\n      - \"{port_mapping}\"\n"
         );
         build_verified_snapshot_from_yaml(project_name, git_commit, port_mapping, &compose_yaml)
     }
@@ -835,7 +873,8 @@ mod tests {
         let yaml = r#"
 services:
   a:
-    image: docker.io/library/nginx:alpine
+    image: docker.io/library/python:3.12-slim
+    command: ["python", "-m", "http.server", "80"]
   b:
     build: ./no-such-directory
     depends_on: [a]
@@ -866,7 +905,8 @@ services:
         let yaml = r#"
 services:
   a:
-    image: docker.io/library/nginx:alpine
+    image: docker.io/library/python:3.12-slim
+    command: ["python", "-m", "http.server", "80"]
   b:
     image: localhost/localsync-definitely-not-here:1
     depends_on: [a]
@@ -878,6 +918,48 @@ services:
         stop_session(&session).await.unwrap();
         assert_eq!(missing, vec!["b".to_string()]);
         assert!(podman_ps_names("localsync-silent-start-failure-deadbeef").is_empty(), "stop_session left containers behind");
+    }
+
+    /// A service that crashes right after starting fails the Run (with its
+    /// log) instead of being reported running; a one-shot job that finishes
+    /// with exit 0 next to it does not.
+    #[tokio::test]
+    async fn a_service_that_crashes_right_after_starting_fails_the_run() {
+        if !podman::podman_available() || !podman::podman_compose_available() {
+            eprintln!("skipping a_service_that_crashes...: podman/podman-compose not found on PATH");
+            return;
+        }
+        let crashing = r#"
+services:
+  web:
+    image: docker.io/library/python:3.12-slim
+    command: ["python", "-c", "import sys; print('cannot write my cache'); sys.exit(3)"]
+"#;
+        let verified = build_verified_snapshot_from_yaml("crash-on-start", "deadbeef", "18181:80", crashing);
+        let work_dir = tempfile::tempdir().unwrap();
+        let err = match run_snapshot(&verified, work_dir.path()).await {
+            Ok(session) => {
+                let _ = stop_session(&session).await;
+                panic!("a service that exited 3 must fail the Run");
+            }
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("`web` service stopped (exit code 3) right after starting"), "{err}");
+        assert!(err.contains("cannot write my cache"), "its log is in the error: {err}");
+        assert!(podman_ps_names("localsync-crash-on-start-deadbeef").is_empty(), "containers left behind");
+
+        let one_shot = r#"
+services:
+  web:
+    image: docker.io/library/python:3.12-slim
+    command: ["python", "-m", "http.server", "80"]
+  migrate:
+    image: docker.io/library/python:3.12-slim
+    command: ["python", "-c", "print('migrated')"]
+"#;
+        let verified = build_verified_snapshot_from_yaml("one-shot-ok", "deadbeef", "18182:80", one_shot);
+        let session = run_snapshot(&verified, work_dir.path()).await.expect("a job that finished with exit 0 is not a crash");
+        stop_session(&session).await.unwrap();
     }
 
     fn podman_ps_names(project: &str) -> Vec<String> {
