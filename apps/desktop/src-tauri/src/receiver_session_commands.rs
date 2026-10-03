@@ -296,6 +296,10 @@ async fn run_received_session_inner(
     // or it keeps the ports this version needs.
     stop_previous_run(state, &session_id).await?;
 
+    // Before unpacking: even a failed Run leaves files there, and the Storage
+    // view must still find them after this session is closed.
+    crate::storage_commands::remember_work_dirs([work_dir.as_str()]);
+
     let held = state.verified.lock().map_err(|e| e.to_string())?.remove(&session.snapshot_id);
 
     let session_out = match held {

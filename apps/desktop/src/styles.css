@@ -753,6 +753,20 @@ button:disabled { opacity: 0.5; cursor: default; }
    the topbar" surface), not a new visual pattern. ---- */
 #session-history-panel { display: flex; flex-direction: column; }
 #session-history-list li { display: flex; align-items: center; gap: var(--space-2); }
+
+/* Storage panel (storage-view.js) - same surface as Session history. */
+#storage-panel { display: block; }
+#storage-panel.hidden { display: none; }
+#storage-panel h3 { margin: var(--space-4) 0 var(--space-2); font-size: var(--font-size-md, 15px); }
+.st-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.st-table th, .st-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.st-table th { color: var(--muted); font-weight: 600; }
+.st-num { text-align: right !important; white-space: nowrap; }
+.st-list li { display: flex; justify-content: space-between; gap: var(--space-3); padding: 4px 0; font-size: 13px; }
+.st-list code { word-break: break-all; }
+.st-warn { color: var(--danger-text); }
+.st-confirm { border: 1px solid var(--danger-text); border-radius: 8px; padding: var(--space-3); margin: var(--space-2) 0; }
+.st-danger { color: var(--danger-text); border-color: var(--danger-text); }
 .settings-panel { box-shadow: var(--shadow-sm); }
 
 /* ---- Session model: one card per transfer inside a send session. Same
@@ -896,7 +910,8 @@ body.lsv-on #session-detail-viewport,
 body.lsv-on .tab-panel { display: none !important; }
 /* Settings / Session history (opened from the app menu) float over the views. */
 body.lsv-on #settings-panel:not(.hidden),
-body.lsv-on #session-history-panel:not(.hidden) {
+body.lsv-on #session-history-panel:not(.hidden),
+body.lsv-on #storage-panel:not(.hidden) {
   position: fixed; z-index: 30; top: 48px; left: 50%; transform: translateX(-50%);
   width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 96px); overflow: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
