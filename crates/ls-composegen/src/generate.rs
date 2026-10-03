@@ -167,6 +167,36 @@ fn artifact_check(artifact: &str) -> String {
     format!("{}\n", lines.join(" \\\n"))
 }
 
+/// The MongoDB restore script's file name in the build context. Mounted into
+/// the database's `/docker-entrypoint-initdb.d/`, which the mongo image runs
+/// once, on first start with an empty data volume.
+pub const MONGO_RESTORE_NAME: &str = ".localsync-mongo-restore.sh";
+
+/// Restores the MongoDB dump (`mongodump --out` output, tar+gzipped as
+/// `dump/<source db>/...` - see `ls_dbsource::engines::mongo`) into the
+/// project's database. The mongo image's entrypoint *sources* this script
+/// against its temporary first-start server (127.0.0.1, auth already set up),
+/// the same moment MySQL/PostgreSQL import their `initdb.d` SQL. A failure
+/// fails the entrypoint, so the database never comes up half-restored.
+fn mongo_restore_script(file_name: &str) -> String {
+    format!(
+        r#"# LocalSync: restore the MongoDB dump that came with this project.
+echo "LocalSync: restoring the MongoDB dump {file_name}"
+localsync_work="$(mktemp -d)"
+tar -xzf "/localsync-dump/{file_name}" -C "$localsync_work"
+for localsync_dir in "$localsync_work"/dump/*/; do
+  localsync_src="$(basename "$localsync_dir")"
+  mongorestore --host 127.0.0.1 --port 27017 \
+    --username "$MONGO_INITDB_ROOT_USERNAME" --password "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin \
+    --nsInclude="$localsync_src.*" --nsFrom="$localsync_src.*" --nsTo="$MONGO_INITDB_DATABASE.*" \
+    "$localsync_work/dump"
+done
+rm -rf "$localsync_work"
+echo "LocalSync: MongoDB dump restored"
+"#
+    )
+}
+
 /// The WAR launcher's file name in the build context (next to the generated
 /// Dockerfile; copied into the image as `/usr/local/bin/localsync-tomcat`).
 pub const TOMCAT_LAUNCHER_NAME: &str = ".localsync-tomcat.sh";
@@ -244,7 +274,7 @@ RUN {build}
     }
 }
 
-fn db_service(db: &DatabaseSpec, ctx: &GenerateContext, notes: &mut Vec<String>) -> Value {
+fn db_service(db: &DatabaseSpec, ctx: &GenerateContext, notes: &mut Vec<String>, files: &mut Vec<GeneratedFile>) -> Value {
     let info = db_info(db.engine);
     let (env, data_dir, ping): (Vec<(&str, String)>, &str, Vec<String>) = match db.engine {
         DbEngine::Mysql => (
@@ -278,11 +308,24 @@ fn db_service(db: &DatabaseSpec, ctx: &GenerateContext, notes: &mut Vec<String>)
 
     let mut volumes = vec![format!("{DB_VOLUME}:{data_dir}")];
     let mut has_dump = false;
+    let mut ping = ping;
     if let Some(dump) = &ctx.dump {
         match (db.engine, dump.engine) {
-            (DbEngine::Mongodb, _) => notes.push(
-                "The MongoDB dump is sent along but is not restored automatically - the MongoDB image can't import it on first start, so the receiver's MongoDB starts empty.".into(),
-            ),
+            // The image can't import BSON by itself, but it runs initdb.d
+            // shell scripts: one that runs mongorestore against the dump.
+            (DbEngine::Mongodb, DbEngine::Mongodb) => {
+                volumes.push(format!("../db-dumps/{}:/localsync-dump:ro", ctx.folder_label));
+                // Generated files unpack under source/ (next to the compose file's
+                // build context), not beside the compose file itself. Mounted
+                // without the leading dot: the entrypoint's `*` glob skips dotfiles.
+                volumes.push(format!("./source/{MONGO_RESTORE_NAME}:/docker-entrypoint-initdb.d/localsync-mongo-restore.sh:ro"));
+                files.push(GeneratedFile { path: MONGO_RESTORE_NAME.into(), contents: mongo_restore_script(&dump.file_name) });
+                // The first-start server answers on 127.0.0.1 while the
+                // restore runs; ask the real one (listening on the container's
+                // own address only once the restore is done) instead.
+                ping = strings(&["CMD-SHELL", "mongosh --quiet --host \"$(hostname)\" --eval 'db.adminCommand(\"ping\").ok'"]);
+                has_dump = true;
+            }
             (a, b) if a != b => notes.push(format!(
                 "The database dump is for {} but this project's database is {}, so it is not loaded.",
                 db_info(b).label, info.label
@@ -336,13 +379,14 @@ pub(crate) fn generate_unchecked(spec: &ComposeSpec, ctx: &GenerateContext) -> R
         env.insert(s(&row.key), Value::from(value));
     }
 
+    let mut extra_files = Vec::new();
     let mut depends = Mapping::new();
     let mut services = Mapping::new();
     let mut volumes = Mapping::new();
     if let Some(db) = &spec.database {
         let name = db_service_name(db.engine);
         depends.insert(s(name), map(vec![("condition", s("service_healthy"))]));
-        services.insert(s(name), db_service(db, ctx, &mut notes));
+        services.insert(s(name), db_service(db, ctx, &mut notes, &mut extra_files));
         volumes.insert(s(DB_VOLUME), Value::Mapping(Mapping::new()));
     } else if ctx.dump.is_some() {
         notes.push("A database dump is included but no database is configured, so it is not loaded.".into());
@@ -400,6 +444,7 @@ pub(crate) fn generate_unchecked(spec: &ComposeSpec, ctx: &GenerateContext) -> R
             if war {
                 files.push(GeneratedFile { path: TOMCAT_LAUNCHER_NAME.into(), contents: tomcat_launcher(spec.port) });
             }
+            files.extend(extra_files);
             files
         },
         rewrites,
@@ -737,17 +782,37 @@ mod tests {
     }
 
     #[test]
-    fn mongodb_dump_is_not_mounted_and_a_note_says_so() {
+    fn mongodb_dump_is_restored_by_an_initdb_script_running_mongorestore() {
         let mut sp = python();
         sp.database = db(DbEngine::Mongodb, "7.0", "shop_db");
-        let g = gen(&sp, &ctx_dump(DbEngine::Mongodb));
+        let c = GenerateContext { dump: Some(DumpInfo { engine: DbEngine::Mongodb, file_name: "shop.tar.gz".into() }), ..ctx() };
+        let g = gen(&sp, &c);
         let y = yaml(&g);
         let mongo = svc(&y, "mongodb");
         assert_eq!(mongo["image"], "docker.io/library/mongo:7.0");
-        assert_eq!(strs(&mongo["volumes"]), ["db-data:/data/db"], "no initdb mount for mongo");
-        assert!(!g.compose_yaml.contains("db-dumps"));
-        assert!(g.notes.iter().any(|n| n.contains("MongoDB") && n.contains("not restored automatically")), "{:?}", g.notes);
-        assert!(env_of(&y, "mongodb").contains(&("MONGO_INITDB_ROOT_USERNAME".into(), DB_USER.into())));
+        assert_eq!(
+            strs(&mongo["volumes"]),
+            [
+                "db-data:/data/db",
+                "../db-dumps/shop:/localsync-dump:ro",
+                &format!("./source/{MONGO_RESTORE_NAME}:/docker-entrypoint-initdb.d/localsync-mongo-restore.sh:ro"),
+            ]
+        );
+        let script = &g.files.iter().find(|f| f.path == MONGO_RESTORE_NAME).expect("restore script generated").contents;
+        assert!(script.contains("tar -xzf \"/localsync-dump/shop.tar.gz\""), "{script}");
+        assert!(script.contains("mongorestore") && script.contains("--nsTo=\"$MONGO_INITDB_DATABASE.*\""), "{script}");
+        assert!(strs(&mongo["healthcheck"]["test"])[1].contains("$(hostname)"), "healthy only once the real server is up");
+        assert!(env_of(&y, "mongodb").contains(&("MONGO_INITDB_DATABASE".into(), "shop_db".into())));
+        assert!(!g.notes.iter().any(|n| n.contains("not restored")), "{:?}", g.notes);
+    }
+
+    #[test]
+    fn mongodb_without_a_dump_gets_no_restore_script() {
+        let mut sp = python();
+        sp.database = db(DbEngine::Mongodb, "7.0", "shop_db");
+        let g = gen(&sp, &ctx());
+        assert!(!g.files.iter().any(|f| f.path == MONGO_RESTORE_NAME));
+        assert_eq!(strs(&svc(&yaml(&g), "mongodb")["volumes"]), ["db-data:/data/db"]);
     }
 
     #[test]
