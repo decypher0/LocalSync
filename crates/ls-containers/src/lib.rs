@@ -83,13 +83,9 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
 
     let manifest = &verified.snapshot().manifest;
 
-    let subdir = format!(
-        "{}-{}",
-        sanitize(&manifest.project_name),
-        sanitize(&manifest.git_commit)
-    );
-    let compose_dir = work_dir.join(subdir);
+    let compose_dir = work_dir.join(unpack_dir_name(&manifest.project_name, &manifest.git_commit));
     unpack_payload(&verified.snapshot().payload, &compose_dir).await?;
+    write_unpack_marker(&compose_dir, &manifest.project_name, &manifest.git_commit).await;
 
     // Round 30: a real bug found in real cross-machine testing, root-caused
     // by directly reproducing it rather than guessed at - a project sent
@@ -484,6 +480,44 @@ pub async fn service_logs(session: &RunningSession, service: &str, tail: usize) 
     podman::service_logs(&session.compose_project_name, service, tail).await
 }
 
+/// File written at the root of every directory `run_snapshot` unpacks a
+/// snapshot into, so the desktop app's Storage view can tell, for certain,
+/// that a folder inside a (user-chosen, could-be-anything) work directory
+/// is one LocalSync itself created - and is therefore safe to delete.
+pub const UNPACK_MARKER: &str = ".localsync-unpacked";
+
+/// Best-effort: a missing marker only means the Storage view falls back to
+/// recognizing the folder by its layout, never that a Run should fail.
+async fn write_unpack_marker(dir: &Path, project_name: &str, git_commit: &str) {
+    let created_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let body = serde_json::json!({ "project": project_name, "git_commit": git_commit, "created_at": created_at });
+    if let Err(e) = tokio::fs::write(dir.join(UNPACK_MARKER), body.to_string()).await {
+        eprintln!("couldn't write {} in {}: {e}", UNPACK_MARKER, dir.display());
+    }
+}
+
+/// Every `localsync-db-*` volume name an already-rewritten compose file in
+/// `compose_dir` pins (top-level `volumes.<key>.name`, which `apply_policy`
+/// sets) - which database volume(s) a received session uses, readable with
+/// no manifest in hand. Empty if the file is missing or unreadable.
+pub fn pinned_volumes_in(compose_dir: &Path) -> Vec<String> {
+    let Ok(yaml) = std::fs::read_to_string(compose_dir.join("docker-compose.yml")) else { return Vec::new() };
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else { return Vec::new() };
+    let Some(volumes) = doc.get("volumes").and_then(|v| v.as_mapping()) else { return Vec::new() };
+    volumes
+        .values()
+        .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+        .filter(|n| n.starts_with("localsync-db-"))
+        .map(String::from)
+        .collect()
+}
+
+pub use podman::{
+    disk_totals, image_remove, images, volume_remove_unused, volume_usage, DiskTotals, ImageInfo, VolumeUsage,
+};
+
 async fn unpack_payload(payload: &[u8], dest: &Path) -> Result<()> {
     let payload = payload.to_vec();
     let dest = dest.to_path_buf();
@@ -566,6 +600,12 @@ fn sanitize(s: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// Name of the directory `run_snapshot` unpacks `project_name`@`git_commit`
+/// into, directly inside the work directory.
+pub fn unpack_dir_name(project_name: &str, git_commit: &str) -> String {
+    format!("{}-{}", sanitize(project_name), sanitize(git_commit))
 }
 
 /// `pub` (receiver-session-model round): the desktop app's receiver-side
