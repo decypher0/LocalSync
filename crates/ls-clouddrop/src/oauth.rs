@@ -30,16 +30,19 @@
 //!   request to the token endpoint (both the initial exchange and a later
 //!   refresh - the same client authenticates on both, so both need it)
 //!   includes it.
-//! - Google's own position (confirmed in the same native-app guide) is that
-//!   this value is **not treated as confidential** for an installed/desktop
-//!   application - anyone can extract it from a distributed binary, the
-//!   same reasoning this project already applied to needing no client
-//!   secret at all before round 31's real-world correction. It's read from
-//!   the environment (`GOOGLE_OAUTH_CLIENT_SECRET`), never hardcoded, for
-//!   the same reason `GOOGLE_OAUTH_CLIENT_ID` already is - not because it's
-//!   being treated as a secret that must never appear in source, but for
-//!   consistency with how this project already handles per-deployment
-//!   OAuth client configuration.
+//! - Embedding the Desktop-app client secret in the shipped binary is what
+//!   Google expects (re-checked 2026-10): the OAuth 2.0 overview says an
+//!   installed app gets "a client ID and, in some cases, a client secret,
+//!   which you embed in the source code of your application. (In this
+//!   context, the client secret is obviously not treated as a secret.)"
+//!   (https://developers.google.com/identity/protocols/oauth2), and the
+//!   iOS & Desktop guide says "it is assumed that these apps cannot keep
+//!   secrets" and marks PKCE `code_verifier`/`code_challenge` as
+//!   "Recommended" (https://developers.google.com/identity/protocols/oauth2/native-app).
+//!   So security rests on PKCE (S256) + loopback redirect + `state`, which
+//!   this module does, not on the secret. Both values are compiled in at
+//!   build time (see [`OAuthConfig::built_in`] and `build.rs`), not read
+//!   from the user's environment.
 //! - `access_type=offline` on the authorization request is what's required
 //!   to get a `refresh_token` back at all (confirmed against Google's OIDC
 //!   docs). `prompt=consent` is added alongside it: without it, Google only
@@ -77,13 +80,10 @@ pub const CLOUD_DROP_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/drive.readonly",
 ];
 
-/// Configuration for the OAuth flow. Both values come from the
-/// environment, matching this project's existing convention for
-/// optional/deployment-specific config (e.g. `ls-net`'s
-/// `LOCALSYNC_TURN_URL`) - see the module doc comment's round 31 note for
-/// why `client_secret` is required here despite this being a PKCE flow,
-/// and for why reading it from the environment rather than hardcoding it
-/// doesn't mean this project is treating it as a real secret.
+/// Configuration for the OAuth flow. The client ID identifies the app, not
+/// the user, so the real values are baked in by the developer at build time
+/// ([`OAuthConfig::built_in`]); see the module doc comment's round 31 note
+/// for why `client_secret` is required here despite this being a PKCE flow.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
     pub client_id: String,
@@ -91,14 +91,31 @@ pub struct OAuthConfig {
 }
 
 impl OAuthConfig {
-    /// Reads `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` from
-    /// the environment.
-    pub fn from_env() -> Result<Self> {
-        let client_id = std::env::var("GOOGLE_OAUTH_CLIENT_ID")
-            .context("GOOGLE_OAUTH_CLIENT_ID is not set - Cloud drop needs a Google OAuth Desktop app client ID")?;
-        let client_secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").context(
-            "GOOGLE_OAUTH_CLIENT_SECRET is not set - Google's token endpoint rejects this app's \
-             Desktop-app OAuth client without it, even with PKCE (see docs/google-drive-setup.md)",
+    /// The Google OAuth client compiled into this binary: `GOOGLE_OAUTH_CLIENT_ID`
+    /// and `GOOGLE_OAUTH_CLIENT_SECRET` as they were set in the shell that
+    /// ran `cargo build` / `npm run tauri build` (`build.rs` makes a change
+    /// to either trigger a rebuild). Unset or empty at build time -> `Err`,
+    /// and Cloud drop is greyed out.
+    ///
+    /// Deliberately no runtime env override: an installed app must behave
+    /// the same regardless of the user's environment, and tests don't need
+    /// one - they construct `OAuthConfig` directly against mock endpoints.
+    /// For local dev, set the vars before `npm run tauri dev`; the rebuild
+    /// picks them up.
+    pub fn built_in() -> Result<Self> {
+        Self::from_parts(option_env!("GOOGLE_OAUTH_CLIENT_ID"), option_env!("GOOGLE_OAUTH_CLIENT_SECRET"))
+    }
+
+    fn from_parts(client_id: Option<&str>, client_secret: Option<&str>) -> Result<Self> {
+        let set = |v: Option<&str>| v.filter(|s| !s.trim().is_empty()).map(str::to_string);
+        let client_id = set(client_id).context(
+            "this build has no Google OAuth client ID - Cloud drop needs GOOGLE_OAUTH_CLIENT_ID set when \
+             the app is built (see docs/google-drive-setup.md)",
+        )?;
+        let client_secret = set(client_secret).context(
+            "this build has no Google OAuth client secret - Cloud drop needs GOOGLE_OAUTH_CLIENT_SECRET set \
+             when the app is built; Google's token endpoint rejects this Desktop-app client without it, \
+             even with PKCE (see docs/google-drive-setup.md)",
         )?;
         Ok(Self { client_id, client_secret })
     }
@@ -445,6 +462,30 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // ---------- built-in client config ----------
+
+    #[test]
+    fn built_in_config_is_exactly_what_was_compiled_in() {
+        let id = option_env!("GOOGLE_OAUTH_CLIENT_ID").filter(|s| !s.trim().is_empty());
+        let secret = option_env!("GOOGLE_OAUTH_CLIENT_SECRET").filter(|s| !s.trim().is_empty());
+        match (id, secret, OAuthConfig::built_in()) {
+            (Some(id), Some(secret), Ok(c)) => assert_eq!((c.client_id.as_str(), c.client_secret.as_str()), (id, secret)),
+            (Some(_), Some(_), Err(e)) => panic!("both vars compiled in but built_in() failed: {e:#}"),
+            (_, _, Ok(_)) => panic!("built_in() must fail when either var is missing at build time"),
+            (_, _, Err(_)) => {}
+        }
+    }
+
+    #[test]
+    fn missing_or_empty_parts_are_not_set() {
+        assert!(OAuthConfig::from_parts(None, Some("s")).is_err());
+        assert!(OAuthConfig::from_parts(Some("id"), None).is_err());
+        assert!(OAuthConfig::from_parts(Some(""), Some("s")).is_err());
+        assert!(OAuthConfig::from_parts(Some("id"), Some("  ")).is_err());
+        let c = OAuthConfig::from_parts(Some("id"), Some("s")).unwrap();
+        assert_eq!((c.client_id.as_str(), c.client_secret.as_str()), ("id", "s"));
+    }
 
     // ---------- PKCE ----------
 
