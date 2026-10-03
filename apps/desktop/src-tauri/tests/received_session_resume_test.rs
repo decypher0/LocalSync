@@ -17,7 +17,7 @@ use localsync_desktop::commands::{self, FolderPlanDto};
 use localsync_desktop::receiver_session_commands;
 use localsync_desktop::session_commands::{self, SendRequest};
 use localsync_desktop::state::AppState;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 
 type Handle = tauri::AppHandle<tauri::test::MockRuntime>;
 
@@ -133,9 +133,23 @@ async fn a_saved_session_reopened_after_a_restart_reports_running_with_its_ports
     let info = recv.await.unwrap().expect("receive");
     let id = info.received_session_id.clone();
     let work = tempfile::tempdir().unwrap();
+    // The receiver's Logs panel listens for `run-progress` tagged with the
+    // session's snapshot id; the receiver Run used to emit none at all.
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = progress.clone();
+    let snapshot_id = info.snapshot_id.clone();
+    receiver.listen("run-progress", move |e| {
+        let v: serde_json::Value = serde_json::from_str(e.payload()).unwrap();
+        if v["session_id"] == snapshot_id.as_str() {
+            sink.lock().unwrap().push(v["line"].as_str().unwrap_or_default().to_string());
+        }
+    });
     let ran = receiver_session_commands::run_received_session(receiver.clone(), receiver.state::<AppState>(), id.clone(), work.path().display().to_string())
         .await
         .expect("run");
+    let lines = progress.lock().unwrap().clone();
+    assert!(lines.iter().any(|l| l.contains("provisioning check")), "the readiness check streams live: {lines:?}");
+    assert!(lines.iter().any(|l| l.contains("containers started")), "and the container start: {lines:?}");
     let project_label = ran.running.session_id.clone();
     receiver_session_commands::save_received_session(receiver.state::<AppState>(), id.clone()).unwrap();
     drop(receiver); // the first process is gone; its containers keep running
