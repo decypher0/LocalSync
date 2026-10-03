@@ -337,6 +337,23 @@ async fn run_received_session_inner(
         }
     };
 
+    // podman-compose exits 0 even when a container couldn't be created or
+    // started (a port already in use, an image that failed to build or pull),
+    // so "it ran" isn't "it's up": a service with no started container fails
+    // the Run instead of showing Running with nothing behind it. Same check
+    // the compose wizard's test run makes.
+    let unstarted = ls_containers::services_not_started(&session_out).await;
+    if !unstarted.is_empty() {
+        if let Err(e) = ls_containers::stop_session(&session_out).await {
+            log::warn!("run_received_session: cleanup after a service failed to start also failed: {e:#}");
+        }
+        let names = unstarted.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "{names} could not be started, so the project isn't running - usually a port it needs is already in use \
+             on this computer, or its image failed to build or download. The Logs panel shows podman-compose's output."
+        ));
+    }
+
     let info = RunningSessionInfo {
         session_id: session_out.compose_project_name.clone(),
         project_name: session_out.project_name.clone(),
