@@ -139,6 +139,9 @@ pub struct DeviceView {
     pub last_sent_at: Option<String>,
     /// Already has the session's current version - nothing to push.
     pub up_to_date: bool,
+    /// The last transfer to this device: its size and speed (None if unknown).
+    pub last_bytes: Option<u64>,
+    pub bytes_per_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +190,8 @@ fn build_view(state: &AppState, session: &ProjectSession, current: Option<&[Fold
                 sends: d.history.len(),
                 last_sent_at: d.history.last().map(|h| h.sent_at.clone()),
                 up_to_date: session.is_up_to_date(&d.key, &reference),
+                last_bytes: d.last_transfer.map(|t| t.bytes),
+                bytes_per_sec: d.last_transfer.and_then(|t| t.bytes_per_sec()),
             })
             .collect(),
     }
@@ -231,9 +236,42 @@ pub async fn create_project_session(
     let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| default_title(&folders));
     let session = ProjectSession::new(new_session_id(), title, folders, now_rfc3339());
     ensure_artifact(&state, &session, None).await?;
+    // Every session is kept on disk from the moment it exists, so it
+    // survives a restart and shows on Home.
+    if let Err(e) = crate::session_history::save_project(&session) {
+        log::warn!("create_project_session: couldn't persist {}: {e}", session.id);
+    }
     let view = build_view(&state, &session, None);
     state.project_sessions.lock().map_err(|e| e.to_string())?.insert(session.id.clone(), session);
     Ok(view)
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PushStatus {
+    /// The device this session last sent to (Push update's target).
+    pub last_device_key: Option<String>,
+    pub last_device_name: Option<String>,
+    /// The project's folders are at different commits than what that device
+    /// last received - there is something to push.
+    pub changed: bool,
+}
+
+/// Whether "Push update" has anything to do: compares each folder's current
+/// git commit with what the last-known device received. Cheap (git rev-parse
+/// only, no rebuild), so the session page can ask it regularly. Snapshots are
+/// built from commits, so uncommitted edits don't count as changes.
+#[tauri::command]
+pub async fn project_push_status(state: State<'_, AppState>, session_id: String) -> Result<PushStatus, String> {
+    let session = get_session(&state, &session_id)?;
+    let Some(last) = session.last_device() else {
+        return Ok(PushStatus { last_device_key: None, last_device_name: None, changed: false });
+    };
+    let current = current_commits(&session.folders).await?;
+    Ok(PushStatus {
+        last_device_key: Some(last.key.clone()),
+        last_device_name: Some(last.name.clone()),
+        changed: !session.is_up_to_date(&last.key, &current),
+    })
 }
 
 /// Re-checks the session against the project as it is on disk right now
@@ -311,6 +349,7 @@ pub async fn send_project_session<R: tauri::Runtime>(
     let _ = app.emit("receiver-connecting", ReceiverJoined { session_id: request.room_code.clone() });
 
     let progress_id = request.room_code.clone();
+    let started = std::time::Instant::now();
     ls_net::send_payload(&conn, &artifact.bytes, |sent, total| {
         let _ = app.emit("share-progress", Progress { session_id: progress_id.clone(), bytes: sent, total });
     })
@@ -319,6 +358,10 @@ pub async fn send_project_session<R: tauri::Runtime>(
     // Ephemeral by design: the transfer is complete (send_payload waits for
     // the receiver's acknowledgement), so the connection ends here.
     drop(conn);
+    let stats = crate::project_session::TransferStats {
+        bytes: artifact.bytes.len() as u64,
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
 
     let marker = DeviceMarker {
         snapshot_id: artifact.snapshot_id.clone(),
@@ -331,6 +374,7 @@ pub async fn send_project_session<R: tauri::Runtime>(
         // still happened, there is just no session left to record it on.
         sessions.get_mut(&request.session_id).map(|s| {
             s.record_send(&device_key, &request.device_name, marker);
+            s.set_last_transfer(&device_key, stats);
             s.clone()
         })
     };
@@ -342,12 +386,9 @@ pub async fn send_project_session<R: tauri::Runtime>(
             view: build_view(&state, &session, Some(&artifact.commits)),
         });
     };
-    // A session the user already chose to save stays current on disk - they
-    // opted in to that copy existing; an unsaved one is never written.
-    if crate::session_history::find_project(&updated.id).ok().flatten().is_some() {
-        if let Err(e) = crate::session_history::save_project(&updated) {
-            log::warn!("send_project_session: couldn't update the saved copy of {}: {e}", updated.id);
-        }
+    // Every session stays current on disk.
+    if let Err(e) = crate::session_history::save_project(&updated) {
+        log::warn!("send_project_session: couldn't update the saved copy of {}: {e}", updated.id);
     }
     // A per-device diff artifact has done its job; only the plain one stays cached.
     if since.is_some() {

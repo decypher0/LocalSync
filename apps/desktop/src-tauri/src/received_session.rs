@@ -47,6 +47,12 @@ pub struct ReceivedSession {
     /// RFC3339. Bumped on every push that lands on this session (including
     /// the first one, where it equals `created_at`).
     pub last_received_at: String,
+    /// The name the person gave this session (New Session -> Name). Shown
+    /// everywhere instead of `title`, which is the project's own name and
+    /// stays as-is because the session's containers are named from it.
+    /// Empty = not named; the UI falls back to `title`.
+    #[serde(default)]
+    pub name: String,
 }
 
 impl ReceivedSession {
@@ -69,6 +75,7 @@ impl ReceivedSession {
             compose_dir: String::new(),
             last_received_at: created_at.clone(),
             created_at,
+            name: String::new(),
         }
     }
 
