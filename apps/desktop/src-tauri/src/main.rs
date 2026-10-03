@@ -282,6 +282,8 @@ fn main() {
             commands::share_snapshot_wizard,
             commands::link_google_account,
             commands::google_account_status,
+            commands::cloud_drop_available,
+            commands::open_local_url,
             commands::unlink_google_account,
             commands::start_cloud_drop_session,
             commands::respond_to_cloud_access_request,
