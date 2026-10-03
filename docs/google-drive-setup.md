@@ -7,8 +7,8 @@ create them, since it requires registering a real project in Google Cloud
 Console under a real Google account. Without them, Settings → **Link Google
 account** shows a clear message pointing back at this file instead of doing
 anything, and Cloud drop mode isn't selectable. Adding the real credentials
-is "set two environment variables," not "figure out the OAuth flow from
-scratch" — that part is done.
+is "set two environment variables before building," not "figure out the
+OAuth flow from scratch" — that part is done.
 
 **Round 31 correction of a round 23 claim that real testing disproved**:
 round 23's version of this file said a Desktop-app OAuth client's token
@@ -37,28 +37,38 @@ is updated accordingly.
 
 ## Configuring the app to use it
 
-Set both the `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`
-environment variables before launching LocalSync, to the two values from
-step 4:
+The Client ID identifies the app, not the user, so it is baked into the
+binary **at build time** by whoever builds the release. People who install
+LocalSync never set anything. Set both variables in the shell you build
+from, to the two values from step 4, then run the release build from
+`apps/desktop`:
 
-```
-GOOGLE_OAUTH_CLIENT_ID=123456789-abc...xyz.apps.googleusercontent.com \
-GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-...your-real-secret... \
-./localsync-desktop
+PowerShell:
+
+```powershell
+$env:GOOGLE_OAUTH_CLIENT_ID = "123456789-abc...xyz.apps.googleusercontent.com"
+$env:GOOGLE_OAUTH_CLIENT_SECRET = "GOCSPX-...your-real-secret..."
+cd apps/desktop
+npm run tauri build
 ```
 
-(On Windows, set both as normal environment variables before launching the
-`.exe` — System Properties → Environment Variables, or
-`$env:GOOGLE_OAUTH_CLIENT_ID = "..."` / `$env:GOOGLE_OAUTH_CLIENT_SECRET = "..."`
-in the same PowerShell session you launch from.) A real, permanent build
-would bake both real values into the app at build time instead of requiring
-them to be set by hand every launch — not done here since no real
-credentials exist yet to bake in; whoever adds them should also decide
-where they're read from long-term (env vars read at startup are the
-simplest thing that works today, and are what `crates/ls-clouddrop`
-actually implements). Missing either one fails fast with a clear message
-naming exactly which variable is missing, before the app ever tries to
-build a request Google would just reject.
+bash:
+
+```bash
+export GOOGLE_OAUTH_CLIENT_ID=123456789-abc...xyz.apps.googleusercontent.com
+export GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-...your-real-secret...
+cd apps/desktop
+npm run tauri build
+```
+
+The values end up in the binary and installer. `crates/ls-clouddrop/build.rs`
+makes Cargo rebuild that crate whenever either variable changes, so a new
+value is never silently ignored. The same works for `npm run tauri dev`.
+
+If either variable is unset or empty at build time, that build has no
+Google client: Cloud drop is greyed out with a plain explanation, and
+Settings → **Link Google account** fails with a message pointing here.
+Setting the variables before *launching* an already-built app does nothing.
 
 ## Why PKCE, and why a client secret anyway, and a loopback redirect (not the old copy-paste code flow)
 
@@ -93,10 +103,15 @@ current, Google-documented approach for a native desktop app is:
   implies.** Google's own guidance is that installed-app credentials
   (Client ID *and* Client Secret alike) aren't treated as something that
   must never be extractable from a distributed binary - anyone can pull
-  either value out of a real installed copy of this app. That's exactly why
-  it's read from an environment variable rather than hardcoded (see above):
-  not because this project is protecting a real secret, but for the same
-  per-deployment-configuration reason the Client ID already works that way.
+  either value out of a real installed copy of this app. Google says so
+  directly: an installed app gets "a client ID and, in some cases, a client
+  secret, which you embed in the source code of your application. (In this
+  context, the client secret is obviously not treated as a secret.)"
+  ([OAuth 2.0 overview](https://developers.google.com/identity/protocols/oauth2)),
+  and "it is assumed that these apps cannot keep secrets"
+  ([OAuth 2.0 for iOS & Desktop Apps](https://developers.google.com/identity/protocols/oauth2/native-app)).
+  That's why baking both into the build (see above) is fine. It is kept out
+  of the source tree only so each builder uses their own Google project.
 - **A loopback IP redirect** (`http://127.0.0.1:<a locally-chosen free port>`)
   instead of the old out-of-band code. `crates/ls-clouddrop` opens the
   system's real default browser to Google's real consent screen, and starts
@@ -157,7 +172,8 @@ response means it was honored; absent means it was silently dropped.
 
 ## Verifying it actually works, once you've added a real Client ID
 
-1. Set `GOOGLE_OAUTH_CLIENT_ID` and launch the app. Settings → **Link Google
+1. Build with `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` set
+   (see "Configuring the app to use it") and launch the app. Settings → **Link Google
    account** should open your real default browser to a real Google consent
    screen listing the real scopes above (with a "Google hasn't verified this
    app" warning, expected while in Testing status — click **Continue** if
