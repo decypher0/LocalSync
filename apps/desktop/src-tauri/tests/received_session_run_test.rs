@@ -38,7 +38,10 @@ fn make_project(base: &Path, name: &str, port: u16) -> PathBuf {
     std::fs::write(root.join("README.md"), "v1\n").unwrap();
     std::fs::write(
         root.join("docker-compose.yml"),
-        format!("services:\n  web:\n    image: docker.io/library/nginx:alpine\n    ports:\n      - \"{port}:80\"\n"),
+        // Python's server keeps running on the sandbox's read-only root
+        // filesystem; nginx:alpine exits writing its cache (and a Run now
+        // fails when a service crashes right after starting).
+        format!("services:\n  web:\n    image: docker.io/library/python:3.12-slim\n    command: [\"python\", \"-m\", \"http.server\", \"80\"]\n    ports:\n      - \"{port}:80\"\n"),
     )
     .unwrap();
     sh(&root, &["init", "-q"]);

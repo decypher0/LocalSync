@@ -53,6 +53,13 @@ pub struct ReceivedSession {
     /// Empty = not named; the UI falls back to `title`.
     #[serde(default)]
     pub name: String,
+    /// The version this session ran before the latest update landed, if it
+    /// had been run: `(compose_dir, git_commit)`. Its containers may still be
+    /// up (an update can arrive while the old version runs), so the next Run
+    /// - and Stop - take them down first; otherwise they'd hold the ports the
+    /// new version needs, with nothing left on record to stop them by.
+    #[serde(default)]
+    pub previous_run: Option<(String, String)>,
 }
 
 impl ReceivedSession {
@@ -76,6 +83,7 @@ impl ReceivedSession {
             last_received_at: created_at.clone(),
             created_at,
             name: String::new(),
+            previous_run: None,
         }
     }
 
@@ -90,6 +98,9 @@ impl ReceivedSession {
     /// `work_dir` is left alone: it's still exactly the right place to
     /// unpack the new version into.
     pub fn record_update(&mut self, snapshot_id: String, git_commit: String, compose_dir: String, received_at: String) {
+        if !self.compose_dir.is_empty() {
+            self.previous_run = Some((std::mem::take(&mut self.compose_dir), self.git_commit.clone()));
+        }
         self.snapshot_id = snapshot_id;
         self.git_commit = git_commit;
         self.compose_dir = compose_dir;
@@ -149,6 +160,18 @@ mod tests {
         assert_eq!(s.work_dir, "/home/me/work", "work_dir is still the right place to unpack into");
         assert_eq!(s.last_received_at, "2026-01-02T00:00:00Z");
         assert_eq!(s.created_at, "2026-01-01T00:00:00Z", "created_at never moves");
+        assert_eq!(
+            s.previous_run,
+            Some(("/home/me/work/xusom-admin-deadbeef".into(), "deadbeef".into())),
+            "the old version may still be running - keep what it takes to stop it"
+        );
+    }
+
+    #[test]
+    fn an_update_to_a_never_run_version_leaves_no_previous_run() {
+        let mut s = session();
+        s.record_update("xusom-admin@cafef00d".into(), "cafef00d".into(), String::new(), "2026-01-02T00:00:00Z".into());
+        assert_eq!(s.previous_run, None);
     }
 
     #[test]

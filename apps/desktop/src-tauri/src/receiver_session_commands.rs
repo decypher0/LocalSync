@@ -177,6 +177,11 @@ pub struct ReceivedSessionView {
 /// process itself started (the pre-restart-aware behavior) rather than
 /// failing the whole view.
 fn is_running(state: &AppState, session: &ReceivedSession) -> Result<bool, String> {
+    if let Some((_, prev_commit)) = &session.previous_run {
+        if ls_containers::project_running(&session.title, prev_commit).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
     match ls_containers::project_running(&session.title, &session.git_commit) {
         Ok(running) => Ok(running),
         Err(e) => {
@@ -287,6 +292,10 @@ async fn run_received_session_inner(
 ) -> Result<RunReceivedResult, String> {
     let session_id = session_id.to_string();
 
+    // An update landed while the previous version ran: take it down first,
+    // or it keeps the ports this version needs.
+    stop_previous_run(state, &session_id).await?;
+
     let held = state.verified.lock().map_err(|e| e.to_string())?.remove(&session.snapshot_id);
 
     let session_out = match held {
@@ -356,6 +365,10 @@ async fn run_received_session_inner(
 pub async fn stop_received_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     let session = get_session(&state, &session_id)?;
     if session.compose_dir.is_empty() {
+        // Only the version before an update ran (and may still be up).
+        if session.previous_run.is_some() {
+            return stop_previous_run(&state, &session_id).await;
+        }
         return Err("this session hasn't been run, so there's nothing to stop".to_string());
     }
     ls_containers::stop_project(Path::new(&session.compose_dir), &session.title, &session.git_commit)
@@ -363,6 +376,28 @@ pub async fn stop_received_session(state: State<'_, AppState>, session_id: Strin
         .map_err(|e| format!("{e:#}"))?;
     let key = ls_containers::compose_project_name(&session.title, &session.git_commit);
     state.sessions.lock().map_err(|e| e.to_string())?.remove(&key);
+    Ok(())
+}
+
+/// Takes down the containers of the version this session ran before its
+/// latest update (if any), then forgets it.
+async fn stop_previous_run(state: &AppState, session_id: &str) -> Result<(), String> {
+    let session = get_session(state, session_id)?;
+    let Some((compose_dir, commit)) = session.previous_run.clone() else { return Ok(()) };
+    if Path::new(&compose_dir).exists() {
+        ls_containers::stop_project(Path::new(&compose_dir), &session.title, &commit)
+            .await
+            .map_err(|e| format!("stopping the previous version: {e:#}"))?;
+    }
+    let key = ls_containers::compose_project_name(&session.title, &commit);
+    state.sessions.lock().map_err(|e| e.to_string())?.remove(&key);
+    let updated = state.received_sessions.lock().map_err(|e| e.to_string())?.get_mut(session_id).map(|s| {
+        s.previous_run = None;
+        s.clone()
+    });
+    if let Some(s) = updated {
+        persist(&s);
+    }
     Ok(())
 }
 
