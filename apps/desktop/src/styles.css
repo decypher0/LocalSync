@@ -901,14 +901,17 @@ body.lsv-on #session-history-panel:not(.hidden) {
   width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 96px); overflow: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
-body.lsv-on #firewall-banner:not(.hidden), body.lsv-on #app-update-banner:not(.hidden),
-body.lsv-on #pull-requests:not(:empty) { position: fixed; z-index: 25; left: 50%; transform: translateX(-50%); width: min(720px, calc(100vw - 32px)); }
-body.lsv-on #pull-requests:not(:empty) { bottom: 24px; }
-body.lsv-on #firewall-banner:not(.hidden), body.lsv-on #app-update-banner:not(.hidden) { top: 72px; }
+body.lsv-on #pull-requests:not(:empty) { position: fixed; z-index: 25; left: 50%; transform: translateX(-50%); width: min(720px, calc(100vw - 32px)); bottom: 24px; }
+/* The firewall / app-update banners sit above the views, in the flow: they
+   push the page down instead of covering its buttons (an update banner over
+   the session page's Run/Stop/Pull buttons swallowed their clicks). */
+.lsv { display: flex; flex-direction: column; }
+#lsv-banners { flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding: 0 32px; }
+#lsv-banners > :not(.hidden) { margin: 12px 0 0; }
 #lsv-holding { display: none; }
 
 .lsv .hidden { display: none !important; }
-.lsv-view { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.lsv-view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .lsv-muted { color: var(--text2); }
 .lsv-grow { flex: 1; }
 .lsv-error { color: var(--danger-text); font-size: 13px; margin: 6px 0; }
@@ -1094,3 +1097,13 @@ body.lsv-on #firewall-banner:not(.hidden), body.lsv-on #app-update-banner:not(.h
 .lsv-radio:has(input:checked) { border-color: var(--accent); font-weight: 600; }
 /* The receive form inside the receive Transfer step: the mode choice replaces its heading and Cloud drop checkbox. */
 #ntr-code-slot #receive-idle > h2, #ntr-code-slot label:has(> #cloud-drop-receive-toggle) { display: none; }
+
+.lsv-armed { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 9px; }
+.lsv-inline-row { display: flex; gap: 8px; align-items: center; }
+.lsv-inline-row .lsv-input { flex: 1; min-width: 0; }
+.lsv-url-row { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.lsv-url { color: var(--accent); text-decoration: underline; cursor: pointer; }
+.lsv-unavailable { font-size: 12px; color: var(--text2); }
+label.is-unavailable { opacity: 0.6; cursor: not-allowed; }
+#settings-panel { position: relative; }
+#settings-panel .settings-close { position: absolute; top: 10px; right: 10px; }
