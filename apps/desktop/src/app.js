@@ -245,7 +245,7 @@ $("settings-close-btn").addEventListener("click", () => $("settings-panel").clas
 // Esc closes whichever overlay (Settings, Session history) is open.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  for (const id of ["settings-panel", "session-history-panel"]) {
+  for (const id of ["settings-panel", "session-history-panel", "storage-panel"]) {
     if (!$(id).classList.contains("hidden")) {
       $(id).classList.add("hidden");
       e.preventDefault();

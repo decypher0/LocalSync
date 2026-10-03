@@ -442,6 +442,27 @@
     <p id="session-history-error" class="error"></p>
   </section>
 
+  <!-- ---- Storage (app menu -> Storage…): storage-view.js / storage_commands.rs ---- -->
+  <section id="storage-panel" class="settings-panel hidden">
+    <div class="inline-row receivers-header">
+      <h2>Storage</h2>
+      <span class="inline-row">
+        <button id="storage-refresh-btn" class="ghost-btn" type="button">Rescan</button>
+        <button id="storage-close-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Close</button>
+      </span>
+    </div>
+    <p id="storage-status" class="hint"></p>
+    <p id="storage-error" class="error"></p>
+    <div id="storage-confirm" class="st-confirm hidden">
+      <div id="storage-confirm-text"></div>
+      <span class="inline-row">
+        <button id="storage-confirm-go" class="ghost-btn st-danger" type="button">Remove</button>
+        <button id="storage-confirm-cancel" class="ghost-btn" type="button">Cancel</button>
+      </span>
+    </div>
+    <div id="storage-body"></div>
+  </section>
+
   <nav class="tabs">
     <button class="tab-btn active" data-tab="send"><svg class="icon"><use href="#icon-send"></use></svg> Send</button>
     <button class="tab-btn" data-tab="receive"><svg class="icon"><use href="#icon-download"></use></svg> Receive</button>
@@ -1277,5 +1298,6 @@
   <script src="setup-wizard.js"></script>
   <script src="app.js"></script>
   <script src="views.js"></script>
+  <script src="storage-view.js"></script>
 </body>
 </html>
