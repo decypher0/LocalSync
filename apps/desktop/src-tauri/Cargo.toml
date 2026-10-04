@@ -86,7 +86,7 @@ dirs = "5"
 # Round 37: default device name for LAN discovery. Already in the tree
 # transitively (via mdns-sd), so this adds no new download.
 gethostname = "1"
-time ={ version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting"] }
 # Already pulled in transitively by tauri itself (its async_runtime is a
 # tokio runtime) and already a dev-dependency below for the test harness -
 # promoted to a real dependency so run_snapshot's provisioning-log tailer
