@@ -108,6 +108,113 @@ pub async fn volume_exists(name: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+// ---------- disk usage (the desktop app's Storage view) ----------
+
+/// Whole-Podman totals from `podman system df --format json` (exact bytes).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiskTotals {
+    pub images_bytes: u64,
+    pub volumes_bytes: u64,
+}
+
+pub async fn disk_totals() -> Result<DiskTotals> {
+    let output = command("podman").args(["system", "df", "--format", "json"]).stdin(Stdio::null()).output().await.context("running podman system df")?;
+    ensure_success(&output, "podman system df")?;
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).context("parsing podman system df")?;
+    let raw = |kind: &str| rows.iter().find(|r| r["Type"] == kind).and_then(|r| r["RawSize"].as_u64()).unwrap_or(0);
+    Ok(DiskTotals { images_bytes: raw("Images"), volumes_bytes: raw("Local Volumes") })
+}
+
+/// One volume's size and how many containers use it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VolumeUsage {
+    pub name: String,
+    pub bytes: u64,
+    pub links: u32,
+}
+
+/// Every volume's size, from `podman system df -v` - the only Podman command
+/// that reports per-volume sizes (it can't be combined with `--format`, so
+/// its volume table is parsed). About a second on Podman 5.8 / Windows.
+pub async fn volume_usage() -> Result<Vec<VolumeUsage>> {
+    let output = command("podman").args(["system", "df", "-v"]).stdin(Stdio::null()).output().await.context("running podman system df -v")?;
+    ensure_success(&output, "podman system df -v")?;
+    Ok(parse_volume_table(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The "Local Volumes space usage:" table of `podman system df -v`:
+/// `VOLUME NAME  LINKS  SIZE` rows until the next blank line.
+fn parse_volume_table(text: &str) -> Vec<VolumeUsage> {
+    let mut lines = text.lines().skip_while(|l| !l.trim_start().starts_with("Local Volumes space usage"));
+    lines.next();
+    lines
+        .map(str::trim)
+        .skip_while(|l| l.is_empty())
+        .skip(1) // header
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| {
+            let cols: Vec<&str> = l.split_whitespace().collect();
+            let [name, links, size] = cols.as_slice() else { return None };
+            Some(VolumeUsage { name: name.to_string(), links: links.parse().ok()?, bytes: parse_human_size(size)? })
+        })
+        .collect()
+}
+
+/// Podman's (go-units, decimal) human sizes: "0B", "36.65kB", "210.4MB".
+fn parse_human_size(s: &str) -> Option<u64> {
+    let split = s.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, unit) = s.split_at(split);
+    let mult: f64 = match unit.to_ascii_lowercase().as_str() {
+        "b" => 1.0,
+        "kb" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "tb" => 1e12,
+        "pb" => 1e15,
+        _ => return None,
+    };
+    Some((num.parse::<f64>().ok()? * mult).round() as u64)
+}
+
+/// One image from `podman images --format json`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageInfo {
+    pub id: String,
+    pub names: Vec<String>,
+    /// Includes layers shared with other images.
+    pub bytes: u64,
+    /// Containers (running or not) using it.
+    pub containers: u32,
+}
+
+pub async fn images() -> Result<Vec<ImageInfo>> {
+    let output = command("podman").args(["images", "--format", "json"]).stdin(Stdio::null()).output().await.context("running podman images")?;
+    ensure_success(&output, "podman images")?;
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).context("parsing podman images")?;
+    Ok(rows
+        .iter()
+        .map(|r| ImageInfo {
+            id: r["Id"].as_str().unwrap_or_default().to_string(),
+            names: r["Names"].as_array().map(|a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect()).unwrap_or_default(),
+            bytes: r["Size"].as_u64().unwrap_or(0),
+            containers: r["Containers"].as_u64().unwrap_or(0) as u32,
+        })
+        .collect())
+}
+
+/// `podman volume rm` *without* `-f`: Podman refuses a volume a container
+/// still uses (with `-f` it would remove those containers too).
+pub async fn volume_remove_unused(name: &str) -> Result<()> {
+    let output = command("podman").args(["volume", "rm", name]).stdin(Stdio::null()).output().await.context("running podman volume rm")?;
+    ensure_success(&output, "podman volume rm")
+}
+
+/// `podman rmi` *without* `-f`: refused for an image a container uses.
+pub async fn image_remove(id: &str) -> Result<()> {
+    let output = command("podman").args(["rmi", id]).stdin(Stdio::null()).output().await.context("running podman rmi")?;
+    ensure_success(&output, "podman rmi")
+}
+
 /// Runs `program args...` with `cwd`, capturing stdout/stderr *live* — each
 /// line is appended to `log` (if given) as it arrives, not just returned
 /// after the process exits — so a slow step (an image pull, a Maven build)
@@ -340,6 +447,48 @@ pub async fn compose_down(compose_dir: &Path, project: &str, log: Option<&Provis
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real `podman system df -v` output (Podman 5.8.3, Windows), trimmed.
+    const DF_V: &str = "Images space usage:
+
+REPOSITORY  TAG  IMAGE ID  CREATED  SIZE  SHARED SIZE  UNIQUE SIZE  CONTAINERS
+docker.io/library/mysql  8.0  6cd09145362d  5 months  817.9MB  0B  817.9MB  1
+
+Containers space usage:
+
+CONTAINER ID  IMAGE  COMMAND  LOCAL VOLUMES  SIZE  CREATED  STATUS  NAMES
+
+Local Volumes space usage:
+
+VOLUME NAME                       LINKS       SIZE
+localsync-db-f61aa5c2990186  1           210.4MB
+localsync-db-cd372fb8514870  0           204.9MB
+other  0  0B
+";
+
+    #[test]
+    fn parses_the_volume_table_of_podman_system_df_v() {
+        let v = parse_volume_table(DF_V);
+        assert_eq!(
+            v,
+            vec![
+                VolumeUsage { name: "localsync-db-f61aa5c2990186".into(), bytes: 210_400_000, links: 1 },
+                VolumeUsage { name: "localsync-db-cd372fb8514870".into(), bytes: 204_900_000, links: 0 },
+                VolumeUsage { name: "other".into(), bytes: 0, links: 0 },
+            ]
+        );
+        assert!(parse_volume_table("Images space usage:
+").is_empty());
+    }
+
+    #[test]
+    fn parses_podmans_human_sizes() {
+        assert_eq!(parse_human_size("0B"), Some(0));
+        assert_eq!(parse_human_size("36.65kB"), Some(36_650));
+        assert_eq!(parse_human_size("1.2GB"), Some(1_200_000_000));
+        assert_eq!(parse_human_size("12"), None);
+        assert_eq!(parse_human_size("3XB"), None);
+    }
 
     #[test]
     fn binary_available_is_false_for_nonexistent_binary() {

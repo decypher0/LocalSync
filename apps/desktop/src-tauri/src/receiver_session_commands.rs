@@ -296,6 +296,10 @@ async fn run_received_session_inner(
     // or it keeps the ports this version needs.
     stop_previous_run(state, &session_id).await?;
 
+    // Before unpacking: even a failed Run leaves files there, and the Storage
+    // view must still find them after this session is closed.
+    crate::storage_commands::remember_work_dirs([work_dir.as_str()]);
+
     let held = state.verified.lock().map_err(|e| e.to_string())?.remove(&session.snapshot_id);
 
     let session_out = match held {
@@ -332,6 +336,23 @@ async fn run_received_session_inner(
                 .map_err(|e| format!("{e:#}"))?
         }
     };
+
+    // podman-compose exits 0 even when a container couldn't be created or
+    // started (a port already in use, an image that failed to build or pull),
+    // so "it ran" isn't "it's up": a service with no started container fails
+    // the Run instead of showing Running with nothing behind it. Same check
+    // the compose wizard's test run makes.
+    let unstarted = ls_containers::services_not_started(&session_out).await;
+    if !unstarted.is_empty() {
+        if let Err(e) = ls_containers::stop_session(&session_out).await {
+            log::warn!("run_received_session: cleanup after a service failed to start also failed: {e:#}");
+        }
+        let names = unstarted.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "{names} could not be started, so the project isn't running - usually a port it needs is already in use \
+             on this computer, or its image failed to build or download. The Logs panel shows podman-compose's output."
+        ));
+    }
 
     let info = RunningSessionInfo {
         session_id: session_out.compose_project_name.clone(),
@@ -379,6 +400,30 @@ pub async fn stop_received_session(state: State<'_, AppState>, session_id: Strin
     Ok(())
 }
 
+/// Takes down every container this session may have running - its current
+/// version and, after an update, the version before it - the same teardown
+/// Stop does (`podman-compose down`: containers and network). The database
+/// volume is kept: it's the warm cache keyed by the dump, not the session's.
+/// Removing a session from the app without this would leave its containers
+/// running with nothing in the UI pointing at them any more.
+pub(crate) async fn stop_session_containers(state: &AppState, session: &ReceivedSession) -> Result<(), String> {
+    let mut versions = vec![(session.compose_dir.clone(), session.git_commit.clone())];
+    versions.extend(session.previous_run.clone());
+    for (compose_dir, commit) in versions {
+        if compose_dir.is_empty() {
+            continue;
+        }
+        if ls_containers::project_running(&session.title, &commit).unwrap_or(false) {
+            ls_containers::stop_project(Path::new(&compose_dir), &session.title, &commit)
+                .await
+                .map_err(|e| format!("couldn't stop its containers: {e:#}"))?;
+        }
+        let key = ls_containers::compose_project_name(&session.title, &commit);
+        state.sessions.lock().map_err(|e| e.to_string())?.remove(&key);
+    }
+    Ok(())
+}
+
 /// Takes down the containers of the version this session ran before its
 /// latest update (if any), then forgets it.
 async fn stop_previous_run(state: &AppState, session_id: &str) -> Result<(), String> {
@@ -408,13 +453,20 @@ pub fn save_received_session(state: State<'_, AppState>, session_id: String) -> 
     crate::session_history::save_received(&session)
 }
 
-/// Closes a session in memory. Does **not** delete an existing saved copy -
-/// the caller decides that separately, same contract as
-/// `session_commands::discard_project_session`. Also clears any arming that
-/// pointed at it - an armed slot for a session that no longer exists in
-/// memory would just be a silent dead end for the next push to fall into.
+/// Closes a session in memory. Stops its containers first if they're
+/// running (`stop_session_containers`) - if that fails the session is kept,
+/// so the containers are never left running with no session to stop them
+/// from. Does **not** delete an existing saved copy - the caller decides that
+/// separately, same contract as `session_commands::discard_project_session`.
+/// Also clears any arming that pointed at it - an armed slot for a session
+/// that no longer exists in memory would just be a silent dead end for the
+/// next push to fall into.
 #[tauri::command]
-pub fn discard_received_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+pub async fn discard_received_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let session = state.received_sessions.lock().map_err(|e| e.to_string())?.get(&session_id).cloned();
+    if let Some(session) = session {
+        stop_session_containers(&state, &session).await?;
+    }
     state.received_sessions.lock().map_err(|e| e.to_string())?.remove(&session_id);
     state.armed_updates.lock().map_err(|e| e.to_string())?.retain(|_, v| v != &session_id);
     Ok(())

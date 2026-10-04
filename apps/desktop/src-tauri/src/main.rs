@@ -4,7 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use localsync_desktop::{commands, compose_wizard, receiver_session_commands, send_log, session_commands, session_list_commands, setup_commands, state::AppState};
+use localsync_desktop::{commands, compose_wizard, receiver_session_commands, send_log, session_commands, session_list_commands, setup_commands, state::AppState, storage_commands};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
@@ -34,6 +34,7 @@ fn build_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> 
         .text("menu-check-setup", "Check Podman setup…")
         .separator()
         .text("menu-settings", "Settings")
+        .text("menu-storage", "Storage…")
         .separator()
         .text("menu-quit", "Quit")
         .build()?;
@@ -323,6 +324,10 @@ fn main() {
             receiver_session_commands::open_saved_received_session,
             receiver_session_commands::arm_received_session_for_update,
             receiver_session_commands::disarm_received_session_for_update,
+            storage_commands::storage_report,
+            storage_commands::clean_up_unused,
+            storage_commands::free_session_disk,
+            storage_commands::prune_localsync_images,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalSync");
