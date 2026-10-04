@@ -1591,12 +1591,12 @@ pub struct LinkedAccountInfo {
 }
 
 fn cloud_drop_config() -> Result<ls_clouddrop::oauth::OAuthConfig, String> {
-    ls_clouddrop::oauth::OAuthConfig::from_env().map_err(|e| e.to_string())
+    ls_clouddrop::oauth::OAuthConfig::built_in().map_err(|e| e.to_string())
 }
 
 /// Opens the system browser to Google's real consent screen and blocks until
 /// the user finishes (or cancels) sign-in. Requires both
-/// `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` to be set (round
+/// `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` to have been set at build time (round
 /// 31: Google's real token endpoint rejects this app's exchange without the
 /// secret, despite PKCE - see `docs/google-drive-setup.md`) — without either
 /// one this fails immediately with a message pointing there, rather than
@@ -1634,7 +1634,7 @@ pub fn open_local_url<R: tauri::Runtime>(app: AppHandle<R>, url: String) -> Resu
 }
 
 /// Whether this build can do Cloud drop at all: it needs the Google OAuth
-/// client the app is built/launched with (`GOOGLE_OAUTH_CLIENT_ID` and
+/// client compiled into the app at build time (`GOOGLE_OAUTH_CLIENT_ID` and
 /// `_SECRET` - see docs/google-drive-setup.md). That's an app-level setting,
 /// not something a user can enter, so the UI greys Cloud drop out instead of
 /// letting a transfer start and fail on it.
@@ -1979,7 +1979,7 @@ pub async fn request_cloud_drop_access(
 /// fatal — cleanup just retries next launch).
 pub async fn cleanup_expired_cloud_drops() {
     let Ok(Some(_)) = ls_clouddrop::store::load_tokens() else { return };
-    let config = match ls_clouddrop::oauth::OAuthConfig::from_env() {
+    let config = match ls_clouddrop::oauth::OAuthConfig::built_in() {
         Ok(c) => c,
         Err(_) => return,
     };

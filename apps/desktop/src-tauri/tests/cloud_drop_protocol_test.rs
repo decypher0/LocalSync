@@ -68,11 +68,12 @@ async fn declined_access_request_sends_no_grant_and_no_file_id() {
         other => panic!("expected a CloudAccessRequest, got {other:?}"),
     }
 
-    // The actual command under test. If this reached `cloud_drop_config()`
-    // (which it must not, on the reject path) it would fail outright - no
-    // `GOOGLE_OAUTH_CLIENT_ID` is set in this test process - so this
-    // succeeding at all is itself proof the reject branch never touches
-    // Cloud drop's Google-facing config, let alone grants a real permission.
+    // The actual command under test. It must not reach `cloud_drop_config()`
+    // on the reject path. In a test build without the Google OAuth client
+    // compiled in (the normal case - see docs/google-drive-setup.md) that
+    // would fail outright, so this succeeding is proof the reject branch
+    // never touches Cloud drop's Google-facing config. Either way, the
+    // assertions below prove no file id (i.e. no real permission) is handed back.
     commands::respond_to_cloud_access_request(sender.state::<AppState>(), room_id.clone(), false)
         .await
         .expect("declining a cloud-access request should succeed without any Google credentials");

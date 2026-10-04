@@ -436,7 +436,10 @@ pub fn save_project_session(state: State<'_, AppState>, session_id: String) -> R
 }
 
 /// Closes a session in memory. Does **not** write anything, and does not
-/// delete an earlier saved copy - the caller decides that separately.
+/// delete an earlier saved copy - the caller decides that separately. A
+/// sending session runs no containers of its own (only a receiver does - see
+/// `receiver_session_commands::discard_received_session`), so there is
+/// nothing to stop here.
 #[tauri::command]
 pub fn discard_project_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.project_sessions.lock().map_err(|e| e.to_string())?.remove(&session_id);
