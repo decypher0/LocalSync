@@ -1190,15 +1190,17 @@ sender, one as receiver), and a Desktop-app-type OAuth Client ID. Set both
 `GOOGLE_OAUTH_CLIENT_ID` **and** `GOOGLE_OAUTH_CLIENT_SECRET` (round 31 -
 see that round's own addendum below for why the secret is needed at all
 despite this being a PKCE flow) to the two values from that Client ID's
-Credentials page entry, before launching either app instance. Without
-either one, Settings → **Link Google account** fails immediately with a
-message naming exactly which variable is missing — confirm that's what you
-see if you launch with one or both unset, as a sanity check that the
+Credentials page entry, in the shell you build the app from (they are
+baked in at build time; setting them before launching a built app does
+nothing). Without either one, Cloud drop is greyed out and Settings → **Link
+Google account** fails immediately with a message naming exactly which
+value is missing — confirm that's what you see in a build made with one or
+both unset, as a sanity check that the
 failure path itself is honest before you set the real values.
 
 ### What to check
 
-1. **Linking, for real.** With `GOOGLE_OAUTH_CLIENT_ID` set, click **Link
+1. **Linking, for real.** In a build made with both variables set, click **Link
    Google account** in Settings. Confirm your real default browser opens to
    a real Google consent screen listing the scopes from
    `docs/google-drive-setup.md` (with a "Google hasn't verified this app"
@@ -1740,7 +1742,7 @@ reports of the identical error against Google specifically (not a fluke of
 one misconfigured client) - see `crates/ls-clouddrop/src/oauth.rs`'s own
 module doc comment and `docs/google-drive-setup.md` for the full
 explanation. `GOOGLE_OAUTH_CLIENT_SECRET` is now a second required
-environment variable alongside `GOOGLE_OAUTH_CLIENT_ID` - see this
+build-time environment variable alongside `GOOGLE_OAUTH_CLIENT_ID` - see this
 checklist's own round 23 addendum above, updated to mention both.
 
 ### What's already confirmed, without needing real hardware
@@ -1760,13 +1762,13 @@ checklist's own round 23 addendum above, updated to mention both.
 
 ### What to check on real hardware
 
-1. **The actual failure this round fixes**: with only `GOOGLE_OAUTH_CLIENT_ID`
-   set (not the secret), confirm Settings → **Link Google account** fails
+1. **The actual failure this round fixes**: in a build made with only
+   `GOOGLE_OAUTH_CLIENT_ID` set (not the secret), confirm Settings → **Link Google account** fails
    fast with a clear message naming `GOOGLE_OAUTH_CLIENT_SECRET`
    specifically, rather than opening a browser toward a request Google
    would reject anyway.
-2. **The real fix**: set both `GOOGLE_OAUTH_CLIENT_ID` and
-   `GOOGLE_OAUTH_CLIENT_SECRET` (see `docs/google-drive-setup.md`) and
+2. **The real fix**: build with both `GOOGLE_OAUTH_CLIENT_ID` and
+   `GOOGLE_OAUTH_CLIENT_SECRET` set (see `docs/google-drive-setup.md`) and
    confirm the full link flow this checklist's round 23 addendum already
    describes now completes successfully against a real Desktop-app OAuth
    client - the exact scenario that failed before this round's fix.

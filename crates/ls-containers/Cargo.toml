@@ -22,11 +22,13 @@ time = { version = "0.3", features = ["formatting"] }
 # per-OS path logic and avoids needing Tauri's AppHandle threaded through
 # run_snapshot just to find a log path.
 dirs = "5"
+# The unpack marker (`UNPACK_MARKER`) and parsing `podman ... --format json`
+# for the desktop app's Storage view. Already in the lockfile (was a dev-dep).
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
 ls-composegen = { path = "../ls-composegen" }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
-serde_json = "1"
 sha2 = "0.10"

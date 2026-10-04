@@ -18,4 +18,5 @@ pub mod session_history;
 pub mod session_list_commands;
 pub mod setup_commands;
 pub mod setup_state;
+pub mod storage_commands;
 pub mod state;
