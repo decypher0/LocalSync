@@ -86,7 +86,14 @@ async fn signaling_url(port: u16) -> (String, Option<tokio::process::Child>) {
         .kill_on_drop(true)
         .spawn()
         .expect("failed to spawn `node` for the signaling server");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait until it actually accepts connections - a fixed delay was too
+    // short when the machine is busy (e.g. the whole suite running at once).
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     (format!("ws://127.0.0.1:{port}"), Some(child))
 }
 
