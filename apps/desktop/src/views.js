@@ -47,7 +47,8 @@
   }
   const displayName = (s) => s.displayName || s.title || "Untitled session";
   // A device key is a discovered device's persistent id, or "dev-<room code>".
-  const shortDeviceId = (key) => (key || "").replace(/^dev-/, "").slice(0, 8) || "—";
+  // A Cloud drop receiver's key is "cloud:<email>" (the email is its name).
+  const shortDeviceId = (key) => ((key || "").startsWith("cloud:") ? "Google account (Cloud drop)" : (key || "").replace(/^dev-/, "").slice(0, 8) || "—");
   const sendIsRunning = (s) => s.transfers.some((t) => t.status === "connecting" || t.status === "active" || t.status === "waiting");
   function receiveState(s) {
     if (s.status === "connecting" || s.status === "active") return "receiving";
@@ -360,7 +361,10 @@
     $id("ntr-local-slot").appendChild(discoverWrap);
     $id("ntr-relay-url").value = $id("relay-url").value || modeStore.url || "";
     showTransferArea("receive");
+    // A fresh form: nothing left over from an earlier receive.
+    $id("receive-start-error").textContent = "";
     applyReceiveMode();
+    refreshCloudLinkPanel();
     navigate("new-transfer");
     $id("receive-room-code").focus();
   });
@@ -371,7 +375,8 @@
   const RECEIVE_MODE_HINT = {
     local: "Paste the code the sender shared, or turn on discoverability below so a sender on this network can pick this device directly.",
     remote: "For a sender on a different network: both of you use the same relay server.",
-    cloud: "The sender uploaded the project to Google Drive. Paste their code; nothing downloads until they approve your linked account.",
+    // (The Google sign-in line is the receive form's own hint, right below.)
+    cloud: "The sender uploaded the project to Google Drive. Paste their code: Receive sends them your Google email, and nothing downloads until they approve it.",
   };
   function receiveMode() {
     const on = document.querySelector('input[name="ntr-mode"]:checked');
@@ -705,7 +710,9 @@
     const a = s.artifact;
     const commit = a && a.snapshot_id ? a.snapshot_id.split("@").pop() : null;
     const dumps = (s.folders || []).filter((f) => f.dump).map((f) => `${f.dump.engine} · ${f.dump.schema}`);
-    const lastSent = s.devices.map((d) => d.marker && d.marker.sent_at).filter(Boolean).sort().pop();
+    // A Cloud drop receiver counts too (cloud-drop-delivered refreshes s.devices).
+    const last = lastSentDevice(s.devices);
+    const lastSent = last && last.marker.sent_at;
     $id("sp-project").innerHTML =
       row("Local path", (s.folders || []).map((f) => f.path).join(", ") || "—") +
       row("Commit", commit ? shortCommit(commit) : "—") +
@@ -725,7 +732,7 @@
       $id("sp-live-devices").innerHTML =
         live
           .map((t) => {
-            const name = t.deviceName || (t.spec.kind === "cloud" ? "Cloud drop" : "Device via code");
+            const name = t.deviceName || (t.spec.kind === "cloud" ? t.grantedEmail || (t.accessRequest && t.accessRequest.email) || "Cloud drop" : "Device via code");
             const status =
               t.spec.kind === "cloud"
                 ? t.receiverJoined ? "receiver connected" : t.status === "waiting" ? "waiting for the receiver to enter the code" : "uploading to Drive"
@@ -734,7 +741,6 @@
           })
           .join("") + `<div class="lsv-device is-waiting"><span class="lsv-device-dot"></span><span class="lsv-device-name">Waiting for another device…</span></div>`;
     } else {
-      const last = [...s.devices].filter((d) => d.marker).sort((x, y) => (x.marker.sent_at || "").localeCompare(y.marker.sent_at || "")).pop();
       $id("sp-last-device").innerHTML = last
         ? row("Name", last.name) +
           row("Id", shortDeviceId(last.key)) +
@@ -1069,7 +1075,7 @@
       const failed = !!s.runErrorText;
       $id("sp-last-run").innerHTML = row("Stopped", s.endedAt ? timeAgo(s.endedAt) : "—") + row("Exit reason", failed ? "Failed to start" : s.endedAt ? "Stopped" : s.status === "error" ? "Receive failed" : "—");
       const errEl = $id("sp-run-error");
-      errEl.textContent = s.runErrorText || (s.status === "error" ? s.errorText : "");
+      errEl.textContent = plainRunError(s.runErrorText) || (s.status === "error" ? s.errorText : "");
       errEl.classList.toggle("hidden", !errEl.textContent);
       showSetupFixButton($id("sp-fix-setup"), s.runErrorText);
       // A Cloud drop request that failed because the Google sign-in expired:
@@ -1087,7 +1093,7 @@
     }
     if (state === "reviewing") {
       const errEl = $id("sp-run-error");
-      errEl.textContent = s.runErrorText || "";
+      errEl.textContent = plainRunError(s.runErrorText);
       errEl.classList.toggle("hidden", !s.runErrorText);
       showSetupFixButton($id("sp-fix-setup"), s.runErrorText);
       $id("sp-run").disabled = s.busy || s.runInProgress;

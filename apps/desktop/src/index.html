@@ -1216,13 +1216,9 @@
         <input type="checkbox" id="cloud-drop-receive-toggle" />
         This is a Cloud drop code (the sender uploaded to Google Drive)
       </label>
-      <p id="cloud-drop-receive-hint" class="hint hidden">
-        Receiving via Cloud drop requires signing in to Google. P2P and relay transfers don't.
-        Clicking Receive sends the sender your Google email and waits for them to approve
-        access — nothing downloads until they do.
-      </p>
+      <p id="cloud-drop-receive-hint" class="hint hidden">Cloud drop requires signing in to Google. P2P and relay transfers don't.</p>
       <div id="cloud-drop-link-panel" class="cloud-link-panel hidden">
-        <p>Cloud drop needs a Google account so the sender can share the file with you.</p>
+        <p id="cloud-drop-link-note"></p>
         <button id="cloud-drop-link-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-link"></use></svg> <span>Link Google account</span></button>
         <p id="cloud-drop-link-error" class="error"></p>
       </div>
