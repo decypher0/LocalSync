@@ -8,10 +8,12 @@
 //! `cloud_drop_payload` the command uploads, handed to the receiver's real
 //! `finalize_received_snapshot` (what `request_cloud_drop_access` does with
 //! the downloaded bytes) and run with real Podman; the handoff is real
-//! WebRTC over the local relay; the grant's recording is the same
-//! `record_cloud_delivery` `respond_to_cloud_access_request` calls after the
-//! Drive grant. Skips the Run where podman/podman-compose are absent.
+//! WebRTC over the local relay; the grant is the same `finish_cloud_grant`
+//! `respond_to_cloud_access_request` calls after the Drive grant. Skips the
+//! Run where podman/podman-compose are absent.
 
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -34,6 +36,20 @@ fn podman_stack_available() -> bool {
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git").args(["-c", "user.name=T", "-c", "user.email=t@example.com"]).args(args).current_dir(dir).status().unwrap();
     assert!(status.success(), "git {args:?} failed");
+}
+
+/// The payload tar.zst's files, by path.
+fn unpack(payload: &[u8]) -> HashMap<String, Vec<u8>> {
+    let mut archive = tar::Archive::new(zstd::stream::read::Decoder::new(payload).unwrap());
+    let mut out = HashMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().replace('\\', "/");
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        out.insert(path, buf);
+    }
+    out
 }
 
 fn app() -> Handle {
@@ -102,6 +118,17 @@ async fn a_wizard_project_with_a_mysql_dump_arrives_runnable_and_the_receiver_is
     assert!(services.contains(&"app") && services.contains(&"mysql"), "the generated compose file is in it: {services:?}");
     assert_eq!(snapshot.manifest.database_dumps.len(), 1, "the dump is in it");
     assert_eq!(snapshot.manifest.database_dumps[0].engine, "mysql");
+    // And the files themselves, not just the manifest's word for them.
+    let files = unpack(&snapshot.payload);
+    let compose = files.iter().find(|(p, _)| p.ends_with("docker-compose.yml")).map(|(_, b)| String::from_utf8_lossy(b).into_owned());
+    let compose = compose.unwrap_or_else(|| panic!("the generated docker-compose.yml is in the payload: {:?}", files.keys()));
+    assert!(compose.contains("mysql") && compose.contains("build"), "the generated compose builds the app next to MySQL:\n{compose}");
+    assert!(files.keys().any(|p| p.ends_with("source/Dockerfile")), "the generated Dockerfile is in the payload: {:?}", files.keys());
+    assert_eq!(
+        files.get(&snapshot.manifest.database_dumps[0].dump_file),
+        Some(&std::fs::read(&dump_path).unwrap()),
+        "the dump's bytes are in the payload at the path the manifest names"
+    );
     // The bug: packaging the folder on its own (what Cloud drop used to do)
     // has neither - the receiver then had "no docker-compose.yml".
     let raw = ls_snapshot::create_snapshot(&project, None).unwrap();
@@ -148,7 +175,7 @@ async fn a_wizard_project_with_a_mysql_dump_arrives_runnable_and_the_receiver_is
         None,
         "drive-file-1".into(),
         ls_clouddrop::retention::Retention::DeleteAfterDownload,
-        delivery.clone(),
+        delivery,
     )
     .await
     .unwrap();
@@ -160,7 +187,11 @@ async fn a_wizard_project_with_a_mysql_dump_arrives_runnable_and_the_receiver_is
     assert_eq!(filed.as_deref(), Some(sid.as_str()), "the upload knows its sender session");
 
     // ---- the grant is recorded on the session, like a P2P send ----
-    let view = session_commands::record_cloud_delivery(&sender.state::<AppState>(), &delivery, "bob@example.com").unwrap().expect("session open");
+    let view = commands::finish_cloud_grant(&sender, &handoff.room_id, "bob@example.com").await.unwrap().expect("session open");
+    match ls_net::recv_control(&conn).await.unwrap() {
+        ls_net::ControlMessage::CloudAccessResponse { accepted: true, drive_file_id } => assert_eq!(drive_file_id.as_deref(), Some("drive-file-1")),
+        other => panic!("expected the grant, got {other:?}"),
+    }
     let bob = view.devices.iter().find(|d| d.key == "cloud:bob@example.com").expect("the receiver is a device");
     assert_eq!(bob.name, "bob@example.com");
     assert_eq!(bob.marker.as_ref().map(|m| m.snapshot_id.as_str()), Some(artifact.snapshot_id.as_str()));
