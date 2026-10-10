@@ -7,8 +7,13 @@
 ;
 ; Real friction this fixes: after a plain install, Windows Firewall blocks
 ; incoming P2P connections until someone manually runs an elevated
-; New-NetFirewallRule. The NSIS installer already elevates for install
-; (and uninstall), so adding/removing the rule here means nobody has to.
+; New-NetFirewallRule. Adding/removing the rule here only works when the
+; installer runs elevated: with Tauri's default per-user install
+; (bundle.windows.nsis.installMode unset = "currentUser") it does NOT
+; elevate, so these netsh calls fail silently and Windows shows its own
+; firewall prompt on first use instead (the app explains that prompt
+; before it appears). Setting installMode to "perMachine" would make
+; them work, at the cost of a UAC prompt on every install and update.
 ;
 ; ${MAINBINARYNAME} is defined earlier in installer.nsi from the bundle's
 ; main binary name - not hardcoded here, so this keeps working if the
