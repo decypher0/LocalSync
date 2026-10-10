@@ -126,8 +126,106 @@ function deviceKeyFor(device) {
   return device.device_id || `name:${device.nickname}`;
 }
 
+/** The device a send session last went to (newest marker), or null. */
+function lastSentDevice(devices) {
+  return (
+    (devices || [])
+      .filter((d) => d.marker && d.marker.sent_at)
+      .sort((x, y) => x.marker.sent_at.localeCompare(y.marker.sent_at))
+      .pop() || null
+  );
+}
+
+// ---------- Cloud drop ----------
+
+// ls_clouddrop::oauth::SIGN_IN_EXPIRED_MESSAGE starts with this: Google
+// refused the saved sign-in (invalid_grant), and the stale token was deleted.
+const GOOGLE_SIGN_IN_EXPIRED = "Your Google sign-in expired.";
+const isGoogleSignInExpired = (text) => String(text || "").startsWith(GOOGLE_SIGN_IN_EXPIRED);
+// commands::CLOUD_DROP_NOT_LINKED - what the receiver's pre-flight says without one.
+const CLOUD_DROP_NOT_LINKED = "Cloud drop needs a Google account so the sender can share the file with you.";
+
+/**
+ * What the receive form's "Link Google account" panel says for a pre-flight
+ * error, or null when the error isn't fixed by linking (shown as a plain error).
+ */
+function cloudLinkNote(err) {
+  const text = String(err || "");
+  if (isGoogleSignInExpired(text)) return text;
+  if (text === CLOUD_DROP_NOT_LINKED) return "No Google account is linked on this computer yet. Link one and the request goes ahead with the code you entered.";
+  return null;
+}
+
+/**
+ * The sender's Cloud drop transfer card follows these events:
+ * joined (code entered) -> requested (their access request) -> granted |
+ * declined -> downloaded; failed / ended can arrive at any point.
+ */
+function applyCloudEvent(tr, event, data = {}) {
+  switch (event) {
+    case "joined":
+      if (tr.cloudStep === "waiting") tr.cloudStep = "joined";
+      tr.receiverJoined = true;
+      break;
+    case "requested":
+      tr.accessRequest = { email: data.email, busy: false, error: "" };
+      tr.cloudStep = "requested";
+      break;
+    case "granted":
+      tr.accessRequest = null;
+      tr.cloudStep = "approved";
+      tr.grantedEmail = data.email;
+      break;
+    case "declined":
+      tr.accessRequest = null;
+      tr.cloudStep = "declined";
+      tr.declinedEmail = data.email;
+      tr.status = "done";
+      break;
+    case "downloaded":
+      tr.cloudStep = "downloaded";
+      tr.status = "done";
+      break;
+    case "failed":
+      tr.status = "error";
+      tr.errorText = data.message;
+      break;
+    case "ended":
+      // The receiver's control channel closed. After a grant that's the
+      // normal end; before one, they left without getting the file.
+      if (tr.status !== "waiting") break;
+      if (tr.cloudStep === "approved") {
+        tr.status = "done";
+      } else {
+        tr.status = "error";
+        tr.errorText = "The receiver disconnected before getting access. Retry for a new code (the file is still in your Drive).";
+      }
+      break;
+  }
+  return tr;
+}
+
+/**
+ * A received project's Run error as the receiver should read it. A project
+ * sent without run instructions (ls-containers: "arrived without run
+ * instructions", followed by a raw file-not-found cause) becomes one line
+ * saying what the sender has to do; anything else is shown as it is.
+ */
+function plainRunError(text) {
+  const t = String(text || "");
+  return t.includes("arrived without run instructions")
+    ? "This project arrived without run instructions. Ask the sender to finish Setup for it in LocalSync and send it again."
+    : t;
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
+    lastSentDevice,
+    isGoogleSignInExpired,
+    CLOUD_DROP_NOT_LINKED,
+    cloudLinkNote,
+    applyCloudEvent,
+    plainRunError,
     pickView,
     sendSessionFromView,
     applyView,

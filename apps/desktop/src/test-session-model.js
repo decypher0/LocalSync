@@ -72,3 +72,75 @@ test("a discovered device is filed under its persistent id, falling back to its 
   assert.equal(deviceKeyFor({ device_id: null, nickname: "Alice" }), "name:Alice");
   assert.equal(deviceKeyFor({ nickname: "Alice" }), "name:Alice");
 });
+
+// ---------- Cloud drop ----------
+const { lastSentDevice, cloudLinkNote, CLOUD_DROP_NOT_LINKED, applyCloudEvent, plainRunError } = require("./session-model.js");
+
+test("a Cloud drop delivery's view makes the receiver the last device, with Last sent filled in", () => {
+  const s = sendSessionFromView(view({ devices: [{ key: "dev-a", name: "Alice", marker: { sent_at: "2026-01-01T10:00:00Z", commits: [] } }] }));
+  assert.equal(lastSentDevice(s.devices).name, "Alice");
+  // cloud-drop-delivered { room_id, session_id, view } -> applyView(session, view)
+  applyView(s, view({ devices: [...s.devices, { key: "cloud:bob@example.com", name: "bob@example.com", marker: { sent_at: "2026-01-02T10:00:00Z", commits: [] } }] }));
+  const last = lastSentDevice(s.devices);
+  assert.equal(last.key, "cloud:bob@example.com");
+  assert.equal(last.marker.sent_at, "2026-01-02T10:00:00Z");
+});
+
+test("a session never sent anywhere has no last device", () => {
+  assert.equal(lastSentDevice([]), null);
+  assert.equal(lastSentDevice([{ key: "dev-a", name: "Alice", marker: null }]), null);
+  assert.equal(lastSentDevice(undefined), null);
+});
+
+test("the receive form offers Link Google account only for errors linking fixes", () => {
+  const expired = "Your Google sign-in expired. Link your account again to use Cloud drop.";
+  assert.equal(cloudLinkNote(expired), expired, "an expired sign-in (invalid_grant) says so in the panel");
+  assert.match(cloudLinkNote(CLOUD_DROP_NOT_LINKED), /No Google account is linked/);
+  assert.equal(cloudLinkNote("Couldn't reach the relay at ws://x."), null);
+  assert.equal(cloudLinkNote(null), null, "a passing pre-flight hides the panel");
+});
+
+test("the sender's Cloud drop card: joined -> requested -> granted -> downloaded", () => {
+  const tr = { status: "waiting", cloudStep: "waiting" };
+  applyCloudEvent(tr, "joined");
+  assert.equal(tr.cloudStep, "joined");
+  assert.equal(tr.receiverJoined, true);
+  applyCloudEvent(tr, "requested", { email: "bob@example.com" });
+  assert.equal(tr.cloudStep, "requested");
+  assert.equal(tr.accessRequest.email, "bob@example.com");
+  applyCloudEvent(tr, "joined"); // a late duplicate never moves it back
+  assert.equal(tr.cloudStep, "requested");
+  applyCloudEvent(tr, "granted", { email: "bob@example.com" });
+  assert.equal(tr.cloudStep, "approved");
+  assert.equal(tr.accessRequest, null);
+  assert.equal(tr.grantedEmail, "bob@example.com");
+  applyCloudEvent(tr, "downloaded");
+  assert.equal(tr.cloudStep, "downloaded");
+  assert.equal(tr.status, "done");
+  applyCloudEvent(tr, "ended"); // the receiver closing afterwards changes nothing
+  assert.equal(tr.status, "done");
+});
+
+test("a declined request ends the transfer; a receiver who leaves before asking is an error", () => {
+  const declined = applyCloudEvent({ status: "waiting", cloudStep: "requested" }, "declined", { email: "eve@example.com" });
+  assert.equal(declined.status, "done");
+  assert.equal(declined.declinedEmail, "eve@example.com");
+  const left = applyCloudEvent({ status: "waiting", cloudStep: "joined" }, "ended");
+  assert.equal(left.status, "error");
+  assert.match(left.errorText, /disconnected before getting access/);
+  const granted = applyCloudEvent({ status: "waiting", cloudStep: "approved" }, "ended");
+  assert.equal(granted.status, "done", "after a grant, the receiver closing is the normal end");
+  const failed = applyCloudEvent({ status: "waiting", cloudStep: "waiting" }, "failed", { message: "No one entered this code." });
+  assert.equal(failed.status, "error");
+  assert.equal(failed.errorText, "No one entered this code.");
+});
+
+test("a project without run instructions fails Run with one line for the sender, no raw cause", () => {
+  const raw =
+    "This project arrived without run instructions (no docker-compose.yml), so LocalSync doesn't know how to build or run it. Ask the sender to finish Setup for this project in LocalSync (it creates the run instructions for them) and send it again.: No such file or directory (os error 2)";
+  const line = plainRunError(raw);
+  assert.equal(line, "This project arrived without run instructions. Ask the sender to finish Setup for it in LocalSync and send it again.");
+  assert.ok(!line.includes("os error"));
+  assert.equal(plainRunError("Podman isn't running."), "Podman isn't running.", "other errors are shown as they are");
+  assert.equal(plainRunError(""), "");
+});
