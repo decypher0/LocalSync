@@ -66,7 +66,41 @@ pub(crate) fn save_in(dir: &Path, tokens: &TokenSet) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join(FILE_NAME);
     let bytes = serde_json::to_vec_pretty(tokens)?;
-    write_private(&path, &bytes)
+    write_private(&path, &bytes)?;
+    // A fresh sign-in settles any earlier "sign-in expired".
+    let _ = std::fs::remove_file(dir.join(RELINK_FILE_NAME));
+    Ok(())
+}
+
+const RELINK_FILE_NAME: &str = "google_relink_needed";
+
+/// The account whose sign-in expired (its token was deleted), until it is
+/// linked again - so Settings can say "sign-in expired" rather than just
+/// "not linked".
+pub fn relink_needed() -> Result<Option<String>> {
+    relink_needed_in(&default_dir()?)
+}
+
+pub(crate) fn relink_needed_in(dir: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(dir.join(RELINK_FILE_NAME)) {
+        Ok(email) => Ok(Some(email.trim().to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).context("reading the Google re-link marker"),
+    }
+}
+
+pub(crate) fn mark_relink_needed_in(dir: &Path, email: &str) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::write(dir.join(RELINK_FILE_NAME), email).context("writing the Google re-link marker")
+}
+
+/// Unlinking on purpose is not an expired sign-in.
+pub fn clear_relink_needed() -> Result<()> {
+    match std::fs::remove_file(default_dir()?.join(RELINK_FILE_NAME)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("removing the Google re-link marker"),
+    }
 }
 
 pub(crate) fn clear_in(dir: &Path) -> Result<()> {
