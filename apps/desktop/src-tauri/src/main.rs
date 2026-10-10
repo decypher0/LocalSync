@@ -291,6 +291,7 @@ fn main() {
             commands::open_local_url,
             commands::unlink_google_account,
             commands::start_cloud_drop_session,
+            commands::cancel_cloud_drop,
             commands::respond_to_cloud_access_request,
             commands::request_cloud_drop_access,
             commands::load_session_history,
