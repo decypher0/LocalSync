@@ -57,7 +57,9 @@ pub fn init_repo(folder: &Path) -> Result<(), String> {
             write().map_err(|e| plain_error(&e.to_string()))?;
         }
     }
-    git(&["add", "-A"])?;
+    // Only this folder: if it sits inside a larger repository with no commits
+    // yet, a bare `add -A` would stage that whole repository's tree.
+    git(&["add", "-A", "--", "."])?;
     git(&[
         "-c", "user.name=LocalSync", "-c", "user.email=localsync@localhost",
         "commit", "-q", "--no-verify", "--no-gpg-sign", "--allow-empty", "-m", "Project files (set up by LocalSync)",
@@ -190,6 +192,20 @@ mod tests {
         project(p);
         init_repo(p).unwrap();
         assert_eq!(git_out(p, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    }
+
+    #[test]
+    fn inside_a_larger_repo_with_no_commits_only_this_folder_is_committed() {
+        let outer = tempfile::tempdir().unwrap();
+        git_out(outer.path(), &["init", "-q"]);
+        std::fs::write(outer.path().join("someone-elses-file.txt"), "not part of the project").unwrap();
+        let p = outer.path().join("project");
+        std::fs::create_dir(&p).unwrap();
+        project(&p);
+        init_repo(&p).unwrap();
+        let committed = git_out(outer.path(), &["ls-files"]);
+        assert!(!committed.contains("someone-elses-file.txt"), "nothing outside the chosen folder: {committed}");
+        assert!(committed.contains("project/app.py"), "{committed}");
     }
 
     #[cfg(unix)]
