@@ -38,6 +38,14 @@ pub struct CloudDropUpload {
     /// What was uploaded, and from which sender session - recorded on that
     /// session as a device once the receiver is granted access.
     pub delivery: CloudDelivery,
+    /// The Google account access was granted to (`None` until then) - what
+    /// a download confirmation, which carries no email, records.
+    pub granted_to: Option<String>,
+    /// Set by whichever of the grant and the download confirmation records
+    /// this delivery first, so it counts once. Shared (not a plain bool) so
+    /// the grant still sees it if the receiver's side closed - and this
+    /// entry went - in between.
+    pub recorded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A Cloud drop upload of one sender session's artifact: enough to record
