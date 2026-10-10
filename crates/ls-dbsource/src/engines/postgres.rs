@@ -166,7 +166,7 @@ fn quoted_table_arg(name: &str) -> Result<String> {
 fn missing_pg_dump_hint(e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
         let hint = if cfg!(target_os = "linux") {
-            "run scripts/setup-linux-deps.sh (it installs postgresql-client), or `sudo apt install postgresql-client`"
+            "install it with `sudo apt install postgresql-client` (or your distro's PostgreSQL client package)"
         } else if cfg!(target_os = "macos") {
             "install it with `brew install postgresql`"
         } else {
