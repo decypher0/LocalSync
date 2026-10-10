@@ -204,11 +204,25 @@ pub fn is_memory_limit_unsupported(output: &str) -> bool {
     output.contains("memory.max") && (output.contains("No such file or directory") || output.contains("Permission denied"))
 }
 
+/// Podman lost its service partway through a run (the gate passed, possibly
+/// from its cache): forget the cached pass and point at Setup, which tells a
+/// stuck service from a stopped machine and offers the fix.
+pub fn podman_unreachable() -> String {
+    readiness::invalidate_probe_cache();
+    format!(
+        "{}: Podman can't reach its service inside its virtual machine.\nOpen Setup in LocalSync to fix it.",
+        readiness::NOT_READY_PREFIX
+    )
+}
+
 /// A failed `up` with that cause gets the plain explanation on top; the raw
 /// output is kept underneath for anyone diagnosing it.
 fn explain_up_failure(e: anyhow::Error) -> anyhow::Error {
-    if is_memory_limit_unsupported(&format!("{e:#}")) {
+    let text = format!("{e:#}");
+    if is_memory_limit_unsupported(&text) {
         e.context(MEMORY_LIMIT_UNSUPPORTED)
+    } else if readiness::is_socket_error(&text) {
+        e.context(podman_unreachable())
     } else {
         e
     }
@@ -641,6 +655,15 @@ mod tests {
         assert!(msg.starts_with(MEMORY_LIMIT_UNSUPPORTED), "{msg}");
         assert!(msg.contains("memory.max"), "the raw cause stays available: {msg}");
         assert!(MEMORY_LIMIT_UNSUPPORTED.contains("WSL") && MEMORY_LIMIT_UNSUPPORTED.contains("2.x"));
+    }
+
+    #[test]
+    fn a_lost_podman_socket_mid_run_points_at_setup() {
+        let raw = anyhow::anyhow!("Error: unable to connect to Podman socket: failed to connect: ssh: rejected: connect failed (open failed)")
+            .context("podman-compose up failed");
+        let msg = format!("{:#}", explain_up_failure(raw));
+        assert!(msg.starts_with(readiness::NOT_READY_PREFIX) && msg.contains("Open Setup"), "{msg}");
+        assert!(msg.contains("ssh: rejected"), "{msg}");
     }
 
     #[test]
