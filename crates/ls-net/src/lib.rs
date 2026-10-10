@@ -67,6 +67,7 @@ use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::stats::StatsReportType;
 
@@ -198,6 +199,23 @@ pub struct DataChannelConn {
     // Kept alive for the lifetime of the connection; dropping it tears down
     // ICE/DTLS/SCTP. Never read directly except by `connection_path`.
     _pc: Arc<RTCPeerConnection>,
+}
+
+impl DataChannelConn {
+    /// Closes the connection now, so the other side sees it end at once
+    /// (dropping it alone leaves them waiting until ICE gives up). Waits a
+    /// moment first for anything still being sent to go out.
+    pub async fn close(&self) {
+        for dc in [&self.control_dc, &self.dc] {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while dc.buffered_amount().await > 0 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        let _ = self.control_dc.close().await;
+        let _ = self.dc.close().await;
+        let _ = self._pc.close().await;
+    }
 }
 
 /// A small session-level signal exchanged over [`DataChannelConn`]'s control
@@ -412,12 +430,45 @@ fn wire_data_channel(
     }));
 
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Bytes>();
+    // The sender half is dropped when the channel closes (the peer closed it,
+    // or the connection died - see `close_when_failed`), so a waiting recv
+    // ends with an error instead of hanging forever. Messages already queued
+    // are still delivered first.
+    let tx = Arc::new(StdMutex::new(Some(msg_tx)));
+    let on_message_tx = tx.clone();
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let _ = msg_tx.send(msg.data);
+        if let Ok(guard) = on_message_tx.lock() {
+            if let Some(t) = guard.as_ref() {
+                let _ = t.send(msg.data);
+            }
+        }
+        Box::pin(async {})
+    }));
+    dc.on_close(Box::new(move || {
+        if let Ok(mut guard) = tx.lock() {
+            guard.take();
+        }
         Box::pin(async {})
     }));
 
     (open_rx, msg_rx)
+}
+
+/// When the connection dies (the peer vanished and ICE gave up), close it:
+/// its data channels then close, and anything waiting on them returns an
+/// error instead of hanging forever.
+fn close_when_failed(pc: &Arc<RTCPeerConnection>) {
+    let weak = Arc::downgrade(pc);
+    pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+        if state == RTCPeerConnectionState::Failed {
+            if let Some(pc) = weak.upgrade() {
+                tokio::spawn(async move {
+                    let _ = pc.close().await;
+                });
+            }
+        }
+        Box::pin(async {})
+    }));
 }
 
 /// Connects to the signaling server as the WebRTC offerer: creates the data
@@ -438,6 +489,7 @@ pub async fn connect_as_sender(signaling_url: &str, room_code: &str) -> Result<D
 async fn connect_as_sender_inner(signaling_url: &str, room_code: &str) -> Result<DataChannelConn> {
     let api = build_api()?;
     let pc = Arc::new(api.new_peer_connection(ice_config()).await?);
+    close_when_failed(&pc);
     log::info!("sender: connecting to signaling server {signaling_url} (room {room_code})");
     let (signaling, mut inbound_rx) = SignalingClient::connect(signaling_url, room_code).await?;
     log::info!("sender: connected to signaling server");
@@ -524,6 +576,7 @@ async fn connect_as_receiver_inner(
 ) -> Result<DataChannelConn> {
     let api = build_api()?;
     let pc = Arc::new(api.new_peer_connection(ice_config()).await?);
+    close_when_failed(&pc);
     log::info!("receiver: connecting to signaling server {signaling_url} (room {room_code})");
     let (signaling, mut inbound_rx) = SignalingClient::connect(signaling_url, room_code).await?;
     log::info!("receiver: connected to signaling server");

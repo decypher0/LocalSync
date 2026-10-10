@@ -918,7 +918,6 @@ body.lsv-on #storage-panel:not(.hidden) {
   width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 96px); overflow: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
-body.lsv-on #pull-requests:not(:empty) { position: fixed; z-index: 25; left: 50%; transform: translateX(-50%); width: min(720px, calc(100vw - 32px)); bottom: 24px; }
 /* The firewall / app-update banners sit above the views, in the flow: they
    push the page down instead of covering its buttons (an update banner over
    the session page's Run/Stop/Pull buttons swallowed their clicks). */
@@ -1124,3 +1123,13 @@ body.lsv-on #pull-requests:not(:empty) { position: fixed; z-index: 25; left: 50%
 label.is-unavailable { opacity: 0.6; cursor: not-allowed; }
 #settings-panel { position: relative; }
 #settings-panel .settings-close { position: absolute; top: 10px; right: 10px; }
+
+/* Cloud drop card: the code, then the four steps. */
+.cloud-code { font-size: 1.6em; letter-spacing: 0.08em; }
+.cloud-steps { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cloud-step { display: flex; gap: 10px; align-items: flex-start; opacity: 0.6; }
+.cloud-step.is-now, .cloud-step.is-done { opacity: 1; }
+.cloud-step-mark { flex: 0 0 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid currentColor; }
+.cloud-step.is-done .cloud-step-mark { background: var(--green, #3fb950); border-color: transparent; color: #fff; }
+.cloud-step.is-now .cloud-step-mark { border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); }
+.cloud-approve { margin-top: 6px; }
