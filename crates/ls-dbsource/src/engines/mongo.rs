@@ -194,12 +194,12 @@ pub fn list_tables(details: &ConnectionDetails) -> Result<Vec<TableInfo>> {
 /// - a missing `mongodump` binary must say so plainly and point at how to
 /// fix it. MongoDB Database Tools aren't in Debian/Ubuntu/Kali's standard
 /// apt repos at all (unlike PostgreSQL's client package), so the Linux
-/// hint points at the manual-download step `scripts/setup-linux-deps.sh`
-/// documents rather than a plain `apt install`.
+/// hint points at MongoDB's own download page rather than a plain `apt
+/// install` (the repo's scripts/setup-linux-deps.sh isn't shipped with the app).
 fn missing_mongodump_hint(e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
         let hint = if cfg!(target_os = "linux") {
-            "see scripts/setup-linux-deps.sh for how to install MongoDB Database Tools (not in the standard apt repos)"
+            "install MongoDB Database Tools (they include mongodump; they're not in the standard apt repos) from mongodb.com/try/download/database-tools and make sure they're on PATH"
         } else if cfg!(target_os = "macos") {
             "install it with `brew install mongodb-database-tools`"
         } else {
