@@ -77,6 +77,10 @@ fn isolate_data_dir_if_set() {
 /// if loading/verifying fails — a bad preload path is logged to stderr, not
 /// a reason to stop the whole app from starting.
 fn preload_snapshot(state: &AppState) -> Option<commands::IncomingSnapshotInfo> {
+    // A developer shortcut only: release builds never read this env var.
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     let path = std::env::var("LOCALSYNC_PRELOAD_SNAPSHOT").ok()?;
 
     let load = || -> anyhow::Result<commands::IncomingSnapshotInfo> {
@@ -324,6 +328,7 @@ fn main() {
             receiver_session_commands::open_saved_received_session,
             receiver_session_commands::arm_received_session_for_update,
             receiver_session_commands::disarm_received_session_for_update,
+            storage_commands::default_work_dir,
             storage_commands::storage_report,
             storage_commands::clean_up_unused,
             storage_commands::free_session_disk,

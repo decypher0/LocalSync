@@ -17,6 +17,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::ProvisioningLog;
+pub use super::recovery::{FixProgress, RECOVERY_STEPS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +93,13 @@ pub struct StepInfo {
 }
 
 
+/// Consent for the Windows `FunctionalCheck` fix ("Fix automatically" when
+/// Podman's service is stuck, else "Restart WSL and retry"); see
+/// `super::recovery` for the sequence.
+pub const WSL_RESTART_CONSENT: &str = "This runs `wsl --shutdown`, which stops every running WSL distribution, not just \
+    Podman's (for example Ubuntu or Docker Desktop, so save any work open in them first), then starts Podman's machine \
+    again, waits for Podman to answer and repeats the test.";
+
 pub fn step_info(step: SetupStep) -> StepInfo {
     info_for(this_os(), step, &on_path)
 }
@@ -153,14 +161,19 @@ fn info_for(os: TargetOs, step: SetupStep, has: &dyn Fn(&str) -> bool) -> StepIn
         ),
         (FunctionalCheck, os) => (
             "Test container",
-            None,
+            // Windows: the WSL-backed machine can report Running while every
+            // container start fails or hangs; a WSL restart clears that.
+            (os == TargetOs::Windows).then(|| WSL_RESTART_CONSENT.to_string()),
             false,
             format!(
                 "Run `podman run --rm --memory 1g docker.io/library/busybox true` in a terminal; it should finish without \
                  an error. If it fails, the details below show why.{}",
                 match os {
-                    // The one known cause seen in the field (docs/troubleshooting.md).
-                    TargetOs::Windows => " If the error mentions `memory.max`, the WSL 3.0.1 update (kernel 6.18) broke \
+                    // The known causes seen in the field (docs/troubleshooting.md).
+                    TargetOs::Windows => " If it says Podman's service is stuck (`ssh: rejected: connect failed`), run \
+                        these in PowerShell: `wsl --shutdown`, then `wsl -l -v` until every distribution shows Stopped, \
+                        then `podman machine start`, then `podman info` (it should now succeed), and press Retry. Don't \
+                        recreate the machine (`podman machine rm`/`init`): that doesn't fix it. If the error mentions `memory.max`, the WSL 3.0.1 update (kernel 6.18) broke \
                         memory limits for Podman: check `wsl --version`, roll WSL back to a 2.x release from the WSL \
                         GitHub releases page, run `wsl --shutdown`, then Recheck.",
                     TargetOs::Linux => " If the error mentions `memory.max`, your system isn't delegating cgroup memory \
@@ -330,10 +343,13 @@ async fn check_machine(log: &ProvisioningLog) -> StepCheck {
 /// Performs `step`'s system-changing fix. The caller must have shown
 /// `step_info(step).consent` and got the person's explicit OK first. Logs
 /// every command and its real output to `log`; errors carry the real output.
-pub async fn fix_step(step: SetupStep, log: &ProvisioningLog) -> Result<()> {
+///
+/// `progress` gets per-step updates from fixes that have steps (today only
+/// the Windows `FunctionalCheck` recovery, see `super::recovery`).
+pub async fn fix_step(step: SetupStep, log: &ProvisioningLog, progress: &(dyn Fn(FixProgress) + Send + Sync)) -> Result<()> {
     log.info(&format!("setup: fixing {step:?} on {:?}", this_os()));
     prepare_path(log);
-    let result = os_fix(step, log).await;
+    let result = os_fix(step, log, progress).await;
     match &result {
         Ok(()) => {
             log.info(&format!("setup: {step:?} fixed"));
@@ -349,18 +365,19 @@ fn no_fix(step: SetupStep) -> Result<()> {
 }
 
 #[cfg(windows)]
-async fn os_fix(step: SetupStep, log: &ProvisioningLog) -> Result<()> {
+async fn os_fix(step: SetupStep, log: &ProvisioningLog, progress: &(dyn Fn(FixProgress) + Send + Sync)) -> Result<()> {
     use super::windows_impl as w;
     match step {
         SetupStep::PodmanInstalled => w::fix_podman_installed(log).await,
         SetupStep::WslEnabled => w::fix_wsl(log).await,
         SetupStep::MachineReady => w::fix_machine(log).await,
+        SetupStep::FunctionalCheck => w::fix_restart_wsl(log, progress).await,
         _ => no_fix(step),
     }
 }
 
 #[cfg(target_os = "macos")]
-async fn os_fix(step: SetupStep, log: &ProvisioningLog) -> Result<()> {
+async fn os_fix(step: SetupStep, log: &ProvisioningLog, _: &(dyn Fn(FixProgress) + Send + Sync)) -> Result<()> {
     use super::macos_impl as m;
     match step {
         SetupStep::PodmanInstalled => m::fix_podman_installed(log).await,
@@ -370,7 +387,7 @@ async fn os_fix(step: SetupStep, log: &ProvisioningLog) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-async fn os_fix(step: SetupStep, log: &ProvisioningLog) -> Result<()> {
+async fn os_fix(step: SetupStep, log: &ProvisioningLog, _: &(dyn Fn(FixProgress) + Send + Sync)) -> Result<()> {
     match step {
         SetupStep::PodmanInstalled => super::linux_impl::fix_podman_installed(log).await,
         _ => no_fix(step),
@@ -411,7 +428,8 @@ mod tests {
                     let i = info_for(os, step, has);
                     assert_eq!(i.step, step);
                     assert!(!i.title.is_empty() && !i.manual_instructions.is_empty(), "{os:?} {step:?}");
-                    let expect_none = matches!(step, FunctionalCheck | RestartAfterWsl)
+                    let expect_none = step == RestartAfterWsl
+                        || (step == FunctionalCheck && os != TargetOs::Windows)
                         || (os == TargetOs::Linux && step == PodmanInstalled && !has_pm);
                     assert_eq!(i.consent.is_none(), expect_none, "{os:?} {step:?} has_pm={has_pm}");
                     if let Some(c) = &i.consent {
@@ -425,6 +443,13 @@ mod tests {
         assert!(!info_for(TargetOs::Macos, PodmanInstalled, &nothing).needs_admin);
         assert!(info_for(TargetOs::Linux, PodmanInstalled, &apt_pkexec).needs_admin);
         assert!(!info_for(TargetOs::Linux, PodmanInstalled, &nothing).needs_admin);
+        // "Restart WSL and retry": Windows only, warns that it stops every distro.
+        let win = info_for(TargetOs::Windows, FunctionalCheck, &nothing);
+        assert_eq!(win.consent.as_deref(), Some(WSL_RESTART_CONSENT));
+        assert!(!win.needs_admin);
+        assert!(WSL_RESTART_CONSENT.contains("wsl --shutdown") && WSL_RESTART_CONSENT.contains("every running WSL distribution"));
+        assert!(WSL_RESTART_CONSENT.contains("Ubuntu") && WSL_RESTART_CONSENT.contains("Docker Desktop"));
+        assert!(!WSL_RESTART_CONSENT.contains("  "), "{WSL_RESTART_CONSENT}");
     }
 
     fn plan(bins: &[&str]) -> LinuxInstallPlan {
@@ -483,15 +508,16 @@ mod tests {
     fn futures_are_send(log: &'static ProvisioningLog) {
         fn assert_send<T: Send>(_: T) {}
         assert_send(check_step(PodmanInstalled, log));
-        assert_send(fix_step(PodmanInstalled, log));
+        assert_send(fix_step(PodmanInstalled, log, &|_| {}));
     }
 
     #[tokio::test]
     async fn fixes_without_automation_error() {
         let dir = tempfile::tempdir().unwrap();
         let log = ProvisioningLog::open_in(dir.path()).unwrap();
-        assert!(fix_step(FunctionalCheck, &log).await.is_err());
-        assert!(fix_step(RestartAfterWsl, &log).await.is_err());
+        #[cfg(not(windows))] // on Windows this is the real `wsl --shutdown` fix
+        assert!(fix_step(FunctionalCheck, &log, &|_| {}).await.is_err());
+        assert!(fix_step(RestartAfterWsl, &log, &|_| {}).await.is_err());
         #[cfg(not(windows))]
         assert!(restart_computer().is_err());
     }
@@ -535,7 +561,7 @@ mod tests {
     async fn real_machine_fix_is_noop_when_running() {
         let dir = tempfile::tempdir().unwrap();
         let log = ProvisioningLog::open_in(dir.path()).unwrap();
-        let r = fix_step(MachineReady, &log).await;
+        let r = fix_step(MachineReady, &log, &|_| {}).await;
         println!("{}", std::fs::read_to_string(log.path()).unwrap());
         assert!(r.is_ok(), "{r:?}");
     }
@@ -553,6 +579,11 @@ mod manual_text_tests {
         let none = |_: &str| false;
         let win = info_for(TargetOs::Windows, SetupStep::FunctionalCheck, &none).manual_instructions;
         assert!(win.contains("WSL 3.0.1") && win.contains("2.x") && win.contains("Recheck"), "{win}");
+        // The stuck-service recovery, by hand, in order, and not recreating the machine.
+        let order = ["`wsl --shutdown`", "`wsl -l -v`", "Stopped", "`podman machine start`", "`podman info`", "Retry"];
+        let pos: Vec<usize> = order.iter().map(|n| win.find(n).unwrap_or_else(|| panic!("{n} missing: {win}"))).collect();
+        assert!(pos.windows(2).all(|w| w[0] < w[1]), "{win}");
+        assert!(win.contains("Don't recreate the machine"), "{win}");
         let linux = info_for(TargetOs::Linux, SetupStep::FunctionalCheck, &none).manual_instructions;
         assert!(linux.contains("memory.max") && linux.contains("Rootless Podman"), "{linux}");
         let mac = info_for(TargetOs::Macos, SetupStep::FunctionalCheck, &none).manual_instructions;
