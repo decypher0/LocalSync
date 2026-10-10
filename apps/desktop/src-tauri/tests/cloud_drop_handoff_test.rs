@@ -1,5 +1,5 @@
-//! Cloud drop's send side, after the Drive upload (`begin_cloud_drop_handoff`
-//! - Drive and OAuth can't run here, the handoff can): the code must come back
+//! Cloud drop's send side, after the Drive upload (`begin_cloud_drop_handoff`:
+//! Drive and OAuth can't run here, the handoff can): the code must come back
 //! straight away, with nobody connected. It used to wait for the receiver
 //! first - who could only connect with the code it never returned - until the
 //! 5-minute timeout. Real local relay + WebRTC between two ends on one box.
