@@ -371,7 +371,10 @@ pub async fn send_project_session<R: tauri::Runtime>(
     log::info!("send_project_session: connecting, session={} device={device_key}", session.id);
     let conn = ls_net::connect_as_sender(&request.signaling_url, &request.room_code)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::warn!("send_project_session: connect_as_sender failed: {e:#}");
+            crate::commands::connect_error(&e, &request.signaling_url)
+        })?;
     if request.require_accept {
         await_recipient_consent(&conn, request.sender_name.clone()).await?;
     }

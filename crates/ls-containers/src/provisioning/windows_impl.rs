@@ -592,6 +592,23 @@ pub(crate) async fn fix_machine(log: &ProvisioningLog) -> Result<()> {
     verify_podman_info(log, false).await
 }
 
+/// `FunctionalCheck` fix ("Restart WSL and retry", only after the person
+/// agreed that every WSL distro stops): the machine can report Running while
+/// every container start fails or hangs (see `verify_podman_info`), and a
+/// `wsl --shutdown` + `podman machine start` is what clears it. The wizard
+/// re-runs the test container afterwards.
+pub(crate) async fn fix_restart_wsl(log: &ProvisioningLog) -> Result<()> {
+    let out = run_logged(log, "wsl", &["--shutdown"]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`wsl --shutdown` failed (exit code {:?}):\n{}{}",
+        out.status.code(),
+        decode_wsl_output(&out.stdout),
+        decode_wsl_output(&out.stderr)
+    );
+    ensure_machine_running(log).await
+}
+
 pub(crate) fn restart_computer() -> Result<()> {
     let out = sync_command("shutdown").args(["/r", "/t", "5", "/c", "LocalSync setup"]).output()?;
     anyhow::ensure!(
