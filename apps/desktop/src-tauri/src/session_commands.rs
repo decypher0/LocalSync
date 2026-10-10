@@ -450,6 +450,21 @@ pub async fn cloud_drop_payload(state: &AppState, session_id: &str) -> Result<(S
 /// session's Devices, "Last sent", "Last known device" and Push update all
 /// see it. Returns the session's updated view; `None` if the session was
 /// closed meanwhile.
+///
+/// Each call is one delivery (a history entry). The grant and the download
+/// confirmation both lead here, through
+/// `commands::record_cloud_drop_delivery`, which lets only the first of the
+/// two through per upload.
+///
+/// Push update to a cloud device: there's no connection to push a diff over,
+/// so it is a new Cloud drop of the session - `start_cloud_drop_session`
+/// again, which uploads the current whole artifact (never a diff against
+/// the marker, so the receiver needs nothing it had before) under a new
+/// code; once the receiver is granted again this moves the same
+/// `cloud:<email>` device's marker and adds to its history. Its marker holds
+/// the plain artifact's commits, so `project_push_status` /
+/// `is_up_to_date` compare a cloud device exactly like any other.
+/// (`send_project_session` can't reach a `cloud:` device: it has no room.)
 pub fn record_cloud_delivery(
     state: &AppState,
     delivery: &crate::state::CloudDelivery,
