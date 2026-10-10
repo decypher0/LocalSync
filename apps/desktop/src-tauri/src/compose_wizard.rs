@@ -55,13 +55,16 @@ pub struct ProjectInspection {
     /// For a WAR, the Tomcat version its servlet API needs, when the pom says:
     /// "10.1" for `jakarta.*` (or Spring Boot 3), otherwise "9.0" (`javax.*`).
     pub suggested_tomcat: Option<String>,
+    /// `git` itself can't be run: nothing can be sent until it's installed
+    /// (the wizard shows `ls_snapshot::GIT_MISSING`).
+    pub git_missing: bool,
 }
 
 #[tauri::command]
 pub async fn inspect_project(folder_path: String) -> ProjectInspection {
     tauri::async_runtime::spawn_blocking(move || inspect(Path::new(&folder_path)))
         .await
-        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: Vec::new(), war_packaging: false, suggested_tomcat: None })
+        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: Vec::new(), war_packaging: false, suggested_tomcat: None, git_missing: false })
 }
 
 fn inspect(folder: &Path) -> ProjectInspection {
@@ -78,6 +81,7 @@ fn inspect(folder: &Path) -> ProjectInspection {
         maven_modules: pom.as_deref().map(maven_modules).unwrap_or_default(),
         war_packaging,
         suggested_tomcat: war_packaging.then(|| pom.as_deref().map_or("9.0", tomcat_for_pom).to_string()),
+        git_missing: !ls_snapshot::git_available(),
     }
 }
 
@@ -489,18 +493,18 @@ mod tests {
         let p = dir.path();
 
         // Not a repo, no compose file.
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false });
 
         // Repo with no commits yet.
         git(p, &["init", "-q"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false });
 
         // A compose file (even untracked) is seen; commits are seen after one exists.
         std::fs::write(p.join("docker-compose.yml"), "services: {}\n").unwrap();
         assert!(inspect(p).has_compose);
         git(p, &["add", "-A"]);
         git(p, &["commit", "-q", "-m", "init"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true, maven_modules: vec![], war_packaging: false, suggested_tomcat: None });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false });
     }
 
     #[test]

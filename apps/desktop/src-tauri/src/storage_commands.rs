@@ -19,8 +19,8 @@
 //!
 //! Work dirs scanned: every listed received session's `work_dir`, every work
 //! dir a Run ever used (`work-dirs.json`, appended by `run_received_session`
-//! and by every scan, so a closed session's folder is still found), and the
-//! UI's default `/tmp/localsync-work`.
+//! and by every scan, so a closed session's folder is still found), the UI's
+//! default ([`default_work_dir`]) and the old default `/tmp/localsync-work`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -31,12 +31,28 @@ use tauri::State;
 use crate::received_session::ReceivedSession;
 use crate::state::AppState;
 
+/// The default work dir on macOS/Linux, and the old one on Windows too (where
+/// it meant `C:\tmp\localsync-work`) - still scanned for leftovers.
 const DEFAULT_WORK_DIR: &str = "/tmp/localsync-work";
 const WORK_DIRS_FILE: &str = "work-dirs.json";
 /// A dump the wizard just exported isn't in any session until Send creates
 /// one; this long after, an unreferenced export is a leftover.
 /// ponytail: age guess; tie exports to a wizard id if a day ever proves short.
 const EXPORT_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// The receive work folder the UI starts with: `<local data dir>/localsync/work`
+/// (`%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS,
+/// `~/.local/share` on Linux) - per-user, writable, and kept across reboots,
+/// unlike `/tmp`, which a reboot empties, so a received session could no
+/// longer be run again. The old `/tmp/localsync-work` default is still
+/// scanned by the Storage view for leftovers.
+#[tauri::command]
+pub fn default_work_dir() -> String {
+    match dirs::data_local_dir() {
+        Some(d) => d.join("localsync").join("work").display().to_string(),
+        None => DEFAULT_WORK_DIR.to_string(),
+    }
+}
 
 fn app_data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("localsync"))
@@ -243,7 +259,7 @@ fn known_work_dirs(listed: &Listed) -> Vec<PathBuf> {
         .iter()
         .map(String::as_str)
         .chain(session_dirs)
-        .chain([DEFAULT_WORK_DIR])
+        .chain([DEFAULT_WORK_DIR, default_work_dir().as_str()])
         .filter(|d| !d.trim().is_empty())
         .map(PathBuf::from)
         .filter(|d| d.is_dir() && seen.insert(canon(d)))
