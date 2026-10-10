@@ -58,13 +58,19 @@ pub struct ProjectInspection {
     /// `git` itself can't be run: nothing can be sent until it's installed
     /// (the wizard shows `ls_snapshot::GIT_MISSING`).
     pub git_missing: bool,
+    /// What kind of project this looks like, from file names only (nothing
+    /// is run): "compose", "java-maven", "java-gradle", "node", "python",
+    /// "go", "rust", "php", "ruby", "dotnet" or "unknown". The runtime part
+    /// (before any "-") is what the wizard looks up in the catalog's
+    /// runtimes to tell a supported stack from one that isn't yet.
+    pub detected_stack: &'static str,
 }
 
 #[tauri::command]
 pub async fn inspect_project(folder_path: String) -> ProjectInspection {
     tauri::async_runtime::spawn_blocking(move || inspect(Path::new(&folder_path)))
         .await
-        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: Vec::new(), war_packaging: false, suggested_tomcat: None, git_missing: false })
+        .unwrap_or(ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: Vec::new(), war_packaging: false, suggested_tomcat: None, git_missing: false, detected_stack: "unknown" })
 }
 
 fn inspect(folder: &Path) -> ProjectInspection {
@@ -82,6 +88,41 @@ fn inspect(folder: &Path) -> ProjectInspection {
         war_packaging,
         suggested_tomcat: war_packaging.then(|| pom.as_deref().map_or("9.0", tomcat_for_pom).to_string()),
         git_missing: !ls_snapshot::git_available(),
+        detected_stack: detect_stack(folder),
+    }
+}
+
+/// See [`ProjectInspection::detected_stack`]. The folder's own top-level file
+/// names, first match wins: a project's own docker-compose.yml is used as-is
+/// whatever is inside it.
+fn detect_stack(folder: &Path) -> &'static str {
+    let names: Vec<String> = std::fs::read_dir(folder)
+        .map(|rd| rd.flatten().filter(|e| e.path().is_file()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    let has = |n: &str| names.iter().any(|f| f == n);
+    let ext = |x: &str| names.iter().any(|f| f.ends_with(x));
+    if has("docker-compose.yml") {
+        "compose"
+    } else if has("pom.xml") {
+        "java-maven"
+    } else if has("build.gradle") || has("build.gradle.kts") {
+        "java-gradle"
+    } else if has("package.json") {
+        "node"
+    } else if has("requirements.txt") || has("pyproject.toml") || has("Pipfile") || ext(".py") {
+        "python"
+    } else if has("go.mod") {
+        "go"
+    } else if has("Cargo.toml") {
+        "rust"
+    } else if has("composer.json") {
+        "php"
+    } else if has("Gemfile") {
+        "ruby"
+    } else if ext(".csproj") || ext(".fsproj") || ext(".sln") {
+        "dotnet"
+    } else {
+        "unknown"
     }
 }
 
@@ -496,18 +537,18 @@ mod tests {
         let p = dir.path();
 
         // Not a repo, no compose file.
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: false, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false, detected_stack: "unknown" });
 
         // Repo with no commits yet.
         git(p, &["init", "-q"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: false, is_git_repo: true, has_commits: false, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false, detected_stack: "unknown" });
 
         // A compose file (even untracked) is seen; commits are seen after one exists.
         std::fs::write(p.join("docker-compose.yml"), "services: {}\n").unwrap();
         assert!(inspect(p).has_compose);
         git(p, &["add", "-A"]);
         git(p, &["commit", "-q", "-m", "init"]);
-        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false });
+        assert_eq!(inspect(p), ProjectInspection { has_compose: true, is_git_repo: true, has_commits: true, maven_modules: vec![], war_packaging: false, suggested_tomcat: None, git_missing: false, detected_stack: "compose" });
     }
 
     #[test]
@@ -566,6 +607,44 @@ mod tests {
         assert!(!inspect(dir.path()).war_packaging, "a commented-out packaging doesn't count");
         std::fs::remove_file(dir.path().join("pom.xml")).unwrap();
         assert!(!inspect(dir.path()).war_packaging);
+    }
+
+    #[test]
+    fn detected_stack_comes_from_file_names() {
+        let stack = |files: &[(&str, &str)]| {
+            let dir = tempfile::tempdir().unwrap();
+            for (name, body) in files {
+                std::fs::write(dir.path().join(name), body).unwrap();
+            }
+            inspect(dir.path()).detected_stack
+        };
+        assert_eq!(stack(&[]), "unknown", "an empty folder");
+        assert_eq!(stack(&[("README.md", "# hi"), ("index.html", "<p>")]), "unknown");
+        // A Flask app as GitHub's "Download ZIP" gives it.
+        assert_eq!(stack(&[("app.py", "from flask import Flask"), ("requirements.txt", "flask\n")]), "python");
+        assert_eq!(stack(&[("main.py", "print(1)")]), "python", "any top-level .py");
+        assert_eq!(stack(&[("pyproject.toml", "")]), "python");
+        assert_eq!(stack(&[("Pipfile", "")]), "python");
+        assert_eq!(stack(&[("pom.xml", "<project/>")]), "java-maven");
+        assert_eq!(stack(&[("build.gradle", "")]), "java-gradle");
+        assert_eq!(stack(&[("build.gradle.kts", "")]), "java-gradle");
+        assert_eq!(stack(&[("package.json", "{}")]), "node");
+        assert_eq!(stack(&[("go.mod", "module x")]), "go");
+        assert_eq!(stack(&[("Cargo.toml", "")]), "rust");
+        assert_eq!(stack(&[("composer.json", "{}")]), "php");
+        assert_eq!(stack(&[("Gemfile", "")]), "ruby");
+        assert_eq!(stack(&[("Api.csproj", "")]), "dotnet");
+        // The project's own compose file wins over whatever else is there.
+        assert_eq!(stack(&[("docker-compose.yml", "services: {}"), ("package.json", "{}"), ("pom.xml", "<project/>")]), "compose");
+        assert_eq!(stack(&[("pom.xml", "<project/>"), ("package.json", "{}")]), "java-maven");
+
+        // Only the folder's own files, never a subfolder's, and a directory
+        // named like a marker file doesn't count.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("frontend")).unwrap();
+        std::fs::write(dir.path().join("frontend/package.json"), "{}").unwrap();
+        std::fs::create_dir(dir.path().join("pom.xml")).unwrap();
+        assert_eq!(inspect(dir.path()).detected_stack, "unknown");
     }
 
     #[test]
