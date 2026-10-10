@@ -1692,7 +1692,17 @@ pub fn google_account_status() -> Result<Option<LinkedAccountInfo>, String> {
 
 #[tauri::command]
 pub fn unlink_google_account() -> Result<(), String> {
-    ls_clouddrop::store::clear_tokens().map_err(|e| e.to_string())
+    ls_clouddrop::store::clear_tokens().map_err(|e| e.to_string())?;
+    // Unlinking on purpose is not an expired sign-in.
+    ls_clouddrop::store::clear_relink_needed().map_err(|e| e.to_string())
+}
+
+/// The account whose Google sign-in expired (Google refused its saved token,
+/// so it was deleted), until it is linked again - `None` otherwise. Lets
+/// Settings say "sign-in expired" instead of a plain "not linked".
+#[tauri::command]
+pub fn google_relink_needed() -> Result<Option<String>, String> {
+    ls_clouddrop::store::relink_needed().map_err(|e| e.to_string())
 }
 
 /// Mirrors `ls_clouddrop::retention::Retention` at the IPC boundary — kept
