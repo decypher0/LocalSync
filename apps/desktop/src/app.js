@@ -2391,7 +2391,7 @@ $("cw-test-btn").addEventListener("click", async () => {
       const fix = cwEl("button", "ghost-btn", "Fix setup");
       fix.type = "button";
       fix.id = "cw-fix-setup-btn";
-      fix.addEventListener("click", () => openSetup());
+      showSetupFixButton(fix, res.error);
       result.append(fix);
     }
     if (res.output_tail) result.append(cwEl("pre", "cw-log", res.output_tail));
@@ -3283,7 +3283,7 @@ function renderReviewPanel(session) {
   // attempt looked like, so switching tabs away mid-Run and back doesn't
   // lose the log or silently drop the error.
   $("run-error").textContent = session.runErrorText || "";
-  $("run-fix-setup-btn").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
+  showSetupFixButton($("run-fix-setup-btn"), session.runErrorText);
   const showRunProgress = session.runInProgress || !!session.runErrorText;
   $("run-progress-wrap").classList.toggle("hidden", !showRunProgress);
   if (showRunProgress) {
@@ -3308,7 +3308,7 @@ function renderResumePanel(session) {
   $("resume-already-running-hint").classList.toggle("hidden", !session.reportedRunning);
 
   $("resume-run-error").textContent = session.runErrorText || "";
-  $("resume-run-fix-setup-btn").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
+  showSetupFixButton($("resume-run-fix-setup-btn"), session.runErrorText);
   const showRunProgress = session.runInProgress || !!session.runErrorText;
   $("resume-run-progress-wrap").classList.toggle("hidden", !showRunProgress);
   if (showRunProgress) {
@@ -3622,7 +3622,7 @@ async function runReceiveSession(session, workDir, ids) {
     session.runErrorText = String(err);
     if (session.id === activeSessionId) {
       $(ids.error).textContent = session.runErrorText;
-      $(ids.fixSetup).classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
+      showSetupFixButton($(ids.fixSetup), session.runErrorText);
       $(ids.progressLabel).textContent = "Failed — see details below.";
       document.querySelector(ids.spinnerSelector)?.classList.add("hidden");
     }
@@ -3755,6 +3755,19 @@ function enterApp() {
 }
 
 const SETUP_ICON = { done: "icon-circle-check", failed: "icon-circle-x" };
+const RECOVERY_STATUS_TEXT = { pending: "waiting", running: "in progress…", done: "done", failed: "failed" };
+const ON_WINDOWS = navigator.userAgent.includes("Windows");
+
+/// The "open setup" button next to a Run / test-run error: shown only for
+/// "Podman isn't ready" errors; for the stuck Podman service on Windows it
+/// reads "Fix automatically" and opens setup straight at that fix (which
+/// still asks for consent first).
+function showSetupFixButton(btn, err) {
+  btn.classList.toggle("hidden", !SetupWizard.isPodmanNotReady(err));
+  const label = SetupWizard.errorFixLabel(err, ON_WINDOWS);
+  (btn.querySelector("span") || btn).textContent = label;
+  btn.onclick = () => openSetup({ autoFix: label === "Fix automatically" });
+}
 
 function renderSetupStep(s) {
   const li = cwEl("li", `setup-step is-${s.status}`);
@@ -3769,6 +3782,15 @@ function renderSetupStep(s) {
   main.append(title);
   const summary = s.summary || (s.status === "checking" ? "Checking…" : "");
   if (summary) main.append(cwEl("p", "setup-step-summary", summary));
+  if (s.step === "functional_check" && setupView.recovery) {
+    const ol = cwEl("ol", "setup-recovery");
+    for (const r of setupView.recovery) {
+      const item = cwEl("li", `is-${r.status}`, r.label);
+      item.append(cwEl("span", "setup-recovery-status", ` - ${RECOVERY_STATUS_TEXT[r.status] || r.status}`));
+      ol.append(item);
+    }
+    main.append(ol);
+  }
   if (s.details) {
     const open = setupUi.openDetails.has(s.step);
     const toggle = cwEl("button", "link-btn setup-details-toggle");
@@ -3842,6 +3864,11 @@ listen("setup-step", (evt) => {
   SetupWizard.applyEvent(setupView, evt.payload);
   renderSetup();
 });
+listen("setup-fix-progress", (evt) => {
+  if (!setupView || setupView.phase !== "fixing") return;
+  SetupWizard.applyFixProgress(setupView, evt.payload);
+  renderSetup();
+});
 listen("setup-progress", (evt) => {
   if (!setupView || setupView.phase !== "fixing") return;
   SetupWizard.applyProgress(setupView, evt.payload);
@@ -3902,8 +3929,10 @@ async function runSetupFix(step) {
 
 /// Startup and every "Fix setup" button land here. The checklist is drawn
 /// from setup_state (file-only, instant) before the real check starts, so
-/// progress made earlier shows straight away.
-async function openSetup({ fromStartup = false } = {}) {
+/// progress made earlier shows straight away. `autoFix` ("Fix automatically"
+/// next to a Run error): if the re-check still finds Podman's service stuck,
+/// go straight to that fix's consent dialog.
+async function openSetup({ fromStartup = false, autoFix = false } = {}) {
   showSetupScreen();
   try {
     setupView = SetupWizard.viewFromState(await invoke("setup_state"));
@@ -3923,7 +3952,11 @@ async function openSetup({ fromStartup = false } = {}) {
     return;
   }
   $("setup-checklist-title").focus();
-  verifySetup();
+  await verifySetup();
+  const fc = autoFix && setupView && setupView.phase === "failed" && setupView.steps.find((s) => s.step === "functional_check");
+  if (fc && fc.status === "failed" && fc.consent && SetupWizard.isPodmanStuck(fc.summary)) {
+    openSetupConsent(fc, document.querySelector("#setup-steps .setup-fix-btn"));
+  }
 }
 
 $("setup-start-btn").addEventListener("click", () => {
@@ -3933,8 +3966,6 @@ $("setup-start-btn").addEventListener("click", () => {
   verifySetup();
 });
 $("setup-skip-btn").addEventListener("click", enterApp);
-$("run-fix-setup-btn").addEventListener("click", () => openSetup());
-$("resume-run-fix-setup-btn").addEventListener("click", () => openSetup());
 
 function openSetupConsent(s, returnFocus) {
   setupUi.consentStep = s.step;
