@@ -1133,3 +1133,6 @@ label.is-unavailable { opacity: 0.6; cursor: not-allowed; }
 .cloud-step.is-done .cloud-step-mark { background: var(--green, #3fb950); border-color: transparent; color: #fff; }
 .cloud-step.is-now .cloud-step-mark { border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); }
 .cloud-approve { margin-top: 6px; }
+
+.cloud-link-panel { margin: 10px 0; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 9px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.cloud-link-panel p { margin: 0; }

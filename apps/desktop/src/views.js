@@ -456,6 +456,22 @@
     }
   };
 
+  // A Cloud drop request that never reached the sender is removed (app.js
+  // discardUnstartedCloudRequest): leave its page for the receive form it
+  // came from, where the reason is shown.
+  window.lsvReturnToReceiveForm = function (session) {
+    if (V.session !== session) return;
+    V.session = null;
+    if (V.flow && V.flow.mode === "receive") {
+      V.flow.pending = null;
+      V.flow.phase = "transfer";
+      navigate("new-transfer");
+      showTransferArea("receive");
+    } else {
+      navigate("home");
+    }
+  };
+
   const origApplyReview = window.applyReviewInfoToSession;
   window.applyReviewInfoToSession = function (session, info) {
     origApplyReview(session, info);
