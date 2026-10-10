@@ -90,3 +90,26 @@ pub(crate) async fn recv_sdp(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A wss:// relay URL must reach the network layer (here: connection
+    /// refused on a closed port), not fail up front because TLS support
+    /// wasn't compiled in.
+    #[tokio::test]
+    async fn wss_urls_are_supported() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let err = tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/room"))
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(
+                err,
+                tokio_tungstenite::tungstenite::Error::Url(
+                    tokio_tungstenite::tungstenite::error::UrlError::TlsFeatureNotEnabled
+                )
+            ),
+            "{err}"
+        );
+    }
+}
