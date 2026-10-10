@@ -1467,6 +1467,9 @@ function hideAllDbSubPanels() {
 function renderWizardFolderList() {
   const ul = $("wiz-folder-list");
   ul.innerHTML = "";
+  // Every change to the list is a change to what any error here described.
+  $("wiz-folders-error").textContent = "";
+  FolderCheck.ensureCatalog().then(FolderCheck.renderGuide);
   for (const [i, f] of wizardFolders.entries()) {
     const li = document.createElement("li");
     li.innerHTML = `<span class="mono">${escapeHtml(f.path)}</span>`;
@@ -1481,6 +1484,7 @@ function renderWizardFolderList() {
       renderWizardFolderList();
     });
     li.appendChild(removeBtn);
+    FolderCheck.renderRow(li, f);
     ul.appendChild(li);
   }
 }
@@ -1499,9 +1503,6 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
 
 $("wiz-folders-back-btn").addEventListener("click", () => showWizardStep("wiz-step-mode"));
 
-// Must match ls_snapshot::GIT_MISSING.
-const GIT_MISSING_TEXT = "Git isn't installed - LocalSync needs it to package your project. Install it from git-scm.com and restart LocalSync.";
-
 $("wiz-folders-next-btn").addEventListener("click", async () => {
   if (wizardFolders.length === 0) {
     $("wiz-folders-error").textContent = "Select at least one project folder.";
@@ -1512,25 +1513,28 @@ $("wiz-folders-next-btn").addEventListener("click", async () => {
   for (const f of wizardFolders) delete f.compose;
   // Exactly one folder without a docker-compose.yml of its own: describe how
   // to run it instead (compose wizard). Anything else is the normal wizard.
-  // Every send needs git, so the first folder is always inspected for that.
+  // Every snapshot is built from a commit (compose file or not), so every
+  // folder is inspected for git.
   {
-    const path = wizardFolders[0].path;
-    const count = wizardFolders.length;
+    const folders = wizardFolders.slice();
+    const path = folders[0].path;
+    const count = folders.length;
     $("wiz-folders-next-btn").disabled = true;
     try {
-      const info = await invoke("inspect_project", { folderPath: path });
-      if (wizardFolders.length !== count || wizardFolders[0].path !== path) return; // the list changed meanwhile
+      const infos = await Promise.all(folders.map((f) => invoke("inspect_project", { folderPath: f.path })));
+      if (wizardFolders.length !== count || folders.some((f, i) => wizardFolders[i] !== f)) return; // the list changed meanwhile
+      folders.forEach((f, i) => FolderCheck.update(f, infos[i]));
+      const info = infos[0];
       if (info.git_missing) {
         $("wiz-folders-error").textContent = GIT_MISSING_TEXT;
         return;
       }
+      const uncommitted = infos.findIndex((x) => !x.is_git_repo || !x.has_commits);
+      if (uncommitted >= 0) {
+        $("wiz-folders-error").textContent = FolderCheck.notInGitError(count === 1 ? "this folder" : folders[uncommitted].path);
+        return;
+      }
       if (count === 1 && !info.has_compose) {
-        if (!info.is_git_repo || !info.has_commits) {
-          $("wiz-folders-error").textContent =
-            (info.is_git_repo ? "This folder has no commits yet" : "This folder isn't a git repository") +
-            " and has no docker-compose.yml. LocalSync builds what it sends from git, so commit the project's files first (git init, git add, git commit), then try again.";
-          return;
-        }
         await enterComposeWizard(path, info);
         return;
       }
