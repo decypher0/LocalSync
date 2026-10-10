@@ -70,6 +70,25 @@ Google client: Cloud drop is greyed out with a plain explanation, and
 Settings → **Link Google account** fails with a message pointing here.
 Setting the variables before *launching* an already-built app does nothing.
 
+### Release builds from GitHub Actions
+
+End users still set nothing. The maintainer does this once: in the GitHub
+repo, **Settings → Secrets and variables → Actions → New repository
+secret**, add `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` with
+the two values from step 4. That's all. `release.yml` (Windows, Linux,
+macOS) and `macos.yml` pass both secrets to their build steps, so every
+installer they produce has Cloud drop enabled.
+
+Each build job also checks this, without printing either value:
+
+- **Before building**, a step posts a `Cloud drop disabled in this build`
+  warning annotation if either secret is missing or empty. The build still
+  runs and ships, just with Cloud drop greyed out.
+- **After building**, a step looks for the client ID (the
+  `.apps.googleusercontent.com` suffix) in the built `localsync-desktop`
+  binary. If the secrets were set but it isn't there, the job fails. If the
+  secrets weren't set, it only warns again.
+
 ## Why PKCE, and why a client secret anyway, and a loopback redirect (not the old copy-paste code flow)
 
 Google **deprecated the `urn:ietf:wg:oauth:2.0:oob` "copy this code into the

@@ -76,6 +76,42 @@ jobs:
       - uses: ./.github/actions/apply-app-version
         with:
           version: ${{ needs.determine-version.outputs.app_version }}
+      # Cloud drop's Google OAuth client is compiled in (option_env! in
+      # crates/ls-clouddrop/src/oauth.rs), so the two repo secrets below
+      # must reach every step that compiles the app - see
+      # docs/google-drive-setup.md. Missing secrets don't fail the build,
+      # they just ship a build with Cloud drop greyed out, loudly flagged.
+      #
+      # Cache safety: Swatinem/rust-cache never caches workspace crates
+      # (ls-clouddrop is one), and Cargo's fingerprint records the values of
+      # option_env!/rerun-if-env-changed vars anyway, so a stale value can't
+      # leak in. Belt and braces: a short, non-reversible sha256 fingerprint
+      # of the two values goes into $GITHUB_ENV as a CARGO_-prefixed var,
+      # which rust-cache hashes into its cache key (it hashes every CARGO*
+      # env var) - that also reaches the rust-cache inside the
+      # build-macos-dmg composite action, which an explicit `key:` couldn't.
+      # Must run before any rust-cache step. Values are never printed.
+      - name: Check the Google OAuth client secrets (Cloud drop)
+        id: oauth
+        shell: bash
+        env:
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+        run: |
+          missing=""
+          [ -n "$GOOGLE_OAUTH_CLIENT_ID" ] || missing="$missing GOOGLE_OAUTH_CLIENT_ID"
+          [ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ] || missing="$missing GOOGLE_OAUTH_CLIENT_SECRET"
+          if [ -z "$missing" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Google OAuth client secrets are set - Cloud drop will be enabled in this build."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Cloud drop disabled in this build::Repository secret(s) missing or empty:$missing. This build ships with Cloud drop greyed out. Fix: Settings -> Secrets and variables -> Actions -> New repository secret, add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET (see docs/google-drive-setup.md), then re-run."
+          fi
+          if command -v sha256sum >/dev/null; then sha=sha256sum; else sha="shasum -a 256"; fi
+          fp=$(printf '%s\n%s' "$GOOGLE_OAUTH_CLIENT_ID" "$GOOGLE_OAUTH_CLIENT_SECRET" | $sha | cut -c1-16)
+          echo "CARGO_LOCALSYNC_OAUTH_FP=$fp" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -169,6 +205,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compiled into ls-clouddrop (see the oauth check step above).
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
         run: |
           npm install
           # One --config merge patch carrying both independent decisions:
@@ -187,6 +226,36 @@ jobs:
           $cfg = @{ bundle = $bundle } | ConvertTo-Json -Depth 10 -Compress
           Write-Host "tauri build --config $cfg"
           npm run tauri build -- --bundles nsis --config $cfg
+
+      # Proves the client ID really made it into the built binary without
+      # printing it: Google client IDs end in .apps.googleusercontent.com,
+      # and option_env! stores the value as a plain string in the binary.
+      # Checks target/release/ and target/<triple>/release/ plus any .app
+      # bundle. Secrets set but marker missing = fail; secrets unset = warn
+      # only (already flagged by the pre-build check).
+      - name: Verify the Google OAuth client ID was compiled in
+        shell: bash
+        env:
+          OAUTH_PRESENT: ${{ steps.oauth.outputs.present }}
+        run: |
+          bins=$(find target -type f \( -path '*/release/localsync-desktop' -o -path '*/release/localsync-desktop.exe' -o -path '*.app/Contents/MacOS/*' \) 2>/dev/null)
+          missing=0
+          [ -n "$bins" ] || { echo "No built localsync-desktop binary found under target/"; missing=1; }
+          while IFS= read -r bin; do
+            [ -n "$bin" ] || continue
+            if grep -q -a -F '.apps.googleusercontent.com' "$bin"; then
+              echo "$bin: OAuth client ID marker found"
+            else
+              echo "$bin: OAuth client ID marker NOT found"
+              missing=1
+            fi
+          done <<< "$bins"
+          if [ "$missing" = 0 ]; then exit 0; fi
+          if [ "$OAUTH_PRESENT" = "true" ]; then
+            echo "::error title=OAuth client ID not compiled in::GOOGLE_OAUTH_CLIENT_ID/SECRET secrets were set, but the built binary has no .apps.googleusercontent.com client ID in it - Cloud drop would be disabled. Check the secret's value (it must be the full Client ID) and that the build step passes both secrets as env."
+            exit 1
+          fi
+          echo "::warning title=Cloud drop disabled in this build::No OAuth client ID in the built binary because the GOOGLE_OAUTH_CLIENT_ID/SECRET repository secrets aren't set (see the pre-build warning)."
 
       - name: Locate the built installer
         id: find_installer
@@ -244,6 +313,42 @@ jobs:
           sudo apt-get install -y \
             build-essential curl wget file pkg-config \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
+
+      # Cloud drop's Google OAuth client is compiled in (option_env! in
+      # crates/ls-clouddrop/src/oauth.rs), so the two repo secrets below
+      # must reach every step that compiles the app - see
+      # docs/google-drive-setup.md. Missing secrets don't fail the build,
+      # they just ship a build with Cloud drop greyed out, loudly flagged.
+      #
+      # Cache safety: Swatinem/rust-cache never caches workspace crates
+      # (ls-clouddrop is one), and Cargo's fingerprint records the values of
+      # option_env!/rerun-if-env-changed vars anyway, so a stale value can't
+      # leak in. Belt and braces: a short, non-reversible sha256 fingerprint
+      # of the two values goes into $GITHUB_ENV as a CARGO_-prefixed var,
+      # which rust-cache hashes into its cache key (it hashes every CARGO*
+      # env var) - that also reaches the rust-cache inside the
+      # build-macos-dmg composite action, which an explicit `key:` couldn't.
+      # Must run before any rust-cache step. Values are never printed.
+      - name: Check the Google OAuth client secrets (Cloud drop)
+        id: oauth
+        shell: bash
+        env:
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+        run: |
+          missing=""
+          [ -n "$GOOGLE_OAUTH_CLIENT_ID" ] || missing="$missing GOOGLE_OAUTH_CLIENT_ID"
+          [ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ] || missing="$missing GOOGLE_OAUTH_CLIENT_SECRET"
+          if [ -z "$missing" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Google OAuth client secrets are set - Cloud drop will be enabled in this build."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Cloud drop disabled in this build::Repository secret(s) missing or empty:$missing. This build ships with Cloud drop greyed out. Fix: Settings -> Secrets and variables -> Actions -> New repository secret, add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET (see docs/google-drive-setup.md), then re-run."
+          fi
+          if command -v sha256sum >/dev/null; then sha=sha256sum; else sha="shasum -a 256"; fi
+          fp=$(printf '%s\n%s' "$GOOGLE_OAUTH_CLIENT_ID" "$GOOGLE_OAUTH_CLIENT_SECRET" | $sha | cut -c1-16)
+          echo "CARGO_LOCALSYNC_OAUTH_FP=$fp" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -347,6 +452,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compiled into ls-clouddrop (see the oauth check step above).
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
         run: |
           npm install
 
@@ -375,6 +483,36 @@ jobs:
             attempt=$((attempt + 1))
           done
           echo "appimage_failed=$appimage_failed" >> "$GITHUB_OUTPUT"
+
+      # Proves the client ID really made it into the built binary without
+      # printing it: Google client IDs end in .apps.googleusercontent.com,
+      # and option_env! stores the value as a plain string in the binary.
+      # Checks target/release/ and target/<triple>/release/ plus any .app
+      # bundle. Secrets set but marker missing = fail; secrets unset = warn
+      # only (already flagged by the pre-build check).
+      - name: Verify the Google OAuth client ID was compiled in
+        shell: bash
+        env:
+          OAUTH_PRESENT: ${{ steps.oauth.outputs.present }}
+        run: |
+          bins=$(find target -type f \( -path '*/release/localsync-desktop' -o -path '*/release/localsync-desktop.exe' -o -path '*.app/Contents/MacOS/*' \) 2>/dev/null)
+          missing=0
+          [ -n "$bins" ] || { echo "No built localsync-desktop binary found under target/"; missing=1; }
+          while IFS= read -r bin; do
+            [ -n "$bin" ] || continue
+            if grep -q -a -F '.apps.googleusercontent.com' "$bin"; then
+              echo "$bin: OAuth client ID marker found"
+            else
+              echo "$bin: OAuth client ID marker NOT found"
+              missing=1
+            fi
+          done <<< "$bins"
+          if [ "$missing" = 0 ]; then exit 0; fi
+          if [ "$OAUTH_PRESENT" = "true" ]; then
+            echo "::error title=OAuth client ID not compiled in::GOOGLE_OAUTH_CLIENT_ID/SECRET secrets were set, but the built binary has no .apps.googleusercontent.com client ID in it - Cloud drop would be disabled. Check the secret's value (it must be the full Client ID) and that the build step passes both secrets as env."
+            exit 1
+          fi
+          echo "::warning title=Cloud drop disabled in this build::No OAuth client ID in the built binary because the GOOGLE_OAUTH_CLIENT_ID/SECRET repository secrets aren't set (see the pre-build warning)."
 
       - name: Dump target/ contents (diagnostic)
         # Temporary, added to actually see what (if anything) the build
@@ -587,6 +725,42 @@ jobs:
             echo "No TAURI_SIGNING_PRIVATE_KEY secret - building unsigned with createUpdaterArtifacts disabled for this run (no .app.tar.gz.sig, no latest.json)."
           fi
 
+      # Cloud drop's Google OAuth client is compiled in (option_env! in
+      # crates/ls-clouddrop/src/oauth.rs), so the two repo secrets below
+      # must reach every step that compiles the app - see
+      # docs/google-drive-setup.md. Missing secrets don't fail the build,
+      # they just ship a build with Cloud drop greyed out, loudly flagged.
+      #
+      # Cache safety: Swatinem/rust-cache never caches workspace crates
+      # (ls-clouddrop is one), and Cargo's fingerprint records the values of
+      # option_env!/rerun-if-env-changed vars anyway, so a stale value can't
+      # leak in. Belt and braces: a short, non-reversible sha256 fingerprint
+      # of the two values goes into $GITHUB_ENV as a CARGO_-prefixed var,
+      # which rust-cache hashes into its cache key (it hashes every CARGO*
+      # env var) - that also reaches the rust-cache inside the
+      # build-macos-dmg composite action, which an explicit `key:` couldn't.
+      # Must run before any rust-cache step. Values are never printed.
+      - name: Check the Google OAuth client secrets (Cloud drop)
+        id: oauth
+        shell: bash
+        env:
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+        run: |
+          missing=""
+          [ -n "$GOOGLE_OAUTH_CLIENT_ID" ] || missing="$missing GOOGLE_OAUTH_CLIENT_ID"
+          [ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ] || missing="$missing GOOGLE_OAUTH_CLIENT_SECRET"
+          if [ -z "$missing" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Google OAuth client secrets are set - Cloud drop will be enabled in this build."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Cloud drop disabled in this build::Repository secret(s) missing or empty:$missing. This build ships with Cloud drop greyed out. Fix: Settings -> Secrets and variables -> Actions -> New repository secret, add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET (see docs/google-drive-setup.md), then re-run."
+          fi
+          if command -v sha256sum >/dev/null; then sha=sha256sum; else sha="shasum -a 256"; fi
+          fp=$(printf '%s\n%s' "$GOOGLE_OAUTH_CLIENT_ID" "$GOOGLE_OAUTH_CLIENT_SECRET" | $sha | cut -c1-16)
+          echo "CARGO_LOCALSYNC_OAUTH_FP=$fp" >> "$GITHUB_ENV"
+
       - id: build_dmg
         uses: ./.github/actions/build-macos-dmg
         with:
@@ -602,6 +776,39 @@ jobs:
           # only present when there's a real certificate to sign with.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compiled into ls-clouddrop (see the oauth check step above).
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+
+      # Proves the client ID really made it into the built binary without
+      # printing it: Google client IDs end in .apps.googleusercontent.com,
+      # and option_env! stores the value as a plain string in the binary.
+      # Checks target/release/ and target/<triple>/release/ plus any .app
+      # bundle. Secrets set but marker missing = fail; secrets unset = warn
+      # only (already flagged by the pre-build check).
+      - name: Verify the Google OAuth client ID was compiled in
+        shell: bash
+        env:
+          OAUTH_PRESENT: ${{ steps.oauth.outputs.present }}
+        run: |
+          bins=$(find target -type f \( -path '*/release/localsync-desktop' -o -path '*/release/localsync-desktop.exe' -o -path '*.app/Contents/MacOS/*' \) 2>/dev/null)
+          missing=0
+          [ -n "$bins" ] || { echo "No built localsync-desktop binary found under target/"; missing=1; }
+          while IFS= read -r bin; do
+            [ -n "$bin" ] || continue
+            if grep -q -a -F '.apps.googleusercontent.com' "$bin"; then
+              echo "$bin: OAuth client ID marker found"
+            else
+              echo "$bin: OAuth client ID marker NOT found"
+              missing=1
+            fi
+          done <<< "$bins"
+          if [ "$missing" = 0 ]; then exit 0; fi
+          if [ "$OAUTH_PRESENT" = "true" ]; then
+            echo "::error title=OAuth client ID not compiled in::GOOGLE_OAUTH_CLIENT_ID/SECRET secrets were set, but the built binary has no .apps.googleusercontent.com client ID in it - Cloud drop would be disabled. Check the secret's value (it must be the full Client ID) and that the build step passes both secrets as env."
+            exit 1
+          fi
+          echo "::warning title=Cloud drop disabled in this build::No OAuth client ID in the built binary because the GOOGLE_OAUTH_CLIENT_ID/SECRET repository secrets aren't set (see the pre-build warning)."
 
       - uses: actions/upload-artifact@v4
         with:
