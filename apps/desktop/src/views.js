@@ -850,7 +850,9 @@
           <div class="lsv-ph-title">Containers aren't running</div>
           <div class="lsv-ph-text">Press Run to bring this project back up with the database exactly as it was saved.</div>
           <p id="sp-run-error" class="lsv-error hidden"></p>
-          <button id="sp-fix-setup" type="button" class="lsv-btn lsv-btn-inline hidden">Fix setup</button></section>` + logsPanel(false)
+          <button id="sp-fix-setup" type="button" class="lsv-btn lsv-btn-inline hidden">Fix setup</button>
+          <button id="sp-relink" type="button" class="lsv-btn lsv-btn-primary lsv-btn-inline hidden">Link Google account</button>
+          <p id="sp-relink-note" class="lsv-muted lsv-small hidden"></p></section>` + logsPanel(false)
       );
       right.innerHTML =
         panel("Last run", "sp-last-run") +
@@ -859,6 +861,7 @@
           "A stopped session only shows what you can actually do right now - run it again, pull the latest update, or remove it."
         );
       $id("sp-run").addEventListener("click", runCurrent);
+      $id("sp-relink").addEventListener("click", relinkForReceive);
     }
     const arm = $id("sp-arm");
     if (arm) {
@@ -931,6 +934,30 @@
       s.armError = `Couldn't receive the update: ${err}`;
     } finally {
       s.armBusy = false;
+      if (V.session === s && V.view === "session") renderSessionPage();
+    }
+  }
+
+  async function relinkForReceive() {
+    const s = V.session;
+    if (s.relinked) {
+      s.relinked = false;
+      s.relinkNote = "";
+      return retryCloudDrop(s);
+    }
+    s.relinking = true;
+    s.relinkNote = "";
+    renderSessionPage();
+    try {
+      await invoke("link_google_account");
+      s.relinked = true;
+      s.errorText = "";
+      s.relinkNote = "Google account linked again.";
+      refreshGoogleAccountStatus();
+    } catch (err) {
+      s.relinkNote = `Linking didn't finish: ${err}`;
+    } finally {
+      s.relinking = false;
       if (V.session === s && V.view === "session") renderSessionPage();
     }
   }
@@ -1024,6 +1051,15 @@
       errEl.textContent = s.runErrorText || (s.status === "error" ? s.errorText : "");
       errEl.classList.toggle("hidden", !errEl.textContent);
       showSetupFixButton($id("sp-fix-setup"), s.runErrorText);
+      // A Cloud drop request that failed because the Google sign-in expired:
+      // link again right here, then try the same request again.
+      const relink = $id("sp-relink");
+      const expired = s.status === "error" && isGoogleSignInExpired(s.errorText);
+      relink.classList.toggle("hidden", !expired && !s.relinked);
+      relink.disabled = !!s.relinking;
+      relink.textContent = s.relinking ? "Waiting for Google sign-in…" : s.relinked ? "Try the request again" : "Link Google account";
+      $id("sp-relink-note").textContent = s.relinkNote || "";
+      $id("sp-relink-note").classList.toggle("hidden", !s.relinkNote);
       $id("sp-stopped-ph").classList.toggle("hidden", s.runInProgress);
       $id("sp-run").disabled = s.busy || s.runInProgress || s.status === "error";
       $id("sp-run").querySelector("span").textContent = s.runInProgress ? "Starting…" : "Run";
