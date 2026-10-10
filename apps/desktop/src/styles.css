@@ -857,6 +857,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 .setup-step.is-pending .setup-step-title { color: var(--fg-secondary); }
 .setup-step-summary { margin: var(--space-1) 0 0; font-size: var(--font-size-sm); color: var(--fg-secondary); }
 .setup-step.is-failed .setup-step-summary { color: var(--fg); }
+.setup-recovery { margin: var(--space-2) 0 0; padding-left: var(--space-5); font-size: var(--font-size-sm); color: var(--fg-secondary); }
+.setup-recovery li.is-running, .setup-recovery li.is-failed { color: var(--fg); font-weight: 600; }
 .setup-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
 .setup-actions .primary-btn { margin-top: 0; padding: var(--space-2) var(--space-4); }
 .setup-manual { margin-top: var(--space-3); flex-direction: column; align-items: flex-start; }

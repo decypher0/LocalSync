@@ -11,6 +11,18 @@
 const SetupWizard = (() => {
   // Must match ls_containers::readiness::NOT_READY_PREFIX.
   const NOT_READY_PREFIX = "Podman isn't ready to run containers";
+  // Must match ls_containers::readiness::SERVICE_STUCK: the machine runs but
+  // Podman can't reach its service (Windows "Fix automatically").
+  const SERVICE_STUCK = "Podman's virtual machine is running, but the Podman service inside it is stuck.";
+  // Must match ls_containers::setup::RECOVERY_STEPS (labels in the
+  // `setup-fix-progress` events overwrite these anyway).
+  const RECOVERY_STEPS = [
+    "Stop WSL (wsl --shutdown)",
+    "Wait for every WSL distribution to stop",
+    "Start Podman's machine",
+    "Wait for Podman to answer",
+    "Run the test container again",
+  ];
 
   const STATUS_LABEL = { pending: "Not checked yet", checking: "Checking", done: "Done", failed: "Needs attention" };
 
@@ -36,6 +48,7 @@ const SetupWizard = (() => {
   /** A (re)check is starting: anything not done goes back to a clean pending. */
   function beginVerify(view) {
     view.phase = "checking";
+    view.recovery = null;
     for (const s of view.steps) {
       if (s.status !== "done") Object.assign(s, { status: "pending", summary: "", details: "" });
     }
@@ -46,6 +59,19 @@ const SetupWizard = (() => {
     view.phase = "fixing";
     const s = find(view, step);
     if (s) Object.assign(s, { status: "checking", summary: "Setting this up now…" });
+    // The test container's fix (Windows WSL/Podman recovery) reports per step.
+    if (step === "functional_check") view.recovery = RECOVERY_STEPS.map((label) => ({ label, status: "pending" }));
+  }
+
+  /** A live `setup-fix-progress` event: { index, label, status: running|done|failed }. */
+  function applyFixProgress(view, evt) {
+    const r = view.recovery && view.recovery[evt.index];
+    if (r) Object.assign(r, { label: evt.label || r.label, status: evt.status });
+  }
+
+  /** The fix ended: a step still running (the test container re-run) takes the outcome. */
+  function settleRecovery(view, ok) {
+    for (const r of view.recovery || []) if (r.status === "running") r.status = ok ? "done" : "failed";
   }
 
   /** A live `setup-step` event. "pending" (waiting for a restart) stays pending. */
@@ -75,6 +101,8 @@ const SetupWizard = (() => {
     if (failure && find(view, failure.step)) {
       Object.assign(find(view, failure.step), { status: "failed", summary: failure.summary, details: failure.details || "" });
     }
+    const fc = find(view, "functional_check");
+    settleRecovery(view, !!res.all_done || (!!fc && fc.status === "done"));
     if (res.all_done) view.phase = "done";
     else if (res.restart_required) view.phase = "restart";
     else if (failure) view.phase = "failed";
@@ -91,6 +119,7 @@ const SetupWizard = (() => {
   function applyError(view, err, step) {
     const s = (step && find(view, step)) || view.steps.find((x) => x.status !== "done");
     view.phase = "failed";
+    settleRecovery(view, false);
     if (!s) return view.phase;
     const raw = String(err);
     Object.assign(s, {
@@ -110,6 +139,22 @@ const SetupWizard = (() => {
     return out;
   }
 
+  /** The fix button's label. The test container's fix (Windows only) restarts WSL and Podman's machine. */
+  function fixLabel(s) {
+    if (s.step !== "functional_check") return "Fix it";
+    return isPodmanStuck(s.summary) ? "Fix automatically" : "Restart WSL and retry";
+  }
+
+  /** The machine runs but Podman's service is stuck (setup summary or a Run error). */
+  function isPodmanStuck(text) {
+    return String((text && text.message) || text || "").includes(SERVICE_STUCK);
+  }
+
+  /** The label of the "open setup" button next to a Run / test-run error. */
+  function errorFixLabel(err, onWindows) {
+    return onWindows && isPodmanStuck(err) ? "Fix automatically" : "Fix setup";
+  }
+
   function consentMessage(s, os) {
     if (!s.needs_admin) return s.consent;
     const ask = os === "windows" ? "Windows will ask for administrator permission." : "You'll be asked for your password.";
@@ -126,17 +171,23 @@ const SetupWizard = (() => {
 
   return {
     NOT_READY_PREFIX,
+    SERVICE_STUCK,
+    RECOVERY_STEPS,
     viewFromState,
     beginVerify,
     beginFix,
     applyEvent,
     applyProgress,
+    applyFixProgress,
     applyResult,
     applyError,
     stepActions,
+    fixLabel,
     consentMessage,
     statusLabel,
     isPodmanNotReady,
+    isPodmanStuck,
+    errorFixLabel,
   };
 })();
 
