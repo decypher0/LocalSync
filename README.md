@@ -92,6 +92,7 @@ Two sample projects (`sample-project/`, a Spring Boot + MySQL app, and `sample-p
 ### Optional: enabling Cloud drop, code-signing, and auto-update
 
 - Cloud drop (Google Drive) mode needs a Google OAuth Client ID you register yourself — see [`docs/google-drive-setup.md`](docs/google-drive-setup.md).
+- How Cloud drop works for the people using it (both need a Google account; what is sent): [`docs/cloud-drop.md`](docs/cloud-drop.md). What kinds of projects LocalSync can send: [`docs/what-can-i-send.md`](docs/what-can-i-send.md).
 - Producing signed, warning-free installers needs a real code-signing certificate (Windows) and Apple Developer Program enrollment (macOS) — see [`docs/code-signing.md`](docs/code-signing.md).
 - Shipping update-capable installers (so "Check for updates" can find something) needs a locally-generated signing key added as a repository secret — see [`docs/auto-update-signing.md`](docs/auto-update-signing.md).
 
