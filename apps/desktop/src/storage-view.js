@@ -59,11 +59,21 @@
     }
   }
 
+  // The headline counts LocalSync's own disk use: total_bytes includes every
+  // Podman image on this computer (the "Podman images" part), so swap that
+  // for the images LocalSync built. (Their shared layers may be counted more
+  // than once - the details say so.)
+  function localsyncBytes(r) {
+    const allImages = r.breakdown.find((p) => p.label === "Podman images");
+    if (!allImages || !r.images) return r.total_bytes;
+    return r.total_bytes - allImages.bytes + r.images.localsync_bytes;
+  }
+
   function render() {
     const r = report;
     const c = cleanable(r);
     const wasOpen = $("storage-details")?.open;
-    $("storage-headline").textContent = `LocalSync is using ${size(r.total_bytes)}`;
+    $("storage-headline").textContent = `LocalSync is using ${size(localsyncBytes(r))}`;
     const free = c.ids.length || c.imgs
       ? `Free up space (${c.upTo ? "up to " : ""}${size(c.bytes)})`
       : "Nothing to clean up";
