@@ -24,7 +24,9 @@
   // Banners (firewall, app update) go above the views, in the flow - never over them.
   const banners = document.createElement("div");
   banners.id = "lsv-banners";
-  banners.append($id("firewall-banner"), $id("app-update-banner"));
+  // Incoming requests (a receiver asking for Cloud drop access, a nearby
+  // device asking to connect) too: a fixed toast covered the page's buttons.
+  banners.append($id("firewall-banner"), $id("app-update-banner"), $id("pull-requests"));
   $id("app-views").prepend(banners);
 
   const holding = document.createElement("div");
@@ -46,7 +48,7 @@
   const displayName = (s) => s.displayName || s.title || "Untitled session";
   // A device key is a discovered device's persistent id, or "dev-<room code>".
   const shortDeviceId = (key) => (key || "").replace(/^dev-/, "").slice(0, 8) || "—";
-  const sendIsRunning = (s) => s.transfers.some((t) => t.status === "connecting" || t.status === "active");
+  const sendIsRunning = (s) => s.transfers.some((t) => t.status === "connecting" || t.status === "active" || t.status === "waiting");
   function receiveState(s) {
     if (s.status === "connecting" || s.status === "active") return "receiving";
     if (s.status === "reviewing") return "reviewing";
@@ -694,7 +696,7 @@
       row("Database", dumps.join(", ") || "None") +
       (state === "running" ? row("Snapshot size", a ? formatBytes(a.size_bytes) : "Preparing…") : row("Last sent", lastSent ? timeAgo(lastSent) : "Not sent yet"));
     if (state === "running") {
-      const tr = [...s.transfers].reverse().find((t) => t.status === "connecting" || t.status === "active") || s.transfers[s.transfers.length - 1];
+      const tr = [...s.transfers].reverse().find((t) => t.status === "connecting" || t.status === "active" || t.status === "waiting") || s.transfers[s.transfers.length - 1];
       const method = !tr ? null : tr.spec.kind === "cloud" ? "cloud" : tr.spec.kind === "code" && tr.spec.mode === "remote" ? "relay" : "lan";
       $id("sp-method").innerHTML = [
         ["lan", "P2P (LAN)"],
@@ -703,12 +705,15 @@
       ]
         .map(([k, label]) => `<span role="listitem" class="lsv-segment ${k === method ? "is-on" : ""}" ${k === method ? 'aria-current="true"' : ""}>${label}</span>`)
         .join("");
-      const live = s.transfers.filter((t) => t.status === "connecting" || t.status === "active");
+      const live = s.transfers.filter((t) => t.status === "connecting" || t.status === "active" || t.status === "waiting");
       $id("sp-live-devices").innerHTML =
         live
           .map((t) => {
             const name = t.deviceName || (t.spec.kind === "cloud" ? "Cloud drop" : "Device via code");
-            const status = t.status === "active" ? "connected · receiving now" : t.receiverJoined ? "connected" : "waiting for it to connect";
+            const status =
+              t.spec.kind === "cloud"
+                ? t.receiverJoined ? "receiver connected" : t.status === "waiting" ? "waiting for the receiver to enter the code" : "uploading to Drive"
+                : t.status === "active" ? "connected · receiving now" : t.receiverJoined ? "connected" : "waiting for it to connect";
             return `<div class="lsv-device ${t.status === "active" || t.receiverJoined ? "is-live" : ""}"><span class="lsv-device-dot"></span><span><span class="lsv-device-name">${escapeHtml(name)}</span><span class="lsv-device-sub">${status}</span></span></div>`;
           })
           .join("") + `<div class="lsv-device is-waiting"><span class="lsv-device-dot"></span><span class="lsv-device-name">Waiting for another device…</span></div>`;
@@ -1093,7 +1098,10 @@
       // A receive still in flight has no stored session yet - just drop it.
       if (!(s.kind === "receive" && receiveState(s) === "receiving")) await invoke("close_session", { sessionId: s.id });
       if (s.progressUnlisten) s.progressUnlisten();
-      for (const tr of s.transfers || []) for (const u of tr.unlisten || []) u();
+      for (const tr of s.transfers || []) {
+        for (const u of tr.unlisten || []) u();
+        cancelCloudTransfer(tr);
+      }
       sessions.delete(s.id);
       if (activeSessionId === s.id) activeSessionId = null;
       origRenderTabs();

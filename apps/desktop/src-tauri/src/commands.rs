@@ -1765,20 +1765,37 @@ pub fn cloud_drop_sender_room(send_info: &SendSessionInfo) -> &str {
 /// then hosts the same kind of signaling room `start_send_session` does —
 /// not to carry the payload (Drive already has it), only so a receiver who
 /// pastes `room_code` can reach this sender's control channel to ask for
-/// access. Blocks until that receiver connects, same as `share_snapshot`'s
-/// `connect_as_sender` call.
+/// access.
+///
+/// Returns the code as soon as the upload is done: the receiver can only
+/// join with that code, so waiting for them here (as this once did) meant
+/// the code was never shown and the wait always ran out. The waiting happens
+/// in the background instead - see [`begin_cloud_drop_handoff`].
+///
+/// `existing_file_id` (a Retry): reuse that upload if it's still in Drive,
+/// instead of bundling and uploading the project again.
 #[tauri::command]
 pub async fn start_cloud_drop_session<R: tauri::Runtime>(
     app: AppHandle<R>,
-    state: State<'_, AppState>,
     mode: String,
     relay_url: Option<String>,
     project_path: String,
     retention: RetentionChoiceDto,
+    existing_file_id: Option<String>,
 ) -> Result<CloudDropSessionInfo, String> {
     let retention = retention.into_retention()?;
     let config = cloud_drop_config()?;
     let access_token = ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map_err(|e| e.to_string())?;
+
+    if let Some(file_id) = existing_file_id {
+        // Still there (retention cleanup may have deleted it)? It's already
+        // tracked for retention from when it was first uploaded.
+        if ls_clouddrop::drive::list_permissions(&access_token, &file_id).await.is_ok() {
+            log::info!("start_cloud_drop_session: reusing the Drive upload {file_id}");
+            return begin_cloud_drop_handoff(&app, mode, relay_url, file_id, retention).await;
+        }
+        log::info!("start_cloud_drop_session: {file_id} is no longer in Drive - uploading again");
+    }
 
     log::info!("start_cloud_drop_session: bundling project_path={project_path}");
     let root = PathBuf::from(&project_path);
@@ -1803,35 +1820,122 @@ pub async fn start_cloud_drop_session<R: tauri::Runtime>(
     })
     .map_err(|e| e.to_string())?;
 
+    begin_cloud_drop_handoff(&app, mode, relay_url, uploaded.file_id, retention).await
+}
+
+/// Shown when nobody enters a Cloud drop code before it runs out. Not the P2P
+/// "the other device didn't connect" text: here the file is safely in Drive
+/// and a new code is all that's needed.
+pub const CLOUD_DROP_NOBODY_JOINED: &str =
+    "No one entered this code within 5 minutes. The file is still in your Drive — send again to get a new code.";
+
+/// What a failed wait for the Cloud drop receiver means for the person.
+pub fn cloud_drop_wait_error(e: &anyhow::Error, signaling_url: &str) -> String {
+    if format!("{e:#}").starts_with("timed out connecting to peer") {
+        CLOUD_DROP_NOBODY_JOINED.to_string()
+    } else {
+        connect_error(e, signaling_url)
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct CloudDropRoomEvent {
+    pub room_id: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct CloudDropFailedEvent {
+    pub room_id: String,
+    pub message: String,
+}
+
+/// Everything after the Drive upload (no Drive/OAuth of its own, so tests
+/// can drive it): hosts the signaling room and returns its code at once.
+/// A background task, keyed by room id in `state.cloud_drop_waits`, then
+/// waits for the receiver to join (`cloud-drop-receiver-joined`), files the
+/// upload in `state.cloud_drop_uploads`, and listens for their access request
+/// (`cloud-access-request`). If nobody joins in time, or the relay fails, it
+/// emits `cloud-drop-failed` with a plain message.
+pub async fn begin_cloud_drop_handoff<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    mode: String,
+    relay_url: Option<String>,
+    file_id: String,
+    retention: ls_clouddrop::retention::Retention,
+) -> Result<CloudDropSessionInfo, String> {
     let send_info = start_send_session(mode, relay_url).await?;
     // See `cloud_drop_sender_room`'s own doc comment for the real,
     // Local-network-mode-specific bug this guards against.
-    let room = cloud_drop_sender_room(&send_info);
-    log::info!("start_cloud_drop_session: waiting for a receiver on room={room}");
-    let conn = ls_net::connect_as_sender(&send_info.signaling_url, room)
-        .await
-        .map_err(|e| connect_error(&e, &send_info.signaling_url))?;
-
-    // Keyed by the same `room` value the connect call above actually used
-    // (not `send_info.room_code`), for the same reason, and to match the
-    // convention every other transport in this file already uses
-    // (`share_snapshot`/`share_snapshot_wizard`'s `connected_receivers`,
-    // keyed by the value actually used to pair on the relay, not the
-    // user-facing display code).
-    let room = room.to_string();
-    state.cloud_drop_uploads.lock().map_err(|e| e.to_string())?.insert(
+    let room = cloud_drop_sender_room(&send_info).to_string();
+    log::info!("start_cloud_drop_session: code ready, waiting for a receiver on room={room} in the background");
+    let task = tauri::async_runtime::spawn(wait_for_cloud_drop_receiver(
+        app.clone(),
+        send_info.signaling_url.clone(),
         room.clone(),
-        crate::state::CloudDropUpload { conn: std::sync::Arc::new(conn), file_id: uploaded.file_id.clone(), retention },
-    );
-    tauri::async_runtime::spawn(listen_for_cloud_access_requests(app, room));
-
+        file_id.clone(),
+        retention,
+    ));
+    app.state::<AppState>().cloud_drop_waits.lock().map_err(|e| e.to_string())?.insert(room, task);
     Ok(CloudDropSessionInfo {
         room_code: send_info.room_code,
         room_id: send_info.room_id,
         signaling_url: send_info.signaling_url,
         code_expires_in_seconds: send_info.code_expires_in_seconds,
-        file_id: uploaded.file_id,
+        file_id,
     })
+}
+
+async fn wait_for_cloud_drop_receiver<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    signaling_url: String,
+    room: String,
+    file_id: String,
+    retention: ls_clouddrop::retention::Retention,
+) {
+    match ls_net::connect_as_sender(&signaling_url, &room).await {
+        Ok(conn) => {
+            log::info!("start_cloud_drop_session: receiver joined room={room}");
+            // Keyed by the room the connect call actually used (not the
+            // display code) - the same convention every other transport in
+            // this file uses.
+            if let Ok(mut uploads) = app.state::<AppState>().cloud_drop_uploads.lock() {
+                uploads.insert(room.clone(), crate::state::CloudDropUpload { conn: std::sync::Arc::new(conn), file_id, retention });
+            }
+            let _ = app.emit("cloud-drop-receiver-joined", CloudDropRoomEvent { room_id: room.clone() });
+            // Run here (not spawned separately), so aborting this task on
+            // Close also ends the listener and drops its connection.
+            listen_for_cloud_access_requests(app.clone(), room.clone()).await;
+            // The receiver's side closed (downloaded and left, or gave up).
+            if let Ok(mut uploads) = app.state::<AppState>().cloud_drop_uploads.lock() {
+                uploads.remove(&room);
+            }
+            let _ = app.emit("cloud-drop-ended", CloudDropRoomEvent { room_id: room.clone() });
+        }
+        Err(e) => {
+            log::info!("start_cloud_drop_session: no receiver for room={room}: {e:#}");
+            let message = cloud_drop_wait_error(&e, &signaling_url);
+            let _ = app.emit("cloud-drop-failed", CloudDropFailedEvent { room_id: room.clone(), message });
+        }
+    }
+    if let Ok(mut waits) = app.state::<AppState>().cloud_drop_waits.lock() {
+        waits.remove(&room);
+    }
+}
+
+/// Closing a session with a Cloud drop still waiting: stop waiting for the
+/// receiver, close the control connection and forget the pending request.
+/// The Drive file itself stays under its retention rule.
+#[tauri::command]
+pub fn cancel_cloud_drop(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    if let Some(task) = state.cloud_drop_waits.lock().map_err(|e| e.to_string())?.remove(&room_id) {
+        task.abort();
+    }
+    if let Some(upload) = state.cloud_drop_uploads.lock().map_err(|e| e.to_string())?.remove(&room_id) {
+        // Tell the receiver now, rather than leaving them to time out.
+        tauri::async_runtime::spawn(async move { upload.conn.close().await });
+    }
+    state.cloud_access_requests.lock().map_err(|e| e.to_string())?.remove(&room_id);
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -1870,6 +1974,7 @@ async fn listen_for_cloud_access_requests<R: tauri::Runtime>(app: AppHandle<R>, 
                 // at next startup, not from inside this listener.
                 let state = app.state::<AppState>();
                 let file_id = state.cloud_drop_uploads.lock().ok().and_then(|u| u.get(&peer_id).map(|e| e.file_id.clone()));
+                let _ = app.emit("cloud-drop-downloaded", CloudDropRoomEvent { room_id: peer_id.clone() });
                 if let Some(file_id) = file_id {
                     log::info!("start_cloud_drop_session: receiver confirmed download of {file_id}");
                     if let Err(e) = ls_clouddrop::retention::mark_downloaded(&file_id) {
@@ -1985,17 +2090,28 @@ pub async fn request_cloud_drop_access(
         .await
         .map_err(|e| e.to_string())?;
 
-    match ls_net::recv_control(&conn).await.map_err(|e| e.to_string())? {
+    let outcome = request_cloud_drop_outcome(&state, &conn, &access_token).await;
+    // Done either way: close now, so the sender's card hears it at once.
+    conn.close().await;
+    outcome
+}
+
+async fn request_cloud_drop_outcome(
+    state: &State<'_, AppState>,
+    conn: &ls_net::DataChannelConn,
+    access_token: &str,
+) -> Result<CloudDropReceiveOutcome, String> {
+    match ls_net::recv_control(conn).await.map_err(|e| e.to_string())? {
         ls_net::ControlMessage::CloudAccessResponse { accepted: false, .. } => {
             log::info!("request_cloud_drop_access: sender declined");
             Ok(CloudDropReceiveOutcome { accepted: false, info: None })
         }
         ls_net::ControlMessage::CloudAccessResponse { accepted: true, drive_file_id: Some(file_id) } => {
             log::info!("request_cloud_drop_access: accepted, downloading file_id={file_id}");
-            let bytes = ls_clouddrop::drive::download_file(&access_token, &file_id).await.map_err(|e| e.to_string())?;
+            let bytes = ls_clouddrop::drive::download_file(access_token, &file_id).await.map_err(|e| e.to_string())?;
             let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            let info = finalize_received_snapshot(&state, snapshot)?;
-            ls_net::send_control(&conn, &ls_net::ControlMessage::CloudDownloadConfirmed)
+            let info = finalize_received_snapshot(state, snapshot)?;
+            ls_net::send_control(conn, &ls_net::ControlMessage::CloudDownloadConfirmed)
                 .await
                 .map_err(|e| e.to_string())?;
             log::info!("request_cloud_drop_access: done, id={}", info.snapshot_id);
