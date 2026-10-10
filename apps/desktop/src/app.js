@@ -203,37 +203,21 @@ function updateCloudTransfer(roomId, change) {
   scheduleSendRender(found.session);
 }
 
-listen("cloud-drop-receiver-joined", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    if (tr.cloudStep === "waiting") tr.cloudStep = "joined";
-    tr.receiverJoined = true;
-  })
-);
-listen("cloud-drop-failed", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    tr.status = "error";
-    tr.errorText = evt.payload.message;
-  })
-);
-// The receiver's control channel closed. After a granted request that's the
-// normal end; before one, they left without getting the file.
-listen("cloud-drop-ended", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    if (tr.status !== "waiting") return;
-    if (tr.cloudStep === "approved") {
-      tr.status = "done";
-    } else {
-      tr.status = "error";
-      tr.errorText = "The receiver disconnected before getting access. Retry for a new code (the file is still in your Drive).";
-    }
-  })
-);
-listen("cloud-drop-downloaded", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    tr.cloudStep = "downloaded";
-    tr.status = "done";
-  })
-);
+// The card's steps follow these events (session-model.js applyCloudEvent).
+listen("cloud-drop-receiver-joined", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "joined")));
+listen("cloud-drop-failed", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "failed", { message: evt.payload.message })));
+listen("cloud-drop-ended", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "ended")));
+listen("cloud-drop-downloaded", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "downloaded")));
+// The backend recorded the receiver as one of the session's devices (on a
+// grant from the card or the banner, or on their download confirmation):
+// its Devices, "Last sent" and "Last known device" follow.
+listen("cloud-drop-delivered", (evt) => {
+  const { session_id: sessionId, view } = evt.payload;
+  const session = sessions.get(sessionId);
+  if (!session || session.kind !== "send" || !view) return;
+  applyView(session, view);
+  scheduleSendRender(session);
+});
 
 /// Grant or decline a receiver's Drive access - from the banner or from the
 /// transfer card, whichever the person uses; both reflect the outcome.
@@ -248,19 +232,9 @@ async function respondCloudAccess(peerId, accept) {
     const view = await invoke("respond_to_cloud_access_request", { peerId, accept });
     banner?.remove();
     // On a grant the receiver is now one of the session's devices.
+    // (cloud-drop-delivered carries the same view.)
     if (view && found) applyView(found.session, view);
-    if (found) {
-      const email = req ? req.email : "";
-      found.tr.accessRequest = null;
-      if (accept) {
-        found.tr.cloudStep = "approved";
-        found.tr.grantedEmail = email;
-      } else {
-        found.tr.cloudStep = "declined";
-        found.tr.declinedEmail = email;
-        found.tr.status = "done";
-      }
-    }
+    if (found) applyCloudEvent(found.tr, accept ? "granted" : "declined", { email: req ? req.email : "" });
   } catch (err) {
     if (req) req.error = String(err);
     if (banner) {
@@ -283,10 +257,7 @@ function cancelCloudTransfer(tr) {
 
 listen("cloud-access-request", (evt) => {
   const { peer_id: peerId, google_email: googleEmail } = evt.payload;
-  updateCloudTransfer(peerId, (tr) => {
-    tr.accessRequest = { email: googleEmail, busy: false, error: "" };
-    tr.cloudStep = "requested";
-  });
+  updateCloudTransfer(peerId, (tr) => applyCloudEvent(tr, "requested", { email: googleEmail }));
   const existing = [...$("pull-requests").children].find((el) => el.dataset.peer === peerId);
   if (existing) return;
   const div = document.createElement("div");
@@ -521,11 +492,7 @@ $("session-history-close-btn").addEventListener("click", () => {
 });
 
 // ---------- round 23: linked Google account (Cloud drop) ----------
-// ls_clouddrop::oauth::SIGN_IN_EXPIRED_MESSAGE starts with this: Google
-// refused the saved sign-in (invalid_grant), and the stale token was deleted.
-const GOOGLE_SIGN_IN_EXPIRED = "Your Google sign-in expired.";
-const isGoogleSignInExpired = (text) => String(text || "").startsWith(GOOGLE_SIGN_IN_EXPIRED);
-
+// (isGoogleSignInExpired lives in session-model.js.)
 async function refreshGoogleAccountStatus() {
   try {
     const linked = await invoke("google_account_status");
@@ -539,6 +506,8 @@ async function refreshGoogleAccountStatus() {
   } catch (err) {
     $("google-account-status").textContent = String(err);
   }
+  // Linked/unlinked anywhere: the receive form's Link panel follows.
+  refreshCloudLinkPanel();
 }
 refreshGoogleAccountStatus();
 
@@ -3710,26 +3679,37 @@ function rekeySession(session, newId) {
 
 $("cloud-drop-receive-toggle").addEventListener("change", () => {
   $("cloud-drop-receive-hint").classList.toggle("hidden", !$("cloud-drop-receive-toggle").checked);
+  // An error about the previous choice no longer applies.
+  $("receive-start-error").textContent = "";
   refreshCloudLinkPanel();
 });
 
 // ---------- Cloud drop receive: a linked Google account comes first ----------
-// commands::CLOUD_DROP_NOT_LINKED - what the pre-flight says without one.
-const CLOUD_DROP_NOT_LINKED = "Cloud drop needs a Google account so the sender can share the file with you.";
-const needsGoogleLink = (text) => String(text || "") === CLOUD_DROP_NOT_LINKED || isGoogleSignInExpired(text);
-
-/// The "Link Google account" panel in the receive form; `note` explains an
-/// expired sign-in (the panel's own text covers "not linked").
-function showCloudLinkPanel(show, note = "") {
-  $("cloud-drop-link-panel").classList.toggle("hidden", !show);
-  $("cloud-drop-link-error").textContent = note;
+/// The "Link Google account" panel in the receive form, saying `note`
+/// (session-model.js cloudLinkNote); hidden when there's none.
+function showCloudLinkPanel(note) {
+  $("cloud-drop-link-panel").classList.toggle("hidden", !note);
+  $("cloud-drop-link-note").textContent = note || "";
+  $("cloud-drop-link-error").textContent = "";
 }
 
-/// Picking Cloud drop: say right away if a Google account is needed first.
+/// The receiver's pre-flight (Cloud drop available, Google account linked,
+/// sign-in still valid), shown as the Link panel. Resolves to its error, ""
+/// when it passed. Only the newest check updates the panel.
+let cloudLinkCheck = 0;
+async function checkCloudLink() {
+  const n = ++cloudLinkCheck;
+  const err = await invoke("cloud_drop_receive_check").then(() => "", String);
+  if (n === cloudLinkCheck && $("cloud-drop-receive-toggle").checked) showCloudLinkPanel(cloudLinkNote(err));
+  return err;
+}
+
+/// Picking Cloud drop (or linking/unlinking anywhere): say right away if a
+/// Google account is needed first.
 async function refreshCloudLinkPanel() {
-  if (!$("cloud-drop-receive-toggle").checked) return showCloudLinkPanel(false);
-  const linked = await invoke("google_account_status").catch(() => null);
-  showCloudLinkPanel(!linked);
+  if ($("cloud-drop-receive-toggle").checked) return void (await checkCloudLink());
+  cloudLinkCheck++;
+  showCloudLinkPanel(null);
 }
 
 $("cloud-drop-link-btn").addEventListener("click", async () => {
@@ -3739,7 +3719,7 @@ $("cloud-drop-link-btn").addEventListener("click", async () => {
   $("cloud-drop-link-error").textContent = "";
   try {
     await invoke("link_google_account");
-    showCloudLinkPanel(false);
+    showCloudLinkPanel(null);
     refreshGoogleAccountStatus();
     // Carry on with the code already typed.
     if ($("receive-room-code").value.trim()) $("receive-btn").click();
@@ -3760,12 +3740,11 @@ function discardUnstartedCloudRequest(session, message) {
   if (activeSessionId === session.id) activeSessionId = null;
   renderSessionTabs();
   $("receive-room-code").value = session.cloudRequest.roomCode;
-  if (needsGoogleLink(message)) {
-    $("receive-start-error").textContent = "";
-    showCloudLinkPanel(true, isGoogleSignInExpired(message) ? message : "");
-  } else {
-    $("receive-start-error").textContent = message;
-  }
+  // Linking fixes it: the Link panel says so. Anything else: the reason.
+  const note = cloudLinkNote(message);
+  cloudLinkCheck++;
+  showCloudLinkPanel(note);
+  $("receive-start-error").textContent = note ? "" : message;
   if (window.lsvReturnToReceiveForm) window.lsvReturnToReceiveForm(session);
 }
 
@@ -3802,15 +3781,11 @@ $("receive-btn").addEventListener("click", async () => {
   if ($("cloud-drop-receive-toggle").checked) {
     // Pre-flight first: without a usable Google account nothing is created -
     // the form offers to link one, then carries on with this code.
-    try {
-      await invoke("cloud_drop_receive_check");
-    } catch (err) {
-      const msg = String(err);
-      if (needsGoogleLink(msg)) showCloudLinkPanel(true, isGoogleSignInExpired(msg) ? msg : "");
-      else $("receive-start-error").textContent = msg;
+    const err = await checkCloudLink();
+    if (err) {
+      if (!cloudLinkNote(err)) $("receive-start-error").textContent = err;
       return;
     }
-    showCloudLinkPanel(false);
     const session = newSession("receive", `clouddrop-${roomCode}-${Date.now()}`, "Cloud drop request");
     addSession(session);
     $("receive-room-code").value = "";

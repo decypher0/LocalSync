@@ -1076,6 +1076,7 @@ body.lsv-on #storage-panel:not(.hidden) {
 .lsv-review #review-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; }
 /* the review panel's own Run/Reject/log live on the page instead */
 .lsv-review #run-btn, .lsv-review #reject-btn, .lsv-review #run-progress-wrap, .lsv-review #work-dir,
+.lsv-review #run-error, .lsv-review #run-fix-setup-btn,
 .lsv-review label:has(#work-dir) { display: none !important; }
 
 @media (max-width: 900px) {
