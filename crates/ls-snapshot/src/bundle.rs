@@ -38,6 +38,30 @@ fn git_command(program: &str) -> Command {
 /// against.
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What a sender sees when `git` itself isn't installed, instead of a raw
+/// "program not found" spawn error.
+pub const GIT_MISSING: &str =
+    "Git isn't installed - LocalSync needs it to package your project. Install it from git-scm.com and restart LocalSync.";
+
+/// `git --version` runs. The compose wizard's folder check asks this first.
+pub fn git_available() -> bool {
+    git_command("git")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn spawn_error(e: std::io::Error, args: &[&str]) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!(GIT_MISSING)
+    } else {
+        anyhow::Error::new(e).context(format!("spawning git {args:?}"))
+    }
+}
+
 /// Git's well-known empty-tree object — diffing against it makes "no parent
 /// commit" just a regular diff (base = empty tree), instead of a separate
 /// code path. Every tracked file comes out as an add, which is exactly the
@@ -654,7 +678,7 @@ fn git_bytes_with(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("spawning git {args:?}"))?;
+        .map_err(|e| spawn_error(e, args))?;
 
     let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
@@ -694,4 +718,18 @@ fn git_bytes_with(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)])
     }
     log::info!("git {args:?} completed in {elapsed:?} ({} bytes)", stdout.len());
     Ok(stdout)
+}
+
+#[cfg(test)]
+mod git_missing_tests {
+    use super::*;
+
+    #[test]
+    fn missing_git_gets_the_plain_message_other_spawn_errors_keep_theirs() {
+        let e = spawn_error(std::io::Error::from(std::io::ErrorKind::NotFound), &["rev-parse", "HEAD"]);
+        assert_eq!(format!("{e:#}"), GIT_MISSING);
+        assert!(GIT_MISSING.contains("git-scm.com"));
+        let e = spawn_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied), &["archive"]);
+        assert!(format!("{e:#}").starts_with("spawning git [\"archive\"]"), "{e:#}");
+    }
 }

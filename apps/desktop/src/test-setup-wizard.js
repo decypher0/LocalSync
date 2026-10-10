@@ -109,3 +109,11 @@ test("Linux has just two steps", () => {
   const v = W.viewFromState({ os: "linux", steps: [step("podman_installed"), step("functional_check")], any_progress: false });
   assert.equal(v.steps.length, 2);
 });
+
+test("a failed test container offers Restart WSL only when the backend gives it a consent (Windows)", () => {
+  const failed = { step: "functional_check", status: "failed", consent: "This runs `wsl --shutdown`...", manual_instructions: "m" };
+  assert.deepEqual(W.stepActions(failed), ["retry", "fix", "manual"]);
+  assert.equal(W.fixLabel(failed), "Restart WSL and retry");
+  assert.deepEqual(W.stepActions({ ...failed, consent: null }), ["retry", "manual"]);
+  assert.equal(W.fixLabel({ step: "machine_ready" }), "Fix it");
+});

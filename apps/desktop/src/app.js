@@ -7,7 +7,12 @@
 // `Object.keys(window.__TAURI__)`, which only lists the core API - app,
 // core, event, ... - misleadingly suggesting they're missing if you check
 // that way instead of a direct property/typeof check).
-const { invoke } = window.__TAURI__.core;
+// Every call goes through here so the firewall note below shows before the
+// first command that opens a network socket.
+const invoke = (cmd, args) => {
+  if (FIREWALL_COMMANDS.has(cmd) && !(args && args.enabled === false)) noteFirewallOnce();
+  return window.__TAURI__.core.invoke(cmd, args);
+};
 const { listen } = window.__TAURI__.event;
 const { open } = window.__TAURI__.dialog;
 const { check: checkForUpdate } = window.__TAURI__.updater;
@@ -28,6 +33,25 @@ listen("firewall-warning", (evt) => {
   $("firewall-banner").textContent = evt.payload;
   $("firewall-banner").classList.remove("hidden");
 });
+
+// Windows asks to allow an app the first time it listens on the network
+// (the embedded relay, discovery, WebRTC). Say why once, just before that.
+const FIREWALL_COMMANDS = new Set([
+  "start_send_session", "set_discoverable", "start_discovery_browsing", "send_project_session",
+  "receive_snapshot", "start_cloud_drop_session", "request_cloud_drop_access", "share_snapshot_wizard",
+]);
+const FIREWALL_NOTED_KEY = "localsync.firewallNoted";
+const FIREWALL_NOTE =
+  "Windows may ask whether to allow LocalSync on your network - choose Allow on private networks so nearby devices can connect.";
+function noteFirewallOnce() {
+  if (!navigator.userAgent.includes("Windows")) return;
+  try {
+    if (localStorage.getItem(FIREWALL_NOTED_KEY)) return;
+    localStorage.setItem(FIREWALL_NOTED_KEY, "1");
+  } catch {}
+  $("firewall-banner").textContent = FIREWALL_NOTE;
+  $("firewall-banner").classList.remove("hidden");
+}
 
 // ---------- round 24: magic-link deep-link handoff (localsync://receive?code=...) ----------
 // Only ever pre-fills the Receive tab's own code input and switches to it -
@@ -93,7 +117,10 @@ async function runUpdateCheck(reportStatus) {
     // Quiet on the launch check (no endpoint configured yet, offline, a
     // dev build with no matching release, etc. shouldn't nag on startup) -
     // only surfaced when the user explicitly asked, via the Settings button.
-    if (reportStatus) $("check-updates-status").textContent = String(err);
+    console.warn("update check failed:", err);
+    if (reportStatus) {
+      $("check-updates-status").textContent = `Couldn't check for updates right now - you may be offline, or no update has been published yet. Try again later. (${err})`;
+    }
   }
 }
 
@@ -444,6 +471,22 @@ $("unlink-google-btn").addEventListener("click", async () => {
     $("google-account-error").textContent = String(err);
   }
 });
+
+// ---------- receive work folder default ----------
+// The HTML ships the old Unix default; the backend knows the real per-OS one
+// (on Windows /tmp would mean C:\tmp). Fields still showing the old default
+// are switched over.
+const OLD_DEFAULT_WORK_DIR = "/tmp/localsync-work";
+let defaultWorkDir = OLD_DEFAULT_WORK_DIR;
+invoke("default_work_dir")
+  .then((dir) => {
+    if (!dir) return;
+    defaultWorkDir = dir;
+    for (const id of ["work-dir", "resume-work-dir", "new-work-dir"]) {
+      if ($(id).value === OLD_DEFAULT_WORK_DIR) $(id).value = dir;
+    }
+  })
+  .catch((err) => console.warn("default_work_dir failed:", err));
 
 // ---------- relay mode (persisted in localStorage — set once, survives restarts) ----------
 const MODE_KEY = "localsync.relayMode";
@@ -1386,6 +1429,9 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
 
 $("wiz-folders-back-btn").addEventListener("click", () => showWizardStep("wiz-step-mode"));
 
+// Must match ls_snapshot::GIT_MISSING.
+const GIT_MISSING_TEXT = "Git isn't installed - LocalSync needs it to package your project. Install it from git-scm.com and restart LocalSync.";
+
 $("wiz-folders-next-btn").addEventListener("click", async () => {
   if (wizardFolders.length === 0) {
     $("wiz-folders-error").textContent = "Select at least one project folder.";
@@ -1396,13 +1442,19 @@ $("wiz-folders-next-btn").addEventListener("click", async () => {
   for (const f of wizardFolders) delete f.compose;
   // Exactly one folder without a docker-compose.yml of its own: describe how
   // to run it instead (compose wizard). Anything else is the normal wizard.
-  if (wizardFolders.length === 1) {
+  // Every send needs git, so the first folder is always inspected for that.
+  {
     const path = wizardFolders[0].path;
+    const count = wizardFolders.length;
     $("wiz-folders-next-btn").disabled = true;
     try {
       const info = await invoke("inspect_project", { folderPath: path });
-      if (wizardFolders.length !== 1 || wizardFolders[0].path !== path) return; // the list changed meanwhile
-      if (!info.has_compose) {
+      if (wizardFolders.length !== count || wizardFolders[0].path !== path) return; // the list changed meanwhile
+      if (info.git_missing) {
+        $("wiz-folders-error").textContent = GIT_MISSING_TEXT;
+        return;
+      }
+      if (count === 1 && !info.has_compose) {
         if (!info.is_git_repo || !info.has_commits) {
           $("wiz-folders-error").textContent =
             (info.is_git_repo ? "This folder has no commits yet" : "This folder isn't a git repository") +
@@ -3248,7 +3300,7 @@ function renderResumePanel(session) {
   $("resume-project").textContent = session.title;
   $("resume-commit").textContent = session.gitCommit || "(unknown)";
   $("resume-last-received").textContent = session.lastReceivedAt ? new Date(session.lastReceivedAt).toLocaleString() : "(unknown)";
-  if (!$("resume-work-dir").value) $("resume-work-dir").value = session.workDir || "/tmp/localsync-work";
+  if (!$("resume-work-dir").value) $("resume-work-dir").value = session.workDir || defaultWorkDir;
   $("resume-run-btn").disabled = session.busy;
   // The view has no stoppable/runnable id for a session the backend already
   // reports as running (see receivedSessionFromView's own doc comment) -
@@ -3741,7 +3793,7 @@ function renderSetupStep(s) {
       row.append(b);
       return b;
     };
-    if (actions.includes("fix")) btn("Fix it", "primary-btn setup-fix-btn", (e) => openSetupConsent(s, e.currentTarget));
+    if (actions.includes("fix")) btn(SetupWizard.fixLabel(s), "primary-btn setup-fix-btn", (e) => openSetupConsent(s, e.currentTarget));
     btn("Retry this step", "ghost-btn setup-retry-btn", () => verifySetup());
     if (actions.includes("manual")) {
       const b = btn("I'll do it myself", "ghost-btn setup-manual-btn", () => {

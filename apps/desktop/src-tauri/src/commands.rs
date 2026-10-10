@@ -177,8 +177,8 @@ pub async fn start_send_session(mode: String, relay_url: Option<String>) -> Resu
         });
     }
 
-    let (port, _relay_task) = ls_net::host_ephemeral_relay().await.map_err(|e| e.to_string())?;
-    let lan_ip = ls_net::detect_lan_ip().map_err(|e| e.to_string())?;
+    let (port, _relay_task) = ls_net::host_ephemeral_relay().await.map_err(relay_bind_error)?;
+    let lan_ip = ls_net::detect_lan_ip().map_err(lan_ip_error)?;
     let room_id = ls_net::generate_room_id();
     let addr = std::net::SocketAddrV4::new(lan_ip, port);
     let room_code = ls_net::encode_room_code(addr, &room_id);
@@ -190,6 +190,43 @@ pub async fn start_send_session(mode: String, relay_url: Option<String>) -> Resu
         signaling_url,
         code_expires_in_seconds: ls_net::CONNECT_TIMEOUT.as_secs(),
     })
+}
+
+/// Plain-language text for a failed `ls_net::connect_as_*`: the raw error
+/// names tungstenite/IO internals (callers log it in full first).
+pub(crate) fn connect_error(e: &anyhow::Error, signaling_url: &str) -> String {
+    let chain = format!("{e:#}");
+    if chain.contains("failed to connect to signaling server") {
+        format!(
+            "Couldn't reach the relay at {signaling_url}. If you entered a Remote relay address, check it (it looks like \
+             ws://host:port) and that the relay server is running. With a Local network code, both devices must be on the \
+             same network, the sender must still have LocalSync open, and its firewall must allow LocalSync."
+        )
+    } else if chain.starts_with("timed out connecting to peer") {
+        format!(
+            "The other device didn't connect within {} minutes. Check that it entered this code (on the same network, or \
+             using the same relay) and try again.",
+            ls_net::CONNECT_TIMEOUT.as_secs() / 60
+        )
+    } else {
+        chain
+    }
+}
+
+/// Hosting this device's own LAN relay (Local network send, discoverability)
+/// failed - an OS-level bind error, typically security software.
+fn relay_bind_error(e: anyhow::Error) -> String {
+    log::warn!("hosting the local relay failed: {e:#}");
+    "Couldn't open a network port on this device for Local network sharing. Try again; if it keeps failing, check \
+     that security software isn't blocking LocalSync, or use Remote relay or Cloud drop instead."
+        .to_string()
+}
+
+fn lan_ip_error(e: anyhow::Error) -> String {
+    log::warn!("detecting the LAN address failed: {e:#}");
+    "This device doesn't seem to be connected to a network, so it can't share over Local network. Connect to Wi-Fi or \
+     Ethernet and try again."
+        .to_string()
 }
 
 /// Decodes a room code pasted by the user into the `room_id`/`signaling_url`
@@ -286,8 +323,8 @@ pub async fn share_snapshot<R: tauri::Runtime>(
     let conn = ls_net::connect_as_sender(&signaling_url, &room_code)
         .await
         .map_err(|e| {
-            log::warn!("share_snapshot: connect_as_sender failed: {e}");
-            e.to_string()
+            log::warn!("share_snapshot: connect_as_sender failed: {e:#}");
+            connect_error(&e, &signaling_url)
         })?;
     log::info!("share_snapshot: data channel open, sending payload ({} bytes)", bytes.len());
     // The data channel is open, meaning a real peer just finished the WebRTC
@@ -679,8 +716,8 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
 
     log::info!("share_snapshot_wizard: connecting to signaling");
     let conn = ls_net::connect_as_sender(&signaling_url, &room_code).await.map_err(|e| {
-        log::warn!("share_snapshot_wizard: connect_as_sender failed: {e}");
-        e.to_string()
+        log::warn!("share_snapshot_wizard: connect_as_sender failed: {e:#}");
+        connect_error(&e, &signaling_url)
     })?;
 
     if require_accept {
@@ -919,8 +956,8 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     let conn = ls_net::connect_as_receiver(&signaling_url, &room_code)
         .await
         .map_err(|e| {
-            log::warn!("receive_snapshot: connect_as_receiver failed: {e}");
-            e.to_string()
+            log::warn!("receive_snapshot: connect_as_receiver failed: {e:#}");
+            connect_error(&e, &signaling_url)
         })?;
     log::info!("receive_snapshot: data channel open, receiving payload");
 
@@ -1366,8 +1403,8 @@ pub async fn set_discoverable<R: tauri::Runtime>(
         return Err("Enter a device name before turning on discoverability.".to_string());
     }
 
-    let (port, relay_task) = ls_net::host_ephemeral_relay().await.map_err(|e| e.to_string())?;
-    let lan_ip = ls_net::detect_lan_ip().map_err(|e| e.to_string())?;
+    let (port, relay_task) = ls_net::host_ephemeral_relay().await.map_err(relay_bind_error)?;
+    let lan_ip = ls_net::detect_lan_ip().map_err(lan_ip_error)?;
     let room_id = ls_net::generate_room_id();
     // This device's own persistent id, so a sender's sessions recognize it
     // again across restarts and renames. A failure to read/create it isn't
@@ -1773,7 +1810,7 @@ pub async fn start_cloud_drop_session<R: tauri::Runtime>(
     log::info!("start_cloud_drop_session: waiting for a receiver on room={room}");
     let conn = ls_net::connect_as_sender(&send_info.signaling_url, room)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| connect_error(&e, &send_info.signaling_url))?;
 
     // Keyed by the same `room` value the connect call above actually used
     // (not `send_info.room_code`), for the same reason, and to match the
@@ -1942,7 +1979,7 @@ pub async fn request_cloud_drop_access(
     log::info!("request_cloud_drop_access: connecting for room={}", decoded.room_id);
     let conn = ls_net::connect_as_receiver(&decoded.signaling_url, &decoded.room_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| connect_error(&e, &decoded.signaling_url))?;
 
     ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: tokens.email.clone() })
         .await
@@ -2027,3 +2064,23 @@ pub fn load_session_history() -> Result<Vec<crate::session_history::SessionHisto
     crate::session_history::load()
 }
 
+#[cfg(test)]
+mod connect_error_tests {
+    use super::connect_error;
+
+    #[test]
+    fn relay_and_timeout_failures_read_plainly() {
+        let io = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let e = anyhow::Error::new(io).context("failed to connect to signaling server at ws://10.0.0.9:9090/abc");
+        let msg = connect_error(&e, "ws://10.0.0.9:9090");
+        assert!(msg.starts_with("Couldn't reach the relay at ws://10.0.0.9:9090.") && msg.contains("ws://host:port"), "{msg}");
+        assert!(!msg.contains("refused") && !msg.contains("  "), "{msg}");
+
+        let e = anyhow::anyhow!("deadline has elapsed").context("timed out connecting to peer");
+        let msg = connect_error(&e, "ws://x");
+        assert!(msg.starts_with("The other device didn't connect within 5 minutes."), "{msg}");
+
+        // Anything else keeps its real text.
+        assert_eq!(connect_error(&anyhow::anyhow!("signaling closed before an answer arrived"), "ws://x"), "signaling closed before an answer arrived");
+    }
+}

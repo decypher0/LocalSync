@@ -64,6 +64,8 @@ Grab the latest build from the **[Releases page](https://github.com/decypher0/Lo
 4. Share the generated code or magic link with your teammate.
 5. On the receiver's side, click **Receive**, enter the code (or just click the link), review the diff, and click **Run**.
 
+What each side needs: the **sender** needs [Git](https://git-scm.com) installed and the project committed (LocalSync packages what git tracks). The **receiver** needs Podman — on first launch LocalSync's setup screen checks for it and offers to install it (on Windows this includes turning on WSL, which needs one restart). The first time LocalSync connects, Windows may ask whether to allow it on your network: choose **Allow** on private networks so nearby devices can connect.
+
 ## 🛠️ Build from source
 
 **Prerequisites:**

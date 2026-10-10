@@ -344,11 +344,11 @@
     parkWizard();
     $id("new-setup-slot").classList.add("hidden");
     $id("new-setup-receive").classList.remove("hidden");
-    $id("new-work-dir").value = $id("work-dir").value || "/tmp/localsync-work";
+    $id("new-work-dir").value = $id("work-dir").value || defaultWorkDir;
     navigate("new-setup");
   }
   $id("new-setup-receive-continue").addEventListener("click", () => {
-    const dir = $id("new-work-dir").value.trim() || "/tmp/localsync-work";
+    const dir = $id("new-work-dir").value.trim() || defaultWorkDir;
     $id("work-dir").value = dir;
     $id("resume-work-dir").value = dir;
     V.flow.phase = "transfer";
@@ -1061,7 +1061,7 @@
 
   function runCurrent() {
     const s = V.session;
-    if (!$id("work-dir").value.trim()) $id("work-dir").value = s.workDir || "/tmp/localsync-work";
+    if (!$id("work-dir").value.trim()) $id("work-dir").value = s.workDir || defaultWorkDir;
     if (!$id("resume-work-dir").value.trim()) $id("resume-work-dir").value = s.workDir || $id("work-dir").value;
     pressExisting(s.status === "reviewing" ? "run-btn" : "resume-run-btn");
   }

@@ -92,6 +92,10 @@ pub struct StepInfo {
 }
 
 
+/// Consent for the Windows `FunctionalCheck` fix ("Restart WSL and retry").
+pub const WSL_RESTART_CONSENT: &str = "This runs `wsl --shutdown`, which stops every running WSL distribution (not just \
+    Podman's, so save any work open in them first), then starts Podman's machine again and repeats the test.";
+
 pub fn step_info(step: SetupStep) -> StepInfo {
     info_for(this_os(), step, &on_path)
 }
@@ -153,7 +157,9 @@ fn info_for(os: TargetOs, step: SetupStep, has: &dyn Fn(&str) -> bool) -> StepIn
         ),
         (FunctionalCheck, os) => (
             "Test container",
-            None,
+            // Windows: the WSL-backed machine can report Running while every
+            // container start fails or hangs; a WSL restart clears that.
+            (os == TargetOs::Windows).then(|| WSL_RESTART_CONSENT.to_string()),
             false,
             format!(
                 "Run `podman run --rm --memory 1g docker.io/library/busybox true` in a terminal; it should finish without \
@@ -355,6 +361,7 @@ async fn os_fix(step: SetupStep, log: &ProvisioningLog) -> Result<()> {
         SetupStep::PodmanInstalled => w::fix_podman_installed(log).await,
         SetupStep::WslEnabled => w::fix_wsl(log).await,
         SetupStep::MachineReady => w::fix_machine(log).await,
+        SetupStep::FunctionalCheck => w::fix_restart_wsl(log).await,
         _ => no_fix(step),
     }
 }
@@ -411,7 +418,8 @@ mod tests {
                     let i = info_for(os, step, has);
                     assert_eq!(i.step, step);
                     assert!(!i.title.is_empty() && !i.manual_instructions.is_empty(), "{os:?} {step:?}");
-                    let expect_none = matches!(step, FunctionalCheck | RestartAfterWsl)
+                    let expect_none = step == RestartAfterWsl
+                        || (step == FunctionalCheck && os != TargetOs::Windows)
                         || (os == TargetOs::Linux && step == PodmanInstalled && !has_pm);
                     assert_eq!(i.consent.is_none(), expect_none, "{os:?} {step:?} has_pm={has_pm}");
                     if let Some(c) = &i.consent {
@@ -425,6 +433,12 @@ mod tests {
         assert!(!info_for(TargetOs::Macos, PodmanInstalled, &nothing).needs_admin);
         assert!(info_for(TargetOs::Linux, PodmanInstalled, &apt_pkexec).needs_admin);
         assert!(!info_for(TargetOs::Linux, PodmanInstalled, &nothing).needs_admin);
+        // "Restart WSL and retry": Windows only, warns that it stops every distro.
+        let win = info_for(TargetOs::Windows, FunctionalCheck, &nothing);
+        assert_eq!(win.consent.as_deref(), Some(WSL_RESTART_CONSENT));
+        assert!(!win.needs_admin);
+        assert!(WSL_RESTART_CONSENT.contains("wsl --shutdown") && WSL_RESTART_CONSENT.contains("every running WSL distribution"));
+        assert!(!WSL_RESTART_CONSENT.contains("  "), "{WSL_RESTART_CONSENT}");
     }
 
     fn plan(bins: &[&str]) -> LinuxInstallPlan {
@@ -490,6 +504,7 @@ mod tests {
     async fn fixes_without_automation_error() {
         let dir = tempfile::tempdir().unwrap();
         let log = ProvisioningLog::open_in(dir.path()).unwrap();
+        #[cfg(not(windows))] // on Windows this is the real `wsl --shutdown` fix
         assert!(fix_step(FunctionalCheck, &log).await.is_err());
         assert!(fix_step(RestartAfterWsl, &log).await.is_err());
         #[cfg(not(windows))]

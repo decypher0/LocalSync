@@ -110,6 +110,11 @@ const SetupWizard = (() => {
     return out;
   }
 
+  /** The fix button's label. The test container's fix (Windows only) restarts WSL. */
+  function fixLabel(s) {
+    return s.step === "functional_check" ? "Restart WSL and retry" : "Fix it";
+  }
+
   function consentMessage(s, os) {
     if (!s.needs_admin) return s.consent;
     const ask = os === "windows" ? "Windows will ask for administrator permission." : "You'll be asked for your password.";
@@ -134,6 +139,7 @@ const SetupWizard = (() => {
     applyResult,
     applyError,
     stepActions,
+    fixLabel,
     consentMessage,
     statusLabel,
     isPodmanNotReady,
