@@ -232,6 +232,7 @@ pub(crate) fn output_text(out: &std::process::Output) -> String {
 // never swallow a command's real error text, and end with podman machine
 // actually running and podman-compose reachable. ---
 
+pub mod recovery;
 pub mod setup;
 
 #[cfg(target_os = "windows")]

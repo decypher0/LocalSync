@@ -3,7 +3,7 @@ mod hash;
 mod sign;
 mod types;
 
-pub use bundle::{folder_tree, head_commit, snapshot_commit};
+pub use bundle::{folder_tree, git_available, head_commit, snapshot_commit, GIT_MISSING};
 pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, GeneratedFiles, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};

@@ -17,6 +17,7 @@
 //! stuck WSL2 user-session state, not a hypothetical).
 
 use super::{output_text, run_logged, ProvisioningLog};
+use crate::provisioning::recovery::{self, decode_wsl_output, FixProgress};
 use crate::provisioning::setup::{parse_machine_list, StepCheck};
 use anyhow::Result;
 use std::os::windows::process::CommandExt;
@@ -303,21 +304,6 @@ async fn check_wsl2_usable(log: &ProvisioningLog) -> Result<()> {
     Ok(())
 }
 
-/// `wsl.exe` writes UTF-16LE when captured, sometimes behind a stray UTF-8
-/// BOM (see `check_wsl2_usable`); on this machine in October 2026 it came
-/// with no BOM, and with `WSL_UTF8=1` set it writes plain UTF-8. So: strip
-/// a BOM if present, then decode as UTF-16LE only if the bytes contain NULs
-/// (ASCII-range UTF-16 always does), else as UTF-8.
-fn decode_wsl_output(bytes: &[u8]) -> String {
-    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    if bytes.contains(&0) {
-        let u16s: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        String::from_utf16_lossy(&u16s)
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
-}
-
 /// Step 5: `podman machine list` — init a machine if none exists, start it
 /// if one exists but isn't running. Same `{{.Name}}\t{{.Running}}` template
 /// used across platforms (Podman abstracts the WSL2-vs-QEMU/AppleHV backend
@@ -590,6 +576,27 @@ pub(crate) async fn fix_wsl(log: &ProvisioningLog) -> Result<()> {
 pub(crate) async fn fix_machine(log: &ProvisioningLog) -> Result<()> {
     ensure_machine_running(log).await?;
     verify_podman_info(log, false).await
+}
+
+/// `FunctionalCheck` fix ("Fix automatically" / "Restart WSL and retry", only
+/// after the person agreed that every WSL distro stops): the machine can
+/// report Running while Podman inside it is unreachable or every container
+/// start fails or hangs (see `verify_podman_info`); `wsl --shutdown`, waiting
+/// for every distro to stop, `podman machine start` and waiting for `podman
+/// info` is what clears it. The wizard re-runs the test container afterwards.
+/// The sequence itself lives in `recovery` (cross-platform, unit-tested).
+pub(crate) async fn fix_restart_wsl(log: &ProvisioningLog, progress: &(dyn Fn(FixProgress) + Send + Sync)) -> Result<()> {
+    let run = |program: &'static str, args: &'static [&'static str]| async move {
+        match run_logged(log, program, args).await {
+            Ok(o) => recovery::CmdOut {
+                ok: o.status.success(),
+                text: format!("{}\n{}", decode_wsl_output(&o.stdout), decode_wsl_output(&o.stderr)).trim().to_string(),
+                stdout: o.stdout,
+            },
+            Err(e) => recovery::CmdOut { ok: false, stdout: Vec::new(), text: format!("{e:#}") },
+        }
+    };
+    recovery::run_recovery(run, progress, recovery::Timing::default()).await
 }
 
 pub(crate) fn restart_computer() -> Result<()> {

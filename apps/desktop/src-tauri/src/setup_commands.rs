@@ -2,7 +2,9 @@
 //! in `setup_state.rs`; this is the IPC surface and event streaming.
 //!
 //! Events: `setup-step` ([`StepEvent`]) while verifying, `setup-progress`
-//! ([`SetupProgress`]) with the provisioning log's lines while a fix runs.
+//! ([`SetupProgress`]) with the provisioning log's lines while a fix runs, and
+//! `setup-fix-progress` ([`setup::FixProgress`]) per step of a fix that has
+//! steps (the Windows "Fix automatically" WSL/Podman recovery).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -104,7 +106,7 @@ pub fn setup_state() -> Result<SetupView, String> {
 #[tauri::command]
 pub async fn setup_verify<R: tauri::Runtime>(app: AppHandle<R>) -> Result<SetupVerifyView, String> {
     let os = setup::this_os();
-    let ops = RealOps(ProvisioningLog::open_default().map_err(|e| e.to_string())?);
+    let ops = RealOps(ProvisioningLog::open_default().map_err(|e| e.to_string())?, Box::new(|_| {}));
     let (state, failure) = verify_emitting(&app, &setup_state::default_dir()?, os, &ops).await?;
     Ok(verify_view(os, &state, failure))
 }
@@ -125,7 +127,13 @@ pub async fn setup_fix<R: tauri::Runtime>(
     // Offset taken now, before the fix starts, so none of its lines are missed.
     let offset = std::fs::metadata(log.path()).map(|m| m.len()).unwrap_or(0);
     let tail = tauri::async_runtime::spawn(tail_log(app.clone(), log.path().to_path_buf(), offset, step, stop.clone()));
-    let ops = RealOps(log);
+    let progress_app = app.clone();
+    let ops = RealOps(
+        log,
+        Box::new(move |p: setup::FixProgress| {
+            let _ = progress_app.emit("setup-fix-progress", p);
+        }),
+    );
     let result = setup_state::fix_then_verify(&dir, os, step, confirmed, &ops, emitter(&app)).await;
     stop.store(true, Ordering::Relaxed);
     let _ = tail.await;

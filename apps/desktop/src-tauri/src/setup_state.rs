@@ -12,7 +12,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use ls_containers::setup::{SetupStep, StepCheck, TargetOs};
+use ls_containers::setup::{FixProgress, SetupStep, StepCheck, TargetOs};
 use ls_containers::ProvisioningLog;
 use serde::{Deserialize, Serialize};
 
@@ -96,14 +96,15 @@ pub trait SetupOps {
     fn fix(&self, step: SetupStep) -> impl Future<Output = Result<(), String>> + Send;
 }
 
-pub struct RealOps(pub ProvisioningLog);
+/// The log, and where a fix's per-step progress goes (`setup-fix-progress`).
+pub struct RealOps(pub ProvisioningLog, pub Box<dyn Fn(FixProgress) + Send + Sync>);
 
 impl SetupOps for RealOps {
     fn check(&self, step: SetupStep) -> impl Future<Output = StepCheck> + Send {
         ls_containers::setup::check_step(step, &self.0)
     }
     fn fix(&self, step: SetupStep) -> impl Future<Output = Result<(), String>> + Send {
-        async move { ls_containers::setup::fix_step(step, &self.0).await.map_err(|e| format!("{e:#}")) }
+        async move { ls_containers::setup::fix_step(step, &self.0, &*self.1).await.map_err(|e| format!("{e:#}")) }
     }
 }
 

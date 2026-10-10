@@ -7,7 +7,12 @@
 // `Object.keys(window.__TAURI__)`, which only lists the core API - app,
 // core, event, ... - misleadingly suggesting they're missing if you check
 // that way instead of a direct property/typeof check).
-const { invoke } = window.__TAURI__.core;
+// Every call goes through here so the firewall note below shows before the
+// first command that opens a network socket.
+const invoke = (cmd, args) => {
+  if (FIREWALL_COMMANDS.has(cmd) && !(args && args.enabled === false)) noteFirewallOnce();
+  return window.__TAURI__.core.invoke(cmd, args);
+};
 const { listen } = window.__TAURI__.event;
 const { open } = window.__TAURI__.dialog;
 const { check: checkForUpdate } = window.__TAURI__.updater;
@@ -28,6 +33,25 @@ listen("firewall-warning", (evt) => {
   $("firewall-banner").textContent = evt.payload;
   $("firewall-banner").classList.remove("hidden");
 });
+
+// Windows asks to allow an app the first time it listens on the network
+// (the embedded relay, discovery, WebRTC). Say why once, just before that.
+const FIREWALL_COMMANDS = new Set([
+  "start_send_session", "set_discoverable", "start_discovery_browsing", "send_project_session",
+  "receive_snapshot", "start_cloud_drop_session", "request_cloud_drop_access", "share_snapshot_wizard",
+]);
+const FIREWALL_NOTED_KEY = "localsync.firewallNoted";
+const FIREWALL_NOTE =
+  "Windows may ask whether to allow LocalSync on your network - choose Allow on private networks so nearby devices can connect.";
+function noteFirewallOnce() {
+  if (!navigator.userAgent.includes("Windows")) return;
+  try {
+    if (localStorage.getItem(FIREWALL_NOTED_KEY)) return;
+    localStorage.setItem(FIREWALL_NOTED_KEY, "1");
+  } catch {}
+  $("firewall-banner").textContent = FIREWALL_NOTE;
+  $("firewall-banner").classList.remove("hidden");
+}
 
 // ---------- round 24: magic-link deep-link handoff (localsync://receive?code=...) ----------
 // Only ever pre-fills the Receive tab's own code input and switches to it -
@@ -93,7 +117,10 @@ async function runUpdateCheck(reportStatus) {
     // Quiet on the launch check (no endpoint configured yet, offline, a
     // dev build with no matching release, etc. shouldn't nag on startup) -
     // only surfaced when the user explicitly asked, via the Settings button.
-    if (reportStatus) $("check-updates-status").textContent = String(err);
+    console.warn("update check failed:", err);
+    if (reportStatus) {
+      $("check-updates-status").textContent = `Couldn't check for updates right now - you may be offline, or no update has been published yet. Try again later. (${err})`;
+    }
   }
 }
 
@@ -444,6 +471,22 @@ $("unlink-google-btn").addEventListener("click", async () => {
     $("google-account-error").textContent = String(err);
   }
 });
+
+// ---------- receive work folder default ----------
+// The HTML ships the old Unix default; the backend knows the real per-OS one
+// (on Windows /tmp would mean C:\tmp). Fields still showing the old default
+// are switched over.
+const OLD_DEFAULT_WORK_DIR = "/tmp/localsync-work";
+let defaultWorkDir = OLD_DEFAULT_WORK_DIR;
+invoke("default_work_dir")
+  .then((dir) => {
+    if (!dir) return;
+    defaultWorkDir = dir;
+    for (const id of ["work-dir", "resume-work-dir", "new-work-dir"]) {
+      if ($(id).value === OLD_DEFAULT_WORK_DIR) $(id).value = dir;
+    }
+  })
+  .catch((err) => console.warn("default_work_dir failed:", err));
 
 // ---------- relay mode (persisted in localStorage — set once, survives restarts) ----------
 const MODE_KEY = "localsync.relayMode";
@@ -1386,6 +1429,9 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
 
 $("wiz-folders-back-btn").addEventListener("click", () => showWizardStep("wiz-step-mode"));
 
+// Must match ls_snapshot::GIT_MISSING.
+const GIT_MISSING_TEXT = "Git isn't installed - LocalSync needs it to package your project. Install it from git-scm.com and restart LocalSync.";
+
 $("wiz-folders-next-btn").addEventListener("click", async () => {
   if (wizardFolders.length === 0) {
     $("wiz-folders-error").textContent = "Select at least one project folder.";
@@ -1396,13 +1442,19 @@ $("wiz-folders-next-btn").addEventListener("click", async () => {
   for (const f of wizardFolders) delete f.compose;
   // Exactly one folder without a docker-compose.yml of its own: describe how
   // to run it instead (compose wizard). Anything else is the normal wizard.
-  if (wizardFolders.length === 1) {
+  // Every send needs git, so the first folder is always inspected for that.
+  {
     const path = wizardFolders[0].path;
+    const count = wizardFolders.length;
     $("wiz-folders-next-btn").disabled = true;
     try {
       const info = await invoke("inspect_project", { folderPath: path });
-      if (wizardFolders.length !== 1 || wizardFolders[0].path !== path) return; // the list changed meanwhile
-      if (!info.has_compose) {
+      if (wizardFolders.length !== count || wizardFolders[0].path !== path) return; // the list changed meanwhile
+      if (info.git_missing) {
+        $("wiz-folders-error").textContent = GIT_MISSING_TEXT;
+        return;
+      }
+      if (count === 1 && !info.has_compose) {
         if (!info.is_git_repo || !info.has_commits) {
           $("wiz-folders-error").textContent =
             (info.is_git_repo ? "This folder has no commits yet" : "This folder isn't a git repository") +
@@ -2339,7 +2391,7 @@ $("cw-test-btn").addEventListener("click", async () => {
       const fix = cwEl("button", "ghost-btn", "Fix setup");
       fix.type = "button";
       fix.id = "cw-fix-setup-btn";
-      fix.addEventListener("click", () => openSetup());
+      showSetupFixButton(fix, res.error);
       result.append(fix);
     }
     if (res.output_tail) result.append(cwEl("pre", "cw-log", res.output_tail));
@@ -3231,7 +3283,7 @@ function renderReviewPanel(session) {
   // attempt looked like, so switching tabs away mid-Run and back doesn't
   // lose the log or silently drop the error.
   $("run-error").textContent = session.runErrorText || "";
-  $("run-fix-setup-btn").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
+  showSetupFixButton($("run-fix-setup-btn"), session.runErrorText);
   const showRunProgress = session.runInProgress || !!session.runErrorText;
   $("run-progress-wrap").classList.toggle("hidden", !showRunProgress);
   if (showRunProgress) {
@@ -3248,7 +3300,7 @@ function renderResumePanel(session) {
   $("resume-project").textContent = session.title;
   $("resume-commit").textContent = session.gitCommit || "(unknown)";
   $("resume-last-received").textContent = session.lastReceivedAt ? new Date(session.lastReceivedAt).toLocaleString() : "(unknown)";
-  if (!$("resume-work-dir").value) $("resume-work-dir").value = session.workDir || "/tmp/localsync-work";
+  if (!$("resume-work-dir").value) $("resume-work-dir").value = session.workDir || defaultWorkDir;
   $("resume-run-btn").disabled = session.busy;
   // The view has no stoppable/runnable id for a session the backend already
   // reports as running (see receivedSessionFromView's own doc comment) -
@@ -3256,7 +3308,7 @@ function renderResumePanel(session) {
   $("resume-already-running-hint").classList.toggle("hidden", !session.reportedRunning);
 
   $("resume-run-error").textContent = session.runErrorText || "";
-  $("resume-run-fix-setup-btn").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
+  showSetupFixButton($("resume-run-fix-setup-btn"), session.runErrorText);
   const showRunProgress = session.runInProgress || !!session.runErrorText;
   $("resume-run-progress-wrap").classList.toggle("hidden", !showRunProgress);
   if (showRunProgress) {
@@ -3570,7 +3622,7 @@ async function runReceiveSession(session, workDir, ids) {
     session.runErrorText = String(err);
     if (session.id === activeSessionId) {
       $(ids.error).textContent = session.runErrorText;
-      $(ids.fixSetup).classList.toggle("hidden", !SetupWizard.isPodmanNotReady(session.runErrorText));
+      showSetupFixButton($(ids.fixSetup), session.runErrorText);
       $(ids.progressLabel).textContent = "Failed — see details below.";
       document.querySelector(ids.spinnerSelector)?.classList.add("hidden");
     }
@@ -3703,6 +3755,19 @@ function enterApp() {
 }
 
 const SETUP_ICON = { done: "icon-circle-check", failed: "icon-circle-x" };
+const RECOVERY_STATUS_TEXT = { pending: "waiting", running: "in progress…", done: "done", failed: "failed" };
+const ON_WINDOWS = navigator.userAgent.includes("Windows");
+
+/// The "open setup" button next to a Run / test-run error: shown only for
+/// "Podman isn't ready" errors; for the stuck Podman service on Windows it
+/// reads "Fix automatically" and opens setup straight at that fix (which
+/// still asks for consent first).
+function showSetupFixButton(btn, err) {
+  btn.classList.toggle("hidden", !SetupWizard.isPodmanNotReady(err));
+  const label = SetupWizard.errorFixLabel(err, ON_WINDOWS);
+  (btn.querySelector("span") || btn).textContent = label;
+  btn.onclick = () => openSetup({ autoFix: label === "Fix automatically" });
+}
 
 function renderSetupStep(s) {
   const li = cwEl("li", `setup-step is-${s.status}`);
@@ -3717,6 +3782,15 @@ function renderSetupStep(s) {
   main.append(title);
   const summary = s.summary || (s.status === "checking" ? "Checking…" : "");
   if (summary) main.append(cwEl("p", "setup-step-summary", summary));
+  if (s.step === "functional_check" && setupView.recovery) {
+    const ol = cwEl("ol", "setup-recovery");
+    for (const r of setupView.recovery) {
+      const item = cwEl("li", `is-${r.status}`, r.label);
+      item.append(cwEl("span", "setup-recovery-status", ` - ${RECOVERY_STATUS_TEXT[r.status] || r.status}`));
+      ol.append(item);
+    }
+    main.append(ol);
+  }
   if (s.details) {
     const open = setupUi.openDetails.has(s.step);
     const toggle = cwEl("button", "link-btn setup-details-toggle");
@@ -3741,7 +3815,7 @@ function renderSetupStep(s) {
       row.append(b);
       return b;
     };
-    if (actions.includes("fix")) btn("Fix it", "primary-btn setup-fix-btn", (e) => openSetupConsent(s, e.currentTarget));
+    if (actions.includes("fix")) btn(SetupWizard.fixLabel(s), "primary-btn setup-fix-btn", (e) => openSetupConsent(s, e.currentTarget));
     btn("Retry this step", "ghost-btn setup-retry-btn", () => verifySetup());
     if (actions.includes("manual")) {
       const b = btn("I'll do it myself", "ghost-btn setup-manual-btn", () => {
@@ -3788,6 +3862,11 @@ function renderSetup() {
 listen("setup-step", (evt) => {
   if (!setupView || (setupView.phase !== "checking" && setupView.phase !== "fixing")) return;
   SetupWizard.applyEvent(setupView, evt.payload);
+  renderSetup();
+});
+listen("setup-fix-progress", (evt) => {
+  if (!setupView || setupView.phase !== "fixing") return;
+  SetupWizard.applyFixProgress(setupView, evt.payload);
   renderSetup();
 });
 listen("setup-progress", (evt) => {
@@ -3850,8 +3929,10 @@ async function runSetupFix(step) {
 
 /// Startup and every "Fix setup" button land here. The checklist is drawn
 /// from setup_state (file-only, instant) before the real check starts, so
-/// progress made earlier shows straight away.
-async function openSetup({ fromStartup = false } = {}) {
+/// progress made earlier shows straight away. `autoFix` ("Fix automatically"
+/// next to a Run error): if the re-check still finds Podman's service stuck,
+/// go straight to that fix's consent dialog.
+async function openSetup({ fromStartup = false, autoFix = false } = {}) {
   showSetupScreen();
   try {
     setupView = SetupWizard.viewFromState(await invoke("setup_state"));
@@ -3871,7 +3952,11 @@ async function openSetup({ fromStartup = false } = {}) {
     return;
   }
   $("setup-checklist-title").focus();
-  verifySetup();
+  await verifySetup();
+  const fc = autoFix && setupView && setupView.phase === "failed" && setupView.steps.find((s) => s.step === "functional_check");
+  if (fc && fc.status === "failed" && fc.consent && SetupWizard.isPodmanStuck(fc.summary)) {
+    openSetupConsent(fc, document.querySelector("#setup-steps .setup-fix-btn"));
+  }
 }
 
 $("setup-start-btn").addEventListener("click", () => {
@@ -3881,8 +3966,6 @@ $("setup-start-btn").addEventListener("click", () => {
   verifySetup();
 });
 $("setup-skip-btn").addEventListener("click", enterApp);
-$("run-fix-setup-btn").addEventListener("click", () => openSetup());
-$("resume-run-fix-setup-btn").addEventListener("click", () => openSetup());
 
 function openSetupConsent(s, returnFocus) {
   setupUi.consentStep = s.step;
