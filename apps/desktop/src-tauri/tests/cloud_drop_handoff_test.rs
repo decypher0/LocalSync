@@ -13,6 +13,11 @@ use tauri::{Listener, Manager};
 
 type Handle = tauri::AppHandle<tauri::test::MockRuntime>;
 
+/// A stand-in for what was uploaded (Drive can't run here).
+fn delivery() -> localsync_desktop::state::CloudDelivery {
+    localsync_desktop::state::CloudDelivery { session_id: "s".into(), snapshot_id: "p@c".into(), commits: vec![], bytes: 0, upload_ms: 0 }
+}
+
 fn app() -> Handle {
     let app = tauri::test::mock_app();
     app.manage(AppState::default());
@@ -50,7 +55,7 @@ async fn the_code_comes_back_at_once_and_a_receiver_entering_it_is_reported() {
     // ---- returns without anyone connecting ----
     let info = tokio::time::timeout(
         Duration::from_secs(10),
-        commands::begin_cloud_drop_handoff(&sender, "local".into(), None, "drive-file-1".into(), ls_clouddrop::retention::Retention::DeleteAfterDownload),
+        commands::begin_cloud_drop_handoff(&sender, "local".into(), None, "drive-file-1".into(), ls_clouddrop::retention::Retention::DeleteAfterDownload, delivery()),
     )
     .await
     .expect("the code must come back without waiting for a receiver")
@@ -85,7 +90,7 @@ async fn the_code_comes_back_at_once_and_a_receiver_entering_it_is_reported() {
 #[tokio::test]
 async fn cancelling_before_anyone_joins_stops_the_wait() {
     let sender = app();
-    let info = commands::begin_cloud_drop_handoff(&sender, "local".into(), None, "drive-file-2".into(), ls_clouddrop::retention::Retention::DeleteAfterDownload)
+    let info = commands::begin_cloud_drop_handoff(&sender, "local".into(), None, "drive-file-2".into(), ls_clouddrop::retention::Retention::DeleteAfterDownload, delivery())
         .await
         .expect("handoff");
     commands::cancel_cloud_drop(sender.state::<AppState>(), info.room_id.clone()).unwrap();
@@ -97,7 +102,7 @@ async fn a_receiver_who_leaves_is_reported_so_the_card_does_not_wait_forever() {
     let sender = app();
     let joined = record(&sender, "cloud-drop-receiver-joined");
     let ended = record(&sender, "cloud-drop-ended");
-    let info = commands::begin_cloud_drop_handoff(&sender, "local".into(), None, "drive-file-3".into(), ls_clouddrop::retention::Retention::DeleteAfterDownload)
+    let info = commands::begin_cloud_drop_handoff(&sender, "local".into(), None, "drive-file-3".into(), ls_clouddrop::retention::Retention::DeleteAfterDownload, delivery())
         .await
         .expect("handoff");
     let decoded = commands::decode_room_code(info.room_code.clone(), None).unwrap();

@@ -35,6 +35,24 @@ pub struct CloudDropUpload {
     pub conn: Arc<ls_net::DataChannelConn>,
     pub file_id: String,
     pub retention: ls_clouddrop::retention::Retention,
+    /// What was uploaded, and from which sender session - recorded on that
+    /// session as a device once the receiver is granted access.
+    pub delivery: CloudDelivery,
+}
+
+/// A Cloud drop upload of one sender session's artifact: enough to record
+/// it on the session like a P2P send (`session_commands::record_cloud_delivery`)
+/// and to tell whether a Retry may reuse the file (same artifact) or must
+/// upload again.
+#[derive(Debug, Clone)]
+pub struct CloudDelivery {
+    pub session_id: String,
+    pub snapshot_id: String,
+    pub commits: Vec<crate::project_session::FolderCommit>,
+    pub bytes: u64,
+    /// How long the upload to Drive took - the "transfer speed" shown for
+    /// the receiver.
+    pub upload_ms: u64,
 }
 
 /// Receiver-side (round 37): this device's own mDNS presence, kept alive for
@@ -142,6 +160,10 @@ pub struct AppState {
     /// access request (see `commands::begin_cloud_drop_handoff`). Aborted by
     /// `commands::cancel_cloud_drop` when the person closes the session.
     pub cloud_drop_waits: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    /// Sender-side: what each Drive file this run uploaded holds, keyed by
+    /// file id - so a Retry reuses a file only if it's still the session's
+    /// current artifact.
+    pub cloud_drop_files: Mutex<HashMap<String, CloudDelivery>>,
     /// Receiver-side (round 37): `Some` for as long as "Make this device
     /// discoverable" is on. See [`DiscoverySession`].
     pub discovery: Mutex<Option<DiscoverySession>>,

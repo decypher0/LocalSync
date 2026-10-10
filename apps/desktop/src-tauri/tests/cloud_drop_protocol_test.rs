@@ -44,6 +44,13 @@ async fn declined_access_request_sends_no_grant_and_no_file_id() {
             conn: sender_conn.clone(),
             file_id: "fake-drive-file-id".to_string(),
             retention: ls_clouddrop::retention::Retention::DeleteAfterDownload,
+            delivery: localsync_desktop::state::CloudDelivery {
+                session_id: "no-such-session".into(),
+                snapshot_id: "p@c".into(),
+                commits: vec![],
+                bytes: 0,
+                upload_ms: 0,
+            },
         },
     );
 
