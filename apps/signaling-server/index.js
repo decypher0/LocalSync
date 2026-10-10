@@ -13,7 +13,13 @@ const WebSocket = require('ws');
 // and running the signaling server + a live demo session on the same
 // machine at once would otherwise collide.
 const PORT = process.env.PORT || 9090;
-const wss = new WebSocket.Server({ port: PORT });
+// maxPayload: ws defaults to 100 MiB per message, which lets anyone on a
+// public relay exhaust its memory. Signaling messages are one SDP offer or
+// answer (a few KB with every ICE candidate inlined), so 64 KiB is ample.
+const MAX_PAYLOAD = 64 * 1024;
+// Same reasoning for the pre-pairing queue: a real client sends one offer.
+const MAX_QUEUED = 16;
+const wss = new WebSocket.Server({ port: PORT, maxPayload: MAX_PAYLOAD });
 
 // roomCode -> { clients: [ws, ...], queue: [msg, ...] }
 // `clients` holds up to 2 sockets. `queue` buffers messages sent by the
@@ -67,7 +73,7 @@ wss.on('connection', (ws, req) => {
     }
     if (ws.peer) {
       send(ws.peer, msg);
-    } else {
+    } else if (entry.queue.length < MAX_QUEUED) {
       entry.queue.push(msg);
     }
   });
