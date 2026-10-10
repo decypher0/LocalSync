@@ -835,7 +835,6 @@
         "Nothing from this project runs until you press Run, after reviewing what changed."
       );
       $id("sp-run").addEventListener("click", runCurrent);
-      $id("sp-fix-setup").addEventListener("click", () => openSetup());
       $id("sp-reject").addEventListener("click", () => pressExisting("reject-btn"));
     } else if (state === "receiving") {
       left.insertAdjacentHTML(
@@ -860,7 +859,6 @@
           "A stopped session only shows what you can actually do right now - run it again, pull the latest update, or remove it."
         );
       $id("sp-run").addEventListener("click", runCurrent);
-      $id("sp-fix-setup").addEventListener("click", () => openSetup());
     }
     const arm = $id("sp-arm");
     if (arm) {
@@ -1025,7 +1023,7 @@
       const errEl = $id("sp-run-error");
       errEl.textContent = s.runErrorText || (s.status === "error" ? s.errorText : "");
       errEl.classList.toggle("hidden", !errEl.textContent);
-      $id("sp-fix-setup").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(s.runErrorText));
+      showSetupFixButton($id("sp-fix-setup"), s.runErrorText);
       $id("sp-stopped-ph").classList.toggle("hidden", s.runInProgress);
       $id("sp-run").disabled = s.busy || s.runInProgress || s.status === "error";
       $id("sp-run").querySelector("span").textContent = s.runInProgress ? "Starting…" : "Run";
@@ -1034,7 +1032,7 @@
       const errEl = $id("sp-run-error");
       errEl.textContent = s.runErrorText || "";
       errEl.classList.toggle("hidden", !s.runErrorText);
-      $id("sp-fix-setup").classList.toggle("hidden", !SetupWizard.isPodmanNotReady(s.runErrorText));
+      showSetupFixButton($id("sp-fix-setup"), s.runErrorText);
       $id("sp-run").disabled = s.busy || s.runInProgress;
       $id("sp-run").querySelector("span").textContent = s.runInProgress ? "Starting…" : "Run";
     }

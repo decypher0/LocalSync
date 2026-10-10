@@ -296,6 +296,9 @@ async fn boot_and_wait<R: tauri::Runtime>(
         if ls_containers::is_memory_limit_unsupported(&log_tail) {
             return Err((ls_containers::MEMORY_LIMIT_UNSUPPORTED.to_string(), log_tail));
         }
+        if ls_containers::readiness::is_socket_error(&log_tail) {
+            return Err((format!("{}\n\n{log_tail}", ls_containers::podman_unreachable()), log_tail));
+        }
         let names = unstarted.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ");
         let reason = format!(
             "{names} could not be started - usually its image failed to build (the build output is below) or a port it needs is already in use.\n\n{log_tail}"

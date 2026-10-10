@@ -76,7 +76,8 @@ pub async fn functional_probe(timeout: Duration) -> ProbeOutcome {
             timeout.as_secs_f64().ceil() as u64
         )
     } else {
-        classify(&run.details).to_string()
+        let running = if is_socket_error(&run.details) { machine_running().await } else { None };
+        classify_failure(&run.details, running).summary().to_string()
     };
     ProbeOutcome {
         ok: run.ok,
@@ -87,19 +88,67 @@ pub async fn functional_probe(timeout: Duration) -> ProbeOutcome {
     }
 }
 
-/// Plain-language cause for a probe that ran and failed.
-fn classify(output: &str) -> &'static str {
+/// The probe's summary when Podman's machine reports Running but Podman
+/// can't reach its service inside it (`ssh: rejected: connect failed`).
+/// The UI (setup-wizard.js `SERVICE_STUCK`) matches on this exact sentence to
+/// offer "Fix automatically", so keep the two in sync.
+pub const SERVICE_STUCK: &str = "Podman's virtual machine is running, but the Podman service inside it is stuck.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeFailure {
+    MemoryLimit,
+    /// Machine running, Podman's socket unreachable: `wsl --shutdown` +
+    /// `podman machine start` fixes it (see `provisioning::recovery`).
+    ServiceStuck,
+    MachineNotRunning,
+    ImagePull,
+    Other,
+}
+
+impl ProbeFailure {
+    pub fn summary(self) -> &'static str {
+        match self {
+            ProbeFailure::MemoryLimit => {
+                "Podman can't apply memory limits on this computer, so LocalSync's sandbox can't start containers."
+            }
+            ProbeFailure::ServiceStuck => SERVICE_STUCK,
+            ProbeFailure::MachineNotRunning => "Podman's virtual machine isn't running.",
+            ProbeFailure::ImagePull => {
+                "Podman couldn't download its test image (busybox) - check the internet connection."
+            }
+            ProbeFailure::Other => "Podman couldn't start a test container.",
+        }
+    }
+}
+
+/// The podman CLI couldn't reach its service (the machine's socket).
+pub fn is_socket_error(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    ["ssh: rejected: connect failed", "unable to connect to podman socket", "cannot connect to podman"]
+        .iter()
+        .any(|n| lower.contains(n))
+}
+
+/// Pure cause of a probe (or any podman command) that ran and failed.
+/// `machine_running` is `podman machine list`'s answer for the default
+/// machine (`None` = unknown / no machine / Linux). A socket error with the
+/// machine running is the stuck service; with it stopped, it isn't running.
+/// Unknown state: `ssh: rejected` still means the VM's sshd answered, so it
+/// is up and the service is what's stuck.
+pub fn classify_failure(output: &str, machine_running: Option<bool>) -> ProbeFailure {
     let lower = output.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
     if crate::is_memory_limit_unsupported(output) {
-        "Podman can't apply memory limits on this computer, so LocalSync's sandbox can't start containers."
-    } else if has(&[
-        "cannot connect to podman",
-        "unable to connect to podman",
-        "vm does not exist",
-    ]) || (lower.contains("machine") && lower.contains("not running"))
-    {
-        "Podman's virtual machine isn't running."
+        ProbeFailure::MemoryLimit
+    } else if is_socket_error(output) {
+        match machine_running {
+            Some(true) => ProbeFailure::ServiceStuck,
+            Some(false) => ProbeFailure::MachineNotRunning,
+            None if lower.contains("ssh: rejected") => ProbeFailure::ServiceStuck,
+            None => ProbeFailure::MachineNotRunning,
+        }
+    } else if has(&["vm does not exist"]) || (lower.contains("machine") && lower.contains("not running")) {
+        ProbeFailure::MachineNotRunning
     } else if has(&[
         "trying to pull",
         "initializing source",
@@ -107,12 +156,27 @@ fn classify(output: &str) -> &'static str {
         "pulling image",
         "manifest unknown",
     ]) {
-        "Podman couldn't download its test image (busybox) - check the internet connection."
+        ProbeFailure::ImagePull
     } else if has(&["connection refused", "no connection could be made"]) {
-        "Podman's virtual machine isn't running."
+        ProbeFailure::MachineNotRunning
     } else {
-        "Podman couldn't start a test container."
+        ProbeFailure::Other
     }
+}
+
+/// The default podman machine's Running state (`None` on Linux, or when it
+/// can't be listed).
+async fn machine_running() -> Option<bool> {
+    if !cfg!(any(target_os = "windows", target_os = "macos")) {
+        return None;
+    }
+    let out = command("podman")
+        .args(["machine", "list", "--noheading", "--format", "{{.Name}}\t{{.Running}}"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    out.status.success().then(|| crate::provisioning::setup::parse_machine_list(&String::from_utf8_lossy(&out.stdout)))?
 }
 
 struct ProbeRun {
@@ -385,7 +449,11 @@ fn command(program: &str) -> tokio::process::Command {
 
 #[cfg(test)]
 mod tests {
-    use super::classify;
+    use super::{classify_failure, ProbeFailure, SERVICE_STUCK};
+
+    fn classify(output: &str) -> &'static str {
+        classify_failure(output, None).summary()
+    }
 
     /// Tauri commands and `run_snapshot` need the gate's future to be Send.
     #[allow(dead_code)]
@@ -415,5 +483,33 @@ mod tests {
             classify("Error: something odd"),
             "Podman couldn't start a test container."
         );
+    }
+
+    /// The real "machine running but unreachable" output (Windows/WSL, the
+    /// VM's user@1000.service failed so there's no podman.socket).
+    const STUCK_SHORT: &str = "unable to connect to Podman socket: failed to connect: ssh: rejected: connect failed (open failed)";
+    const STUCK_LONG: &str = "Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: failed to connect: ssh: rejected: connect failed (open failed)";
+
+    #[test]
+    fn socket_error_with_machine_running_is_the_stuck_service() {
+        use ProbeFailure::*;
+        for out in [STUCK_SHORT, STUCK_LONG] {
+            assert_eq!(classify_failure(out, Some(true)), ServiceStuck, "{out}");
+            // sshd answered, so even without the machine's state the VM is up.
+            assert_eq!(classify_failure(out, None), ServiceStuck, "{out}");
+            // Same socket error, machine stopped: it just isn't running.
+            assert_eq!(classify_failure(out, Some(false)), MachineNotRunning, "{out}");
+        }
+        let not_running = "Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: failed to connect: dial tcp 127.0.0.1:52133: connectex: No connection could be made because the target machine actively refused it.";
+        assert_eq!(classify_failure(not_running, Some(false)), MachineNotRunning);
+        assert_eq!(classify_failure(not_running, None), MachineNotRunning);
+        assert_eq!(classify_failure("Error: podman-machine-default: VM does not exist", Some(false)), MachineNotRunning);
+        let mem = "Error: crun: open `memory.max` for writing: No such file or directory: OCI runtime attempted to invoke a command that was not found";
+        assert_eq!(classify_failure(mem, Some(true)), MemoryLimit);
+        let pull = "Trying to pull docker.io/library/busybox:latest...\nError: initializing source docker://busybox: pinging container registry registry-1.docker.io: dial tcp: lookup registry-1.docker.io: no such host";
+        assert_eq!(classify_failure(pull, Some(true)), ImagePull);
+
+        assert_eq!(ServiceStuck.summary(), SERVICE_STUCK);
+        assert!(!SERVICE_STUCK.contains("isn't running"));
     }
 }
