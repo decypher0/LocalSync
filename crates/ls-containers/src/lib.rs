@@ -113,10 +113,9 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
 
     let compose_path = compose_root.join("docker-compose.yml");
     let original_yaml = tokio::fs::read_to_string(&compose_path).await.context(
-        "This project doesn't have a docker-compose.yml, so LocalSync doesn't know how to build \
-         or run it yet. Add one to the project defining how to build and run it, then send again \
-         (auto-generating one from the project's own framework is a real, separate future \
-         capability - not something LocalSync does today; see docs/auto-containerization.md).",
+        "This project arrived without run instructions (no docker-compose.yml), so LocalSync \
+         doesn't know how to build or run it. Ask the sender to finish Setup for this project in \
+         LocalSync (it creates the run instructions for them) and send it again.",
     )?;
 
     let database_services = compose::database_service_names(manifest);
