@@ -887,6 +887,11 @@
           Pick one or more independent project folders to send together as one snapshot
           (e.g. several standalone Spring Boot services).
         </p>
+        <!-- Lines filled by folder-check.js from compose_catalog. -->
+        <details id="wiz-send-guide" class="send-guide">
+          <summary>What can I send?</summary>
+          <div id="wiz-send-guide-lines"></div>
+        </details>
         <button id="wiz-add-folders-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-folder-plus"></use></svg> Add folder(s)…</button>
         <ul id="wiz-folder-list" class="ports-list"></ul>
         <p id="wiz-folders-error" class="error"></p>
@@ -1300,6 +1305,7 @@
   <script src="wizard-payload.js"></script>
   <script src="session-model.js"></script>
   <script src="compose-wizard.js"></script>
+  <script src="folder-check.js"></script>
   <script src="setup-wizard.js"></script>
   <script src="app.js"></script>
   <script src="views.js"></script>
