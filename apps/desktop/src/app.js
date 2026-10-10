@@ -186,8 +186,105 @@ $("update-install-btn").addEventListener("click", async () => {
 // to be granted Drive access) - same rendering/dedup pattern as the
 // pull-request banner above, reusing the same container since both are
 // "an incoming request from a connected peer, shown until acted on". ----------
+/// The Cloud drop transfer behind a relay room (its control channel's peer id).
+function findCloudTransfer(roomId) {
+  for (const s of sessions.values()) {
+    if (s.kind !== "send") continue;
+    const tr = s.transfers.find((t) => t.spec.kind === "cloud" && t.roomId === roomId);
+    if (tr) return { session: s, tr };
+  }
+  return null;
+}
+
+function updateCloudTransfer(roomId, change) {
+  const found = findCloudTransfer(roomId);
+  if (!found) return;
+  change(found.tr);
+  scheduleSendRender(found.session);
+}
+
+listen("cloud-drop-receiver-joined", (evt) =>
+  updateCloudTransfer(evt.payload.room_id, (tr) => {
+    if (tr.cloudStep === "waiting") tr.cloudStep = "joined";
+    tr.receiverJoined = true;
+  })
+);
+listen("cloud-drop-failed", (evt) =>
+  updateCloudTransfer(evt.payload.room_id, (tr) => {
+    tr.status = "error";
+    tr.errorText = evt.payload.message;
+  })
+);
+// The receiver's control channel closed. After a granted request that's the
+// normal end; before one, they left without getting the file.
+listen("cloud-drop-ended", (evt) =>
+  updateCloudTransfer(evt.payload.room_id, (tr) => {
+    if (tr.status !== "waiting") return;
+    if (tr.cloudStep === "approved") {
+      tr.status = "done";
+    } else {
+      tr.status = "error";
+      tr.errorText = "The receiver disconnected before getting access. Retry for a new code (the file is still in your Drive).";
+    }
+  })
+);
+listen("cloud-drop-downloaded", (evt) =>
+  updateCloudTransfer(evt.payload.room_id, (tr) => {
+    tr.cloudStep = "downloaded";
+    tr.status = "done";
+  })
+);
+
+/// Grant or decline a receiver's Drive access - from the banner or from the
+/// transfer card, whichever the person uses; both reflect the outcome.
+async function respondCloudAccess(peerId, accept) {
+  const found = findCloudTransfer(peerId);
+  const banner = [...$("pull-requests").children].find((el) => el.dataset.peer === peerId);
+  const req = found && found.tr.accessRequest;
+  if (req) req.busy = true;
+  if (found) scheduleSendRender(found.session);
+  banner?.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    await invoke("respond_to_cloud_access_request", { peerId, accept });
+    banner?.remove();
+    if (found) {
+      const email = req ? req.email : "";
+      found.tr.accessRequest = null;
+      if (accept) {
+        found.tr.cloudStep = "approved";
+        found.tr.grantedEmail = email;
+      } else {
+        found.tr.cloudStep = "declined";
+        found.tr.declinedEmail = email;
+        found.tr.status = "done";
+      }
+    }
+  } catch (err) {
+    if (req) req.error = String(err);
+    if (banner) {
+      banner.querySelector(".error").textContent = String(err);
+      banner.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    }
+  } finally {
+    if (req) req.busy = false;
+    if (found) scheduleSendRender(found.session);
+  }
+}
+
+/// Closing a session with a Cloud drop still open: stop waiting for its
+/// receiver and close the control connection (the Drive file stays under
+/// its retention rule). Only from Close - never from runTransfer's own cleanup.
+function cancelCloudTransfer(tr) {
+  if (tr.spec.kind !== "cloud" || !tr.roomId) return;
+  invoke("cancel_cloud_drop", { roomId: tr.roomId }).catch((err) => console.warn("cancel_cloud_drop failed:", err));
+}
+
 listen("cloud-access-request", (evt) => {
   const { peer_id: peerId, google_email: googleEmail } = evt.payload;
+  updateCloudTransfer(peerId, (tr) => {
+    tr.accessRequest = { email: googleEmail, busy: false, error: "" };
+    tr.cloudStep = "requested";
+  });
   const existing = [...$("pull-requests").children].find((el) => el.dataset.peer === peerId);
   if (existing) return;
   const div = document.createElement("div");
@@ -201,19 +298,8 @@ listen("cloud-access-request", (evt) => {
     </span>
     <p class="error"></p>
   `;
-  const errorEl = div.querySelector(".error");
-  const respond = async (accept) => {
-    div.querySelectorAll("button").forEach((b) => (b.disabled = true));
-    try {
-      await invoke("respond_to_cloud_access_request", { peerId, accept });
-      div.remove();
-    } catch (err) {
-      errorEl.textContent = String(err);
-      div.querySelectorAll("button").forEach((b) => (b.disabled = false));
-    }
-  };
-  div.querySelector(".accept-btn").addEventListener("click", () => respond(true));
-  div.querySelector(".decline-btn").addEventListener("click", () => respond(false));
+  div.querySelector(".accept-btn").addEventListener("click", () => respondCloudAccess(peerId, true));
+  div.querySelector(".decline-btn").addEventListener("click", () => respondCloudAccess(peerId, false));
   $("pull-requests").appendChild(div);
 });
 
@@ -1119,7 +1205,10 @@ function needsSaveChoice(session) {
 
 function releaseSession(session) {
   if (session.kind === "send") {
-    for (const t of session.transfers) releaseTransfer(t);
+    for (const t of session.transfers) {
+      releaseTransfer(t);
+      cancelCloudTransfer(t);
+    }
     invoke("discard_project_session", { sessionId: session.id }).catch((err) => console.error("discard_project_session failed:", err));
   } else {
     if (session.progressUnlisten) session.progressUnlisten();
@@ -2492,7 +2581,27 @@ function transferCodeExpiryText(tr) {
   return `Expires in ${m}:${String(s).padStart(2, "0")} — share it before then.`;
 }
 
+// A Cloud drop's status by step (its tr.status alone - connecting/waiting -
+// can't say whether it's uploading or waiting on the receiver).
+const CLOUD_STEP_TEXT = {
+  uploading: "Uploading to Drive…",
+  waiting: "Waiting for the receiver",
+  joined: "Receiver connected",
+  requested: "Approve the receiver",
+  approved: "Receiver is downloading",
+  downloaded: "Downloaded",
+  declined: "Declined",
+};
+
+function transferStatusText(tr) {
+  if (tr.spec.kind === "cloud" && (tr.status === "connecting" || tr.status === "waiting" || tr.status === "done")) {
+    return CLOUD_STEP_TEXT[tr.cloudStep] || TRANSFER_STATUS_TEXT[tr.status];
+  }
+  return TRANSFER_STATUS_TEXT[tr.status] || tr.status;
+}
+
 const TRANSFER_STATUS_TEXT = {
+  waiting: "Waiting for the receiver",
   connecting: "Waiting for the device…",
   active: "Sending…",
   done: "Sent",
@@ -2510,7 +2619,74 @@ function transferLabel(tr) {
   return tr.since ? `${who} — update` : who;
 }
 
+/// A Cloud drop's card: the code to share (while it's still needed), then
+/// where things stand - uploaded, waiting for the receiver to enter the
+/// code, approving their Google account (right here, as well as in the
+/// banner), their download.
+function renderCloudTransferCard(session, tr) {
+  const order = ["uploading", "waiting", "joined", "requested", "approved", "downloaded"];
+  const at = order.indexOf(tr.cloudStep);
+  const failed = tr.status === "error" || tr.status === "expired";
+  const finished = failed || tr.status === "done";
+  // done / now / later for each of the four steps.
+  const state = (doneFrom, nowFrom) => (at >= doneFrom ? "done" : at >= nowFrom && !failed ? "now" : "later");
+  const step = (n, st, text, extra = "") =>
+    `<li class="cloud-step is-${st}" data-cloud-step="${n}"><span class="cloud-step-mark">${st === "done" ? "✓" : n}</span><span>${text}${extra}</span></li>`;
+  const showCode = tr.roomCode && tr.cloudStep === "waiting" && !failed;
+  const req = tr.accessRequest;
+  const step3 =
+    tr.cloudStep === "declined"
+      ? `You declined ${escapeHtml(tr.declinedEmail || "the receiver")}'s request.`
+      : at >= order.indexOf("approved")
+        ? `Access granted to ${escapeHtml(tr.grantedEmail || "the receiver")}`
+        : req
+          ? `<strong>${escapeHtml(req.email)}</strong> asks for access`
+          : tr.cloudStep === "joined"
+            ? "Receiver connected, waiting for their access request"
+            : "Approve the receiver's Google email";
+  const approveRow = req && !failed
+    ? `<span class="inline-row cloud-approve">
+         <button class="primary-btn" type="button" data-cloud-approve="${escapeHtml(tr.id)}" ${req.busy ? "disabled" : ""}>Grant access</button>
+         <button class="ghost-btn" type="button" data-cloud-decline="${escapeHtml(tr.id)}" ${req.busy ? "disabled" : ""}>Decline</button>
+         ${req.error ? `<span class="error-inline">${escapeHtml(req.error)}</span>` : ""}
+       </span>`
+    : "";
+  return `
+    <div class="transfer-card cloud-card" data-transfer="${escapeHtml(tr.id)}">
+      <div class="inline-row receivers-header">
+        <span><strong>${escapeHtml(transferLabel(tr))}</strong>
+          <span class="hint-inline">${escapeHtml(transferStatusText(tr))}</span></span>
+        ${finished ? `<button class="ghost-btn" type="button" data-dismiss-transfer="${escapeHtml(tr.id)}" title="Remove from this list"><svg class="icon"><use href="#icon-x"></use></svg></button>` : ""}
+      </div>
+      ${tr.note ? `<p class="hint">${escapeHtml(tr.note)}</p>` : ""}
+      ${showCode ? `
+        <div class="room-code-wrap">
+          <span class="hint">Give the receiver this code - they enter it in LocalSync (New session → Receive → Cloud drop):</span>
+          <code class="room-code-display cloud-code">${escapeHtml(tr.roomCode)}</code>
+          <span class="inline-row send-code-actions">
+            <button class="ghost-btn" type="button" data-copy-code="${escapeHtml(tr.id)}"><svg class="icon"><use href="#icon-copy"></use></svg> Copy code</button>
+            <button class="ghost-btn" type="button" data-copy-link="${escapeHtml(tr.id)}"><svg class="icon"><use href="#icon-link"></use></svg> Copy link</button>
+            <span class="hint-inline" data-copy-status="${escapeHtml(tr.id)}"></span>
+          </span>
+          <p class="hint-inline" data-expiry="${escapeHtml(tr.id)}">${escapeHtml(transferCodeExpiryText(tr))}</p>
+        </div>` : ""}
+      <ol class="cloud-steps">
+        ${step(1, at >= 1 ? "done" : failed ? "later" : "now", at >= 1 ? "Uploaded to Drive" : "Uploading to Drive…")}
+        ${step(2, state(2, 1), at >= 2 ? "Receiver entered the code" : "Waiting for the receiver to enter the code")}
+        ${step(3, tr.cloudStep === "declined" ? "done" : state(4, 2), step3, approveRow)}
+        ${step(4, state(5, 4), at >= 5 ? "Receiver downloaded it" : "Receiver downloads")}
+      </ol>
+      ${tr.errorText ? `<p class="error">${escapeHtml(tr.errorText)}</p>` : ""}
+      ${failed ? `
+        <span class="inline-row">
+          <button class="primary-btn" type="button" data-retry-transfer="${escapeHtml(tr.id)}" ${tr.busy ? "disabled" : ""}><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Retry</button>
+          <span class="hint-inline">${tr.fileId ? "Gets a new code for the file already in your Drive." : "Uploads the project again."}</span>
+        </span>` : ""}
+    </div>`;
+}
+
 function renderTransferCard(session, tr) {
+  if (tr.spec.kind === "cloud") return renderCloudTransferCard(session, tr);
   const showCode = tr.roomCode && (tr.status === "connecting" || tr.status === "expired" || tr.spec.kind === "cloud");
   const showProgress = tr.status === "active" || (tr.status === "done" && tr.total > 0);
   const canRetry = (tr.status === "error" || tr.status === "expired") && tr.spec.kind !== "cloud";
@@ -2520,7 +2696,7 @@ function renderTransferCard(session, tr) {
     <div class="transfer-card" data-transfer="${escapeHtml(tr.id)}">
       <div class="inline-row receivers-header">
         <span><strong>${escapeHtml(transferLabel(tr))}</strong>
-          <span class="hint-inline">${escapeHtml(TRANSFER_STATUS_TEXT[tr.status] || tr.status)}</span></span>
+          <span class="hint-inline">${escapeHtml(transferStatusText(tr))}</span></span>
         ${finished ? `<button class="ghost-btn" type="button" data-dismiss-transfer="${escapeHtml(tr.id)}" title="Remove from this list"><svg class="icon"><use href="#icon-x"></use></svg></button>` : ""}
       </div>
       ${tr.note ? `<p class="hint">${escapeHtml(tr.note)}</p>` : ""}
@@ -2618,7 +2794,7 @@ setInterval(() => {
   if (session && session.kind === "send") {
     for (const tr of session.transfers) {
       const el = document.querySelector(`[data-expiry="${tr.id}"]`);
-      if (el && tr.status === "connecting") el.textContent = transferCodeExpiryText(tr);
+      if (el && (tr.status === "connecting" || tr.status === "waiting")) el.textContent = transferCodeExpiryText(tr);
     }
   }
 }, 1000);
@@ -2765,17 +2941,26 @@ async function runTransfer(session, tr) {
     if (tr.spec.kind === "cloud") {
       // Cloud drop bundles+uploads a single project itself (see
       // commands::start_cloud_drop_session) rather than sending the
-      // session's artifact, so it has no device record or marker.
+      // session's artifact, so it has no device record or marker. It returns
+      // as soon as the upload is done; the receiver joining, asking for
+      // access and downloading arrive as events (see the cloud-drop-*
+      // listeners). A Retry passes the earlier upload back to reuse it.
+      tr.cloudStep = "uploading";
+      tr.accessRequest = null;
+      scheduleSendRender(session);
       const info = await invoke("start_cloud_drop_session", {
-        mode: "local",
-        relayUrl: null,
+        mode: tr.spec.mode || "local",
+        relayUrl: tr.spec.mode === "remote" ? tr.spec.url : null,
         projectPath: session.folders[0].path,
         retention: tr.spec.retention,
+        existingFileId: tr.fileId || null,
       });
+      tr.roomId = info.room_id;
       tr.roomCode = info.room_code;
       tr.codeExpiresAt = Date.now() + info.code_expires_in_seconds * 1000;
-      tr.status = "done";
-      tr.resultText = `Uploaded to Drive as ${info.file_id}. Waiting for the receiver to request access…`;
+      tr.fileId = info.file_id;
+      tr.status = "waiting";
+      tr.cloudStep = "waiting";
       return;
     }
 
@@ -2878,6 +3063,8 @@ $("send-transfers").addEventListener("click", (e) => {
   if ((found = grab("data-copy-code"))) return copyTransferText(found.tr, found.tr.roomCode, "Code copied.");
   if ((found = grab("data-copy-link"))) return copyTransferText(found.tr, buildMagicLink(found.tr.roomCode), "Link copied.");
   if ((found = grab("data-retry-transfer"))) return retryTransfer(found.session, found.tr);
+  if ((found = grab("data-cloud-approve"))) return respondCloudAccess(found.tr.roomId, true);
+  if ((found = grab("data-cloud-decline"))) return respondCloudAccess(found.tr.roomId, false);
   if ((found = grab("data-dismiss-transfer"))) {
     found.session.transfers = found.session.transfers.filter((t) => t !== found.tr);
     scheduleSendRender(found.session);
@@ -3027,7 +3214,10 @@ function readWizardTarget(errorEl) {
   }
   if (mode === "cloud") {
     try {
-      return { kind: "cloud", retention: retentionChoiceDto() };
+      // The code a receiver enters reaches this sender over a relay too:
+      // Settings' connection mode (Remote only with a relay address saved).
+      const remote = modeStore.mode === "remote" && !!modeStore.url;
+      return { kind: "cloud", retention: retentionChoiceDto(), mode: remote ? "remote" : "local", url: remote ? modeStore.url : null };
     } catch (err) {
       errorEl.textContent = String(err);
       return null;

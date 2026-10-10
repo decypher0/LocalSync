@@ -137,6 +137,11 @@ pub struct AppState {
     /// the control message that carried it is long gone by then. Keyed by
     /// `peer_id`, removed the moment it's responded to.
     pub cloud_access_requests: Mutex<HashMap<String, String>>,
+    /// Sender-side: the background task behind each Cloud drop code, keyed by
+    /// room id - it waits for the receiver to join, then listens for their
+    /// access request (see `commands::begin_cloud_drop_handoff`). Aborted by
+    /// `commands::cancel_cloud_drop` when the person closes the session.
+    pub cloud_drop_waits: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     /// Receiver-side (round 37): `Some` for as long as "Make this device
     /// discoverable" is on. See [`DiscoverySession`].
     pub discovery: Mutex<Option<DiscoverySession>>,
