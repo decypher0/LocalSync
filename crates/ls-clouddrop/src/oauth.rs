@@ -288,6 +288,50 @@ struct TokenResponse {
     scope: Option<String>,
 }
 
+/// A token-endpoint failure the UI must handle specially rather than show
+/// raw. Travels inside the `anyhow::Error` (find it with [`auth_error`]); its
+/// `Display` is the exact message for the person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthError {
+    /// `invalid_grant` on a refresh: the saved refresh token is expired,
+    /// revoked, or was issued to a different client (an OAuth consent screen
+    /// in "Testing" expires them after 7 days). Only signing in again helps.
+    SignInExpired,
+    /// `invalid_client` / `unauthorized_client`: Google rejected this build's
+    /// client ID/secret. No amount of signing in fixes that.
+    ClientMisconfigured,
+}
+
+pub const SIGN_IN_EXPIRED_MESSAGE: &str = "Your Google sign-in expired. Link your account again to use Cloud drop.";
+pub const CLIENT_MISCONFIGURED_MESSAGE: &str = "This build's Google client is misconfigured (Google rejected its client ID or secret), so Cloud drop can't sign in. Signing in again won't help - it needs a fixed build of LocalSync.";
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AuthError::SignInExpired => SIGN_IN_EXPIRED_MESSAGE,
+            AuthError::ClientMisconfigured => CLIENT_MISCONFIGURED_MESSAGE,
+        })
+    }
+}
+
+impl std::error::Error for AuthError {}
+
+/// The [`AuthError`] inside `err`, if that's what it is.
+pub fn auth_error(err: &anyhow::Error) -> Option<AuthError> {
+    err.chain().find_map(|e| e.downcast_ref::<AuthError>().copied())
+}
+
+/// What Google's `error` code means for us. `invalid_grant` only means "the
+/// sign-in expired" on a refresh - on a code exchange it's a bad/used
+/// authorization code, which a retry of the sign-in itself resolves.
+fn classify_token_error(error: &str, refreshing: bool) -> Option<AuthError> {
+    match error {
+        "invalid_grant" if refreshing => Some(AuthError::SignInExpired),
+        "invalid_client" | "unauthorized_client" => Some(AuthError::ClientMisconfigured),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GoogleErrorBody {
     error: String,
@@ -295,11 +339,17 @@ struct GoogleErrorBody {
     error_description: Option<String>,
 }
 
-async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse> {
+async fn parse_token_response(resp: reqwest::Response, refreshing: bool) -> Result<TokenResponse> {
     let status = resp.status();
     let body = resp.text().await.context("reading token endpoint response body")?;
     if !status.is_success() {
         if let Ok(err) = serde_json::from_str::<GoogleErrorBody>(&body) {
+            if let Some(kind) = classify_token_error(&err.error, refreshing) {
+                // Google's own wording stays in the chain (and the log) for
+                // diagnosis; the person sees `kind`'s message.
+                log::warn!("Google token endpoint returned {status}: {} - {}", err.error, err.error_description.as_deref().unwrap_or(""));
+                return Err(anyhow::Error::new(kind));
+            }
             anyhow::bail!(
                 "Google token endpoint returned {status}: {} - {}",
                 err.error,
@@ -391,7 +441,7 @@ where
         .send()
         .await
         .context("sending authorization code to Google's token endpoint")?;
-    let token_response = parse_token_response(resp).await?;
+    let token_response = parse_token_response(resp, false).await?;
     let email = identity::fetch_email_at(&endpoints.userinfo_url, &token_response.access_token).await?;
     Ok(token_set_from_response(token_response, None, email))
 }
@@ -426,7 +476,7 @@ async fn refresh_access_token_with(
         .send()
         .await
         .context("sending refresh token to Google's token endpoint")?;
-    let token_response = parse_token_response(resp).await?;
+    let token_response = parse_token_response(resp, true).await?;
     let email = identity::fetch_email_at(&endpoints.userinfo_url, &token_response.access_token).await?;
     Ok(token_set_from_response(token_response, Some(refresh_token.to_string()), email))
 }
@@ -448,13 +498,35 @@ async fn ensure_valid_access_token_in(config: &OAuthConfig, endpoints: &Endpoint
         return Ok(stored.access_token);
     }
 
-    let refresh_token = stored
-        .refresh_token
-        .as_deref()
-        .context("stored Cloud drop token has expired and no refresh token is available - re-link required")?;
-    let refreshed = refresh_access_token_with(config, refresh_token, endpoints).await?;
-    store::save_in(dir, &refreshed)?;
-    Ok(refreshed.access_token)
+    let Some(refresh_token) = stored.refresh_token.as_deref() else {
+        // Nothing to refresh with: the same dead end as an expired grant.
+        forget_expired_sign_in(dir, &stored.email);
+        return Err(anyhow::Error::new(AuthError::SignInExpired));
+    };
+    match refresh_access_token_with(config, refresh_token, endpoints).await {
+        Ok(refreshed) => {
+            store::save_in(dir, &refreshed)?;
+            Ok(refreshed.access_token)
+        }
+        Err(e) => {
+            // A refresh token Google won't honour any more is useless: drop
+            // it so the app shows "not linked" (and asks for a re-link)
+            // rather than failing the same way on every attempt.
+            if auth_error(&e) == Some(AuthError::SignInExpired) {
+                forget_expired_sign_in(dir, &stored.email);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn forget_expired_sign_in(dir: &Path, email: &str) {
+    if let Err(e) = store::clear_in(dir) {
+        log::warn!("couldn't delete the expired Google token: {e:#}");
+    }
+    if let Err(e) = store::mark_relink_needed_in(dir, email) {
+        log::warn!("couldn't record that {email} needs to link again: {e:#}");
+    }
 }
 
 #[cfg(test)]
@@ -635,14 +707,14 @@ mod tests {
         assert_eq!(tokens.refresh_token.as_deref(), Some("a-real-looking-refresh-token"));
     }
 
+    /// A Google error this code doesn't special-case still says what Google said.
     #[tokio::test]
     async fn token_endpoint_error_surfaces_a_useful_message_not_a_panic() {
         let server = MockServer::start().await;
-        // Realistic Google error shape for an expired/revoked refresh token.
         Mock::given(method("POST")).and(path("/token")).respond_with(
             ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "invalid_grant",
-                "error_description": "Token has been expired or revoked."
+                "error": "invalid_request",
+                "error_description": "Missing required parameter: refresh_token."
             })),
         ).mount(&server).await;
 
@@ -655,8 +727,112 @@ mod tests {
 
         let err = refresh_access_token_with(&config, "dead-refresh-token", &endpoints).await.unwrap_err();
         let message = format!("{err:#}");
-        assert!(message.contains("invalid_grant"), "error should surface Google's reason, got: {message}");
-        assert!(message.contains("expired or revoked"), "error should surface Google's description, got: {message}");
+        assert!(message.contains("invalid_request"), "error should surface Google's reason, got: {message}");
+        assert!(message.contains("Missing required parameter"), "error should surface Google's description, got: {message}");
+        assert_eq!(auth_error(&err), None, "not one of the special cases");
+    }
+
+    // ---------- invalid_grant / invalid_client ----------
+
+    const INVALID_GRANT_BODY: &str = r#"{"error": "invalid_grant", "error_description": "Token has been expired or revoked."}"#;
+    const INVALID_CLIENT_BODY: &str = r#"{"error": "invalid_client", "error_description": "The OAuth client was not found."}"#;
+
+    async fn token_server(status: u16, body: &str) -> (MockServer, Endpoints) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(status).set_body_raw(body.as_bytes().to_vec(), "application/json"))
+            .mount(&server)
+            .await;
+        let endpoints = Endpoints {
+            auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
+            token_url: format!("{}/token", server.uri()),
+            userinfo_url: format!("{}/userinfo", server.uri()),
+        };
+        (server, endpoints)
+    }
+
+    fn expired_tokens(email: &str) -> TokenSet {
+        TokenSet {
+            access_token: "expired".into(),
+            refresh_token: Some("dead-refresh-token".into()),
+            expires_at: time::OffsetDateTime::now_utc() - time::Duration::hours(1),
+            scopes: vec!["openid".into()],
+            email: email.into(),
+        }
+    }
+
+    fn config() -> OAuthConfig {
+        OAuthConfig { client_id: "my-client-id".into(), client_secret: "my-client-secret".into() }
+    }
+
+    #[tokio::test]
+    async fn invalid_grant_on_refresh_is_sign_in_expired_with_its_own_message() {
+        let (_server, endpoints) = token_server(400, INVALID_GRANT_BODY).await;
+        let err = refresh_access_token_with(&config(), "dead-refresh-token", &endpoints).await.unwrap_err();
+        assert_eq!(auth_error(&err), Some(AuthError::SignInExpired));
+        assert_eq!(err.to_string(), "Your Google sign-in expired. Link your account again to use Cloud drop.");
+    }
+
+    #[tokio::test]
+    async fn invalid_client_is_a_misconfigured_build_not_an_expired_sign_in() {
+        let (_server, endpoints) = token_server(401, INVALID_CLIENT_BODY).await;
+        let err = refresh_access_token_with(&config(), "refresh", &endpoints).await.unwrap_err();
+        assert_eq!(auth_error(&err), Some(AuthError::ClientMisconfigured));
+        assert!(err.to_string().starts_with("This build's Google client is misconfigured"), "{err}");
+        assert!(!err.to_string().contains("sign-in expired"));
+    }
+
+    #[tokio::test]
+    async fn an_expired_sign_in_deletes_the_stale_token_and_asks_for_a_relink() {
+        let (_server, endpoints) = token_server(400, INVALID_GRANT_BODY).await;
+        let dir = tempfile::tempdir().unwrap();
+        store::save_in(dir.path(), &expired_tokens("me@example.com")).unwrap();
+
+        let err = ensure_valid_access_token_in(&config(), &endpoints, dir.path()).await.unwrap_err();
+        assert_eq!(auth_error(&err), Some(AuthError::SignInExpired));
+        assert!(store::load_in(dir.path()).unwrap().is_none(), "the stale token is gone");
+        assert_eq!(store::relink_needed_in(dir.path()).unwrap().as_deref(), Some("me@example.com"));
+
+        // Linking again (a fresh token saved) settles it.
+        let mut fresh = expired_tokens("me@example.com");
+        fresh.expires_at = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+        store::save_in(dir.path(), &fresh).unwrap();
+        assert_eq!(store::relink_needed_in(dir.path()).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_misconfigured_client_keeps_the_token_and_asks_for_no_relink() {
+        let (_server, endpoints) = token_server(401, INVALID_CLIENT_BODY).await;
+        let dir = tempfile::tempdir().unwrap();
+        store::save_in(dir.path(), &expired_tokens("me@example.com")).unwrap();
+
+        let err = ensure_valid_access_token_in(&config(), &endpoints, dir.path()).await.unwrap_err();
+        assert_eq!(auth_error(&err), Some(AuthError::ClientMisconfigured));
+        assert!(store::load_in(dir.path()).unwrap().is_some(), "signing in again wouldn't help - keep the token");
+        assert_eq!(store::relink_needed_in(dir.path()).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_with_no_refresh_token_is_also_an_expired_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = expired_tokens("me@example.com");
+        t.refresh_token = None;
+        store::save_in(dir.path(), &t).unwrap();
+        let endpoints = Endpoints { auth_url: "", token_url: "http://127.0.0.1:1".into(), userinfo_url: "http://127.0.0.1:1".into() };
+        let err = ensure_valid_access_token_in(&config(), &endpoints, dir.path()).await.unwrap_err();
+        assert_eq!(auth_error(&err), Some(AuthError::SignInExpired));
+        assert!(store::load_in(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_grant_on_a_code_exchange_is_not_an_expired_sign_in() {
+        // There it means a bad/used authorization code: signing in again is
+        // already what the person is doing.
+        assert_eq!(classify_token_error("invalid_grant", false), None);
+        assert_eq!(classify_token_error("invalid_grant", true), Some(AuthError::SignInExpired));
+        assert_eq!(classify_token_error("unauthorized_client", false), Some(AuthError::ClientMisconfigured));
+        assert_eq!(classify_token_error("invalid_request", true), None);
     }
 
     #[tokio::test]
