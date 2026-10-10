@@ -4,7 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use localsync_desktop::{commands, compose_wizard, receiver_session_commands, send_log, session_commands, session_list_commands, setup_commands, state::AppState, storage_commands};
+use localsync_desktop::{commands, compose_wizard, init_repo, receiver_session_commands, send_log, session_commands, session_list_commands, setup_commands, state::AppState, storage_commands};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
@@ -316,6 +316,7 @@ fn main() {
             commands::stop_discovery_browsing,
             compose_wizard::compose_catalog,
             compose_wizard::inspect_project,
+            init_repo::init_project_repo,
             compose_wizard::validate_compose_spec,
             compose_wizard::preview_compose,
             compose_wizard::test_run_compose,
