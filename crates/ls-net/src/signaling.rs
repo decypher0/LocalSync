@@ -79,15 +79,13 @@ impl SignalingClient {
     }
 }
 
-/// Waits for the next Offer or Answer, ignoring anything else.
+/// Waits for the next Offer or Answer (the only messages there are).
 pub(crate) async fn recv_sdp(
     rx: &mut mpsc::UnboundedReceiver<SignalMsg>,
 ) -> Result<RTCSessionDescription> {
-    loop {
-        match rx.recv().await {
-            Some(SignalMsg::Offer { data }) | Some(SignalMsg::Answer { data }) => return Ok(data),
-            None => anyhow::bail!("signaling connection closed before SDP was received"),
-        }
+    match rx.recv().await {
+        Some(SignalMsg::Offer { data }) | Some(SignalMsg::Answer { data }) => Ok(data),
+        None => anyhow::bail!("signaling connection closed before SDP was received"),
     }
 }
 
