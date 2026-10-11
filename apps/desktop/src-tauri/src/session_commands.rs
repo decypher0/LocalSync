@@ -431,6 +431,66 @@ pub async fn send_project_session<R: tauri::Runtime>(
     Ok(SendResult { snapshot_id: artifact.snapshot_id.clone(), device_key, up_to_date: false, view })
 }
 
+// ---------- Cloud drop ----------
+
+/// What a Cloud drop uploads for a session: its prepared artifact - the same
+/// bytes `send_project_session` sends, so the compose file and Dockerfile the
+/// Setup wizard generates, and the database dumps, are in it. (Packaging the
+/// folder on its own would leave all of that out.) Returns the Drive file
+/// name with it.
+pub async fn cloud_drop_payload(state: &AppState, session_id: &str) -> Result<(String, Arc<CachedArtifact>), String> {
+    let session = get_session(state, session_id)?;
+    let artifact = ensure_artifact(state, &session, None).await?;
+    Ok((format!("{}.localsync-snapshot", artifact.snapshot_id), artifact))
+}
+
+/// Records a granted Cloud drop on its sender session, the way a P2P send is
+/// recorded: the receiver's Google account becomes a device
+/// (`cloud:<email>`, named by the email) with a marker for what it got, so the
+/// session's Devices, "Last sent", "Last known device" and Push update all
+/// see it. Returns the session's updated view; `None` if the session was
+/// closed meanwhile.
+///
+/// Each call is one delivery (a history entry). The grant and the download
+/// confirmation both lead here, through
+/// `commands::record_cloud_drop_delivery`, which lets only the first of the
+/// two through per upload.
+///
+/// Push update to a cloud device: there's no connection to push a diff over,
+/// so it is a new Cloud drop of the session - `start_cloud_drop_session`
+/// again, which uploads the current whole artifact (never a diff against
+/// the marker, so the receiver needs nothing it had before) under a new
+/// code; once the receiver is granted again this moves the same
+/// `cloud:<email>` device's marker and adds to its history. Its marker holds
+/// the plain artifact's commits, so `project_push_status` /
+/// `is_up_to_date` compare a cloud device exactly like any other.
+/// (`send_project_session` can't reach a `cloud:` device: it has no room.)
+pub fn record_cloud_delivery(
+    state: &AppState,
+    delivery: &crate::state::CloudDelivery,
+    google_email: &str,
+) -> Result<Option<ProjectSessionView>, String> {
+    let device_key = format!("cloud:{google_email}");
+    let marker = DeviceMarker {
+        snapshot_id: delivery.snapshot_id.clone(),
+        commits: delivery.commits.clone(),
+        sent_at: now_rfc3339(),
+    };
+    let updated = state.project_sessions.lock().map_err(|e| e.to_string())?.get_mut(&delivery.session_id).map(|s| {
+        s.record_send(&device_key, google_email, marker);
+        s.set_last_transfer(
+            &device_key,
+            crate::project_session::TransferStats { bytes: delivery.bytes, duration_ms: delivery.upload_ms },
+        );
+        s.clone()
+    });
+    let Some(updated) = updated else { return Ok(None) };
+    if let Err(e) = crate::session_history::save_project(&updated) {
+        log::warn!("record_cloud_delivery: couldn't update the saved copy of {}: {e}", updated.id);
+    }
+    Ok(Some(build_view(state, &updated, Some(&delivery.commits))))
+}
+
 /// "Save this session": the user's explicit opt-in to storing it on disk.
 #[tauri::command]
 pub fn save_project_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {

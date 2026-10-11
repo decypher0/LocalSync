@@ -203,37 +203,21 @@ function updateCloudTransfer(roomId, change) {
   scheduleSendRender(found.session);
 }
 
-listen("cloud-drop-receiver-joined", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    if (tr.cloudStep === "waiting") tr.cloudStep = "joined";
-    tr.receiverJoined = true;
-  })
-);
-listen("cloud-drop-failed", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    tr.status = "error";
-    tr.errorText = evt.payload.message;
-  })
-);
-// The receiver's control channel closed. After a granted request that's the
-// normal end; before one, they left without getting the file.
-listen("cloud-drop-ended", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    if (tr.status !== "waiting") return;
-    if (tr.cloudStep === "approved") {
-      tr.status = "done";
-    } else {
-      tr.status = "error";
-      tr.errorText = "The receiver disconnected before getting access. Retry for a new code (the file is still in your Drive).";
-    }
-  })
-);
-listen("cloud-drop-downloaded", (evt) =>
-  updateCloudTransfer(evt.payload.room_id, (tr) => {
-    tr.cloudStep = "downloaded";
-    tr.status = "done";
-  })
-);
+// The card's steps follow these events (session-model.js applyCloudEvent).
+listen("cloud-drop-receiver-joined", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "joined")));
+listen("cloud-drop-failed", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "failed", { message: evt.payload.message })));
+listen("cloud-drop-ended", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "ended")));
+listen("cloud-drop-downloaded", (evt) => updateCloudTransfer(evt.payload.room_id, (tr) => applyCloudEvent(tr, "downloaded")));
+// The backend recorded the receiver as one of the session's devices (on a
+// grant from the card or the banner, or on their download confirmation):
+// its Devices, "Last sent" and "Last known device" follow.
+listen("cloud-drop-delivered", (evt) => {
+  const { session_id: sessionId, view } = evt.payload;
+  const session = sessions.get(sessionId);
+  if (!session || session.kind !== "send" || !view) return;
+  applyView(session, view);
+  scheduleSendRender(session);
+});
 
 /// Grant or decline a receiver's Drive access - from the banner or from the
 /// transfer card, whichever the person uses; both reflect the outcome.
@@ -245,20 +229,12 @@ async function respondCloudAccess(peerId, accept) {
   if (found) scheduleSendRender(found.session);
   banner?.querySelectorAll("button").forEach((b) => (b.disabled = true));
   try {
-    await invoke("respond_to_cloud_access_request", { peerId, accept });
+    const view = await invoke("respond_to_cloud_access_request", { peerId, accept });
     banner?.remove();
-    if (found) {
-      const email = req ? req.email : "";
-      found.tr.accessRequest = null;
-      if (accept) {
-        found.tr.cloudStep = "approved";
-        found.tr.grantedEmail = email;
-      } else {
-        found.tr.cloudStep = "declined";
-        found.tr.declinedEmail = email;
-        found.tr.status = "done";
-      }
-    }
+    // On a grant the receiver is now one of the session's devices.
+    // (cloud-drop-delivered carries the same view.)
+    if (view && found) applyView(found.session, view);
+    if (found) applyCloudEvent(found.tr, accept ? "granted" : "declined", { email: req ? req.email : "" });
   } catch (err) {
     if (req) req.error = String(err);
     if (banner) {
@@ -281,10 +257,7 @@ function cancelCloudTransfer(tr) {
 
 listen("cloud-access-request", (evt) => {
   const { peer_id: peerId, google_email: googleEmail } = evt.payload;
-  updateCloudTransfer(peerId, (tr) => {
-    tr.accessRequest = { email: googleEmail, busy: false, error: "" };
-    tr.cloudStep = "requested";
-  });
+  updateCloudTransfer(peerId, (tr) => applyCloudEvent(tr, "requested", { email: googleEmail }));
   const existing = [...$("pull-requests").children].find((el) => el.dataset.peer === peerId);
   if (existing) return;
   const div = document.createElement("div");
@@ -519,14 +492,22 @@ $("session-history-close-btn").addEventListener("click", () => {
 });
 
 // ---------- round 23: linked Google account (Cloud drop) ----------
+// (isGoogleSignInExpired lives in session-model.js.)
 async function refreshGoogleAccountStatus() {
   try {
     const linked = await invoke("google_account_status");
-    $("google-account-status").textContent = linked ? `Linked as ${linked.email}` : "Not linked.";
+    const expired = linked ? null : await invoke("google_relink_needed").catch(() => null);
+    $("google-account-status").textContent = linked
+      ? `Linked as ${linked.email}`
+      : expired
+        ? `Your Google sign-in (${expired}) expired. Link your account again to use Cloud drop.`
+        : "Not linked.";
     $("unlink-google-btn").classList.toggle("hidden", !linked);
   } catch (err) {
     $("google-account-status").textContent = String(err);
   }
+  // Linked/unlinked anywhere: the receive form's Link panel follows.
+  refreshCloudLinkPanel();
 }
 refreshGoogleAccountStatus();
 
@@ -1486,6 +1467,9 @@ function hideAllDbSubPanels() {
 function renderWizardFolderList() {
   const ul = $("wiz-folder-list");
   ul.innerHTML = "";
+  // Every change to the list is a change to what any error here described.
+  $("wiz-folders-error").textContent = "";
+  FolderCheck.ensureCatalog().then(FolderCheck.renderGuide);
   for (const [i, f] of wizardFolders.entries()) {
     const li = document.createElement("li");
     li.innerHTML = `<span class="mono">${escapeHtml(f.path)}</span>`;
@@ -1500,6 +1484,7 @@ function renderWizardFolderList() {
       renderWizardFolderList();
     });
     li.appendChild(removeBtn);
+    FolderCheck.renderRow(li, f);
     ul.appendChild(li);
   }
 }
@@ -1518,9 +1503,6 @@ $("wiz-add-folders-btn").addEventListener("click", async () => {
 
 $("wiz-folders-back-btn").addEventListener("click", () => showWizardStep("wiz-step-mode"));
 
-// Must match ls_snapshot::GIT_MISSING.
-const GIT_MISSING_TEXT = "Git isn't installed - LocalSync needs it to package your project. Install it from git-scm.com and restart LocalSync.";
-
 $("wiz-folders-next-btn").addEventListener("click", async () => {
   if (wizardFolders.length === 0) {
     $("wiz-folders-error").textContent = "Select at least one project folder.";
@@ -1531,25 +1513,28 @@ $("wiz-folders-next-btn").addEventListener("click", async () => {
   for (const f of wizardFolders) delete f.compose;
   // Exactly one folder without a docker-compose.yml of its own: describe how
   // to run it instead (compose wizard). Anything else is the normal wizard.
-  // Every send needs git, so the first folder is always inspected for that.
+  // Every snapshot is built from a commit (compose file or not), so every
+  // folder is inspected for git.
   {
-    const path = wizardFolders[0].path;
-    const count = wizardFolders.length;
+    const folders = wizardFolders.slice();
+    const path = folders[0].path;
+    const count = folders.length;
     $("wiz-folders-next-btn").disabled = true;
     try {
-      const info = await invoke("inspect_project", { folderPath: path });
-      if (wizardFolders.length !== count || wizardFolders[0].path !== path) return; // the list changed meanwhile
+      const infos = await Promise.all(folders.map((f) => invoke("inspect_project", { folderPath: f.path })));
+      if (wizardFolders.length !== count || folders.some((f, i) => wizardFolders[i] !== f)) return; // the list changed meanwhile
+      folders.forEach((f, i) => FolderCheck.update(f, infos[i]));
+      const info = infos[0];
       if (info.git_missing) {
         $("wiz-folders-error").textContent = GIT_MISSING_TEXT;
         return;
       }
+      const uncommitted = infos.findIndex((x) => !x.is_git_repo || !x.has_commits);
+      if (uncommitted >= 0) {
+        $("wiz-folders-error").textContent = FolderCheck.notInGitError(count === 1 ? "this folder" : folders[uncommitted].path);
+        return;
+      }
       if (count === 1 && !info.has_compose) {
-        if (!info.is_git_repo || !info.has_commits) {
-          $("wiz-folders-error").textContent =
-            (info.is_git_repo ? "This folder has no commits yet" : "This folder isn't a git repository") +
-            " and has no docker-compose.yml. LocalSync builds what it sends from git, so commit the project's files first (git init, git add, git commit), then try again.";
-          return;
-        }
         await enterComposeWizard(path, info);
         return;
       }
@@ -2628,6 +2613,7 @@ function renderCloudTransferCard(session, tr) {
   const at = order.indexOf(tr.cloudStep);
   const failed = tr.status === "error" || tr.status === "expired";
   const finished = failed || tr.status === "done";
+  const needsRelink = tr.status === "error" && !tr.relinked && isGoogleSignInExpired(tr.errorText);
   // done / now / later for each of the four steps.
   const state = (doneFrom, nowFrom) => (at >= doneFrom ? "done" : at >= nowFrom && !failed ? "now" : "later");
   const step = (n, st, text, extra = "") =>
@@ -2677,7 +2663,13 @@ function renderCloudTransferCard(session, tr) {
         ${step(4, state(5, 4), at >= 5 ? "Receiver downloaded it" : "Receiver downloads")}
       </ol>
       ${tr.errorText ? `<p class="error">${escapeHtml(tr.errorText)}</p>` : ""}
-      ${failed ? `
+      ${tr.resultText ? `<p class="result">${escapeHtml(tr.resultText)}</p>` : ""}
+      ${failed && needsRelink ? `
+        <span class="inline-row">
+          <button class="primary-btn" type="button" data-relink-transfer="${escapeHtml(tr.id)}" ${tr.relinking ? "disabled" : ""}><svg class="icon"><use href="#icon-link"></use></svg> ${tr.relinking ? "Waiting for Google sign-in…" : "Link Google account"}</button>
+          ${tr.relinkError ? `<span class="error-inline">${escapeHtml(tr.relinkError)}</span>` : ""}
+        </span>` : ""}
+      ${failed && !needsRelink ? `
         <span class="inline-row">
           <button class="primary-btn" type="button" data-retry-transfer="${escapeHtml(tr.id)}" ${tr.busy ? "disabled" : ""}><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Retry</button>
           <span class="hint-inline">${tr.fileId ? "Gets a new code for the file already in your Drive." : "Uploads the project again."}</span>
@@ -2689,7 +2681,10 @@ function renderTransferCard(session, tr) {
   if (tr.spec.kind === "cloud") return renderCloudTransferCard(session, tr);
   const showCode = tr.roomCode && (tr.status === "connecting" || tr.status === "expired" || tr.spec.kind === "cloud");
   const showProgress = tr.status === "active" || (tr.status === "done" && tr.total > 0);
-  const canRetry = (tr.status === "error" || tr.status === "expired") && tr.spec.kind !== "cloud";
+  // A Cloud drop that failed because the Google sign-in expired never
+  // uploaded anything, so once the account is linked again it can retry.
+  const canRetry = (tr.status === "error" || tr.status === "expired") && (tr.spec.kind !== "cloud" || !!tr.relinked);
+  const needsRelink = tr.status === "error" && !tr.relinked && isGoogleSignInExpired(tr.errorText);
   const finished = tr.status === "done" || tr.status === "current" || tr.status === "error" || tr.status === "expired";
   const pct = tr.total ? Math.max(0, Math.min(100, (tr.bytes / tr.total) * 100)) : 0;
   return `
@@ -2720,6 +2715,11 @@ function renderTransferCard(session, tr) {
         </div>` : ""}
       ${tr.resultText ? `<p class="result">${escapeHtml(tr.resultText)}</p>` : ""}
       ${tr.errorText ? `<p class="error">${escapeHtml(tr.errorText)}</p>` : ""}
+      ${needsRelink ? `
+        <span class="inline-row">
+          <button class="primary-btn" type="button" data-relink-transfer="${escapeHtml(tr.id)}" ${tr.relinking ? "disabled" : ""}><svg class="icon"><use href="#icon-link"></use></svg> ${tr.relinking ? "Waiting for Google sign-in…" : "Link Google account"}</button>
+          ${tr.relinkError ? `<span class="error-inline">${escapeHtml(tr.relinkError)}</span>` : ""}
+        </span>` : ""}
       ${canRetry ? `
         <span class="inline-row">
           <button class="primary-btn" type="button" data-retry-transfer="${escapeHtml(tr.id)}" ${tr.busy ? "disabled" : ""}><svg class="icon"><use href="#icon-refresh-cw"></use></svg> Retry</button>
@@ -2939,9 +2939,9 @@ async function runTransfer(session, tr) {
   scheduleSendRender(session);
   try {
     if (tr.spec.kind === "cloud") {
-      // Cloud drop bundles+uploads a single project itself (see
-      // commands::start_cloud_drop_session) rather than sending the
-      // session's artifact, so it has no device record or marker. It returns
+      // Cloud drop uploads the session's artifact to Drive; the receiver is
+      // recorded as a device ("cloud:<email>") once they're granted access
+      // (see respondCloudAccess). It returns
       // as soon as the upload is done; the receiver joining, asking for
       // access and downloading arrive as events (see the cloud-drop-*
       // listeners). A Retry passes the earlier upload back to reuse it.
@@ -2949,9 +2949,11 @@ async function runTransfer(session, tr) {
       tr.accessRequest = null;
       scheduleSendRender(session);
       const info = await invoke("start_cloud_drop_session", {
+        // The session's prepared artifact is what's uploaded (compose file,
+        // Dockerfile and dumps included) - the same bytes a P2P send carries.
+        sessionId: session.id,
         mode: tr.spec.mode || "local",
         relayUrl: tr.spec.mode === "remote" ? tr.spec.url : null,
-        projectPath: session.folders[0].path,
         retention: tr.spec.retention,
         existingFileId: tr.fileId || null,
       });
@@ -3045,6 +3047,27 @@ async function runTransfer(session, tr) {
   }
 }
 
+/// "Link Google account" right on a Cloud drop that failed because the
+/// sign-in expired: the same sign-in Settings runs, then an offer to retry.
+async function relinkForTransfer(session, tr) {
+  if (tr.relinking) return;
+  tr.relinking = true;
+  tr.relinkError = "";
+  scheduleSendRender(session);
+  try {
+    await invoke("link_google_account");
+    tr.relinked = true;
+    tr.errorText = "";
+    tr.resultText = "Google account linked again. Retry the transfer?";
+    refreshGoogleAccountStatus();
+  } catch (err) {
+    tr.relinkError = `Linking didn't finish: ${err}`;
+  } finally {
+    tr.relinking = false;
+    scheduleSendRender(session);
+  }
+}
+
 /// Retry re-runs the *same* transfer (a fresh code, same artifact) - it
 /// never adds a second row or a second session.
 function retryTransfer(session, tr) {
@@ -3065,6 +3088,7 @@ $("send-transfers").addEventListener("click", (e) => {
   if ((found = grab("data-retry-transfer"))) return retryTransfer(found.session, found.tr);
   if ((found = grab("data-cloud-approve"))) return respondCloudAccess(found.tr.roomId, true);
   if ((found = grab("data-cloud-decline"))) return respondCloudAccess(found.tr.roomId, false);
+  if ((found = grab("data-relink-transfer"))) return relinkForTransfer(found.session, found.tr);
   if ((found = grab("data-dismiss-transfer"))) {
     found.session.transfers = found.session.transfers.filter((t) => t !== found.tr);
     scheduleSendRender(found.session);
@@ -3160,9 +3184,27 @@ async function pushUpdateToDevices(session, keys) {
       return;
     }
 
+    // A device reached by Cloud drop ("cloud:<email>") is updated the same
+    // way: the new version is uploaded and they get a new code to enter,
+    // then approve their access again. It's the whole project each time,
+    // not a diff.
+    for (const d of behind.filter((x) => x.key.startsWith("cloud:"))) {
+      const remote = modeStore.mode === "remote" && !!modeStore.url;
+      startTransfer(session, { kind: "cloud", retention: { kind: "deleteAfterDownload" }, mode: remote ? "remote" : "local", url: remote ? modeStore.url : null }, {
+        deviceKey: d.key,
+        deviceName: d.name,
+        note: `Uploads the new version for ${d.name}: share the new code with them and approve their access again.`,
+      });
+    }
+    const p2p = behind.filter((x) => !x.key.startsWith("cloud:"));
+    if (p2p.length === 0) {
+      session.pushSelection.clear();
+      status.textContent = "";
+      return;
+    }
     status.textContent = "Looking for the devices on the network…";
-    const nearby = await findNearbyDevices(behind.map((d) => d.key), 4000);
-    for (const d of behind) {
+    const nearby = await findNearbyDevices(p2p.map((d) => d.key), 4000);
+    for (const d of p2p) {
       const device = nearby.get(d.key);
       if (device) {
         startTransfer(session, { kind: "device", device }, { deviceKey: d.key, deviceName: d.name, since: true });
@@ -3571,6 +3613,51 @@ function startReceiveSessionFromInfo(info, sessionId) {
   return session;
 }
 
+/// Asks the sender for a Cloud drop (they approve, then it downloads from
+/// Drive). Remembers the code on the session, so a request that failed
+/// because the Google sign-in expired can be tried again after re-linking.
+async function requestCloudDrop(session, roomCode, url) {
+  session.cloudRequest = { roomCode, url };
+  session.cloudRequestSent = false;
+  // The backend says when the sender has the request; a failure before that
+  // means this receive never started (see discardUnstartedCloudRequest).
+  const unlistenSent = await listen("cloud-drop-request-sent", (evt) => {
+    if (evt.payload.code === roomCode) session.cloudRequestSent = true;
+  });
+  try {
+    const outcome = await invoke("request_cloud_drop_access", { code: roomCode, relayUrl: url || null });
+    if (!outcome.accepted) {
+      session.errorText = "The sender declined this request.";
+      endSession(session, "error");
+    } else {
+      session = rekeySession(session, outcome.info.received_session_id);
+      applyReviewInfoToSession(session, outcome.info);
+      renderSessionTabs();
+      if (session.id === activeSessionId) renderActiveSession();
+    }
+  } catch (err) {
+    if (!session.cloudRequestSent) {
+      discardUnstartedCloudRequest(session, String(err));
+    } else {
+      session.errorText = String(err);
+      endSession(session, "error");
+    }
+  } finally {
+    unlistenSent();
+  }
+}
+
+/// Retry a failed Cloud drop request on the same session (same code).
+function retryCloudDrop(session) {
+  if (!session.cloudRequest) return;
+  session.status = "connecting";
+  session.endedAt = null;
+  session.errorText = "";
+  renderSessionTabs();
+  if (session.id === activeSessionId) renderActiveSession();
+  requestCloudDrop(session, session.cloudRequest.roomCode, session.cloudRequest.url);
+}
+
 // A receive tab opened before the backend answered (keyed by its room code or
 // a placeholder) takes the real ReceivedSession id once the info arrives.
 // Returns the session to carry on with: if that id is already open (an armed
@@ -3596,7 +3683,74 @@ function rekeySession(session, newId) {
 
 $("cloud-drop-receive-toggle").addEventListener("change", () => {
   $("cloud-drop-receive-hint").classList.toggle("hidden", !$("cloud-drop-receive-toggle").checked);
+  // An error about the previous choice no longer applies.
+  $("receive-start-error").textContent = "";
+  refreshCloudLinkPanel();
 });
+
+// ---------- Cloud drop receive: a linked Google account comes first ----------
+/// The "Link Google account" panel in the receive form, saying `note`
+/// (session-model.js cloudLinkNote); hidden when there's none.
+function showCloudLinkPanel(note) {
+  $("cloud-drop-link-panel").classList.toggle("hidden", !note);
+  $("cloud-drop-link-note").textContent = note || "";
+  $("cloud-drop-link-error").textContent = "";
+}
+
+/// The receiver's pre-flight (Cloud drop available, Google account linked,
+/// sign-in still valid), shown as the Link panel. Resolves to its error, ""
+/// when it passed. Only the newest check updates the panel.
+let cloudLinkCheck = 0;
+async function checkCloudLink() {
+  const n = ++cloudLinkCheck;
+  const err = await invoke("cloud_drop_receive_check").then(() => "", String);
+  if (n === cloudLinkCheck && $("cloud-drop-receive-toggle").checked) showCloudLinkPanel(cloudLinkNote(err));
+  return err;
+}
+
+/// Picking Cloud drop (or linking/unlinking anywhere): say right away if a
+/// Google account is needed first.
+async function refreshCloudLinkPanel() {
+  if ($("cloud-drop-receive-toggle").checked) return void (await checkCloudLink());
+  cloudLinkCheck++;
+  showCloudLinkPanel(null);
+}
+
+$("cloud-drop-link-btn").addEventListener("click", async () => {
+  const btn = $("cloud-drop-link-btn");
+  btn.disabled = true;
+  btn.querySelector("span").textContent = "Waiting for Google sign-in…";
+  $("cloud-drop-link-error").textContent = "";
+  try {
+    await invoke("link_google_account");
+    showCloudLinkPanel(null);
+    refreshGoogleAccountStatus();
+    // Carry on with the code already typed.
+    if ($("receive-room-code").value.trim()) $("receive-btn").click();
+  } catch (err) {
+    $("cloud-drop-link-error").textContent = `Linking didn't finish: ${err}`;
+  } finally {
+    btn.disabled = false;
+    btn.querySelector("span").textContent = "Link Google account";
+  }
+});
+
+/// A Cloud drop request that failed before the sender ever got it: nothing
+/// to keep. Remove the session (no dead "Stopped" one), go back to the
+/// receive form with the code still typed, and say why there.
+function discardUnstartedCloudRequest(session, message) {
+  if (session.progressUnlisten) session.progressUnlisten();
+  sessions.delete(session.id);
+  if (activeSessionId === session.id) activeSessionId = null;
+  renderSessionTabs();
+  $("receive-room-code").value = session.cloudRequest.roomCode;
+  // Linking fixes it: the Link panel says so. Anything else: the reason.
+  const note = cloudLinkNote(message);
+  cloudLinkCheck++;
+  showCloudLinkPanel(note);
+  $("receive-start-error").textContent = note ? "" : message;
+  if (window.lsvReturnToReceiveForm) window.lsvReturnToReceiveForm(session);
+}
 
 // Round 29 goal A2/B1: every click gets its own session/tab instead of
 // overwriting one shared set of globals/DOM, the same fix as send-btn
@@ -3629,24 +3783,17 @@ $("receive-btn").addEventListener("click", async () => {
   // progress on). The tab appears immediately (before the sender has even
   // responded) so this wait doesn't block starting anything else.
   if ($("cloud-drop-receive-toggle").checked) {
-    let session = newSession("receive", `clouddrop-${roomCode}-${Date.now()}`, "Cloud drop request");
+    // Pre-flight first: without a usable Google account nothing is created -
+    // the form offers to link one, then carries on with this code.
+    const err = await checkCloudLink();
+    if (err) {
+      if (!cloudLinkNote(err)) $("receive-start-error").textContent = err;
+      return;
+    }
+    const session = newSession("receive", `clouddrop-${roomCode}-${Date.now()}`, "Cloud drop request");
     addSession(session);
     $("receive-room-code").value = "";
-    try {
-      const outcome = await invoke("request_cloud_drop_access", { code: roomCode, relayUrl: url || null });
-      if (!outcome.accepted) {
-        session.errorText = "The sender declined this request.";
-        endSession(session, "error");
-      } else {
-        session = rekeySession(session, outcome.info.received_session_id);
-        applyReviewInfoToSession(session, outcome.info);
-        renderSessionTabs();
-        if (session.id === activeSessionId) renderActiveSession();
-      }
-    } catch (err) {
-      session.errorText = String(err);
-      endSession(session, "error");
-    }
+    await requestCloudDrop(session, roomCode, url);
     return;
   }
 
