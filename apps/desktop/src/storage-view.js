@@ -1,11 +1,14 @@
 // Storage view (app menu -> LocalSync -> Storage…): what LocalSync has put on
 // disk, per session, and removing what nothing uses any more. Backend:
 // storage_commands.rs. Classic script sharing app.js's globals (invoke,
-// listen, $, escapeHtml). Every removal shows exactly what goes and how much
-// space it frees, and waits for a click, before anything is removed.
+// listen, $, escapeHtml). The default view is one total, one "Free up space"
+// button and the session list; everything else sits behind "Show details".
+// Nothing is removed without a one-sentence confirmation first.
 
 (() => {
   let report = null;
+  let kept = []; // notes from the last removal, shown in details until the next scan
+  let toastTimer = null;
 
   const size = (n) => {
     if (!n) return "0 B";
@@ -14,6 +17,22 @@
     while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
     return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
   };
+  const kindLabel = (k) => ({ volume: "Database volume", folder: "Received project", "test-run": "Test-run leftover", export: "Exported dump" })[k] || k;
+
+  // What "Free up space" removes: every unused item the report listed, plus
+  // LocalSync's own unused images (prune_localsync_images). Image sizes count
+  // layers shared with base images in each, so their total is "up to".
+  const cleanable = (r) => {
+    const imgs = r.images && r.images.unused_count ? r.images : null;
+    return { ids: r.unused.map((u) => u.id), imgs, bytes: r.unused_bytes + (imgs ? imgs.unused_bytes : 0), upTo: !!imgs };
+  };
+  const sessionBytes = (s) => s.dirs_bytes + s.volumes_bytes;
+
+  function clearMessages() {
+    $("storage-error").textContent = "";
+    $("storage-toast").textContent = "";
+    clearTimeout(toastTimer);
+  }
 
   function openStorage() {
     for (const id of ["settings-panel", "session-history-panel"]) $(id).classList.add("hidden");
@@ -22,97 +41,114 @@
   }
 
   async function scan() {
-    $("storage-status").textContent = "Scanning…";
-    $("storage-error").textContent = "";
-    $("storage-refresh-btn").disabled = true;
+    clearMessages();
     hideConfirm();
+    kept = [];
+    $("storage-headline").textContent = "Scanning…";
+    $("storage-refresh-btn").disabled = true;
     try {
       report = await invoke("storage_report");
       render();
-      $("storage-status").textContent = `Scanned in ${(report.scan_ms / 1000).toFixed(1)} s.`;
     } catch (err) {
-      $("storage-status").textContent = "";
+      report = null;
+      $("storage-headline").textContent = "Storage";
+      $("storage-body").innerHTML = "";
       $("storage-error").textContent = String(err);
     } finally {
       $("storage-refresh-btn").disabled = false;
     }
   }
 
-  function render() {
-    const r = report;
-    const rows = r.breakdown
-      .map((p) => `<tr><td>${escapeHtml(p.label)}${p.note ? `<div class="hint-inline">${escapeHtml(p.note)}</div>` : ""}</td><td class="st-num">${size(p.bytes)}</td></tr>`)
-      .join("");
-    const sessions = r.sessions.length
-      ? `<table class="st-table"><thead><tr><th>Session</th><th>Status</th><th class="st-num">Files</th><th class="st-num">Database</th><th></th></tr></thead><tbody>${r.sessions
-          .map((s) => {
-            const empty = !s.dirs.length && !s.volumes.length;
-            const shared = s.volumes.some((v) => v.shared) ? ` <span class="hint-inline">(shared)</span>` : "";
-            return `<tr><td>${escapeHtml(s.name)}</td><td>${s.running ? "Running" : "Stopped"}</td>
-              <td class="st-num">${s.dirs.length ? size(s.dirs_bytes) : "—"}</td>
-              <td class="st-num">${s.volumes.length ? size(s.volumes_bytes) + shared : "—"}</td>
-              <td><button class="ghost-btn" type="button" data-free="${escapeHtml(s.id)}" ${empty ? "disabled" : ""}>Free up disk</button></td></tr>`;
-          })
-          .join("")}</tbody></table>`
-      : `<p class="hint">No received sessions in the list.</p>`;
-    const unused = r.unused.length
-      ? `<ul class="ports-list st-list">${r.unused.map((u) => `<li><span>${kindLabel(u.kind)}: <code>${escapeHtml(u.label)}</code></span><span class="st-num">${size(u.bytes)}</span></li>`).join("")}</ul>
-         <button id="storage-clean-btn" class="ghost-btn" type="button">Clean up unused (${size(r.unused_bytes)})</button>`
-      : `<p class="hint">Nothing unused.</p>`;
-    const img = r.images;
-    const images = img
-      ? `<p class="hint">${img.localsync_count} image(s) built by LocalSync, ${size(img.localsync_bytes)} (layers shared with base images are counted in each).
-           ${img.unused_count} not used by any container.</p>
-         <p class="hint st-warn">Podman's image cache is shared by everything that uses Podman on this computer. This only removes images LocalSync built (localhost/localsync-…) that no container uses; they are rebuilt on the next Run.</p>
-         <button id="storage-prune-btn" class="ghost-btn" type="button" ${img.unused_count ? "" : "disabled"}>Remove unused LocalSync images</button>`
-      : "";
-    $("storage-body").innerHTML = `
-      ${r.podman_error ? `<p class="error">Couldn't ask Podman (${escapeHtml(r.podman_error)}), so volume and image sizes are missing.</p>` : ""}
-      <h3>Total: ${size(r.total_bytes)}</h3>
-      <table class="st-table"><tbody>${rows}</tbody></table>
-      <h3>Sessions</h3>${sessions}
-      <h3>Unused</h3>
-      <p class="hint">Volumes and folders that belong to no session in the list (for example from sessions you closed).</p>
-      ${unused}
-      ${images ? `<h3>Podman images</h3>${images}` : ""}
-      <p class="hint">Work folders scanned: ${r.work_dirs.map((d) => `<code>${escapeHtml(d)}</code>`).join(", ") || "none"}. Only folders LocalSync unpacked inside them are ever removed, never your project folders.</p>
-      <p id="storage-result" class="hint"></p>`;
+  // The headline counts LocalSync's own disk use: total_bytes includes every
+  // Podman image on this computer (the "Podman images" part), so swap that
+  // for the images LocalSync built. (Their shared layers may be counted more
+  // than once - the details say so.)
+  function localsyncBytes(r) {
+    const allImages = r.breakdown.find((p) => p.label === "Podman images");
+    if (!allImages || !r.images) return r.total_bytes;
+    return r.total_bytes - allImages.bytes + r.images.localsync_bytes;
   }
 
-  const kindLabel = (k) => ({ volume: "Database volume", folder: "Received project", "test-run": "Test-run leftover", export: "Exported dump" })[k] || k;
+  function render() {
+    const r = report;
+    const c = cleanable(r);
+    const wasOpen = $("storage-details")?.open;
+    $("storage-headline").textContent = `LocalSync is using ${size(localsyncBytes(r))}`;
+    const free = c.ids.length || c.imgs
+      ? `Free up space (${c.upTo ? "up to " : ""}${size(c.bytes)})`
+      : "Nothing to clean up";
+    const sessions = [...r.sessions].sort((a, b) => sessionBytes(b) - sessionBytes(a));
+    const list = sessions.length
+      ? `<ul class="st-sessions">${sessions
+          .map((s) => `<li><span class="st-dot ${s.running ? "is-running" : ""}" title="${s.running ? "Running" : "Stopped"}"></span>
+            <span class="st-name">${escapeHtml(s.name)}</span><span class="st-num">${size(sessionBytes(s))}</span>
+            <button class="ghost-btn" type="button" data-free="${escapeHtml(s.id)}" ${!s.dirs.length && !s.volumes.length ? "disabled" : ""}>Delete</button></li>`)
+          .join("")}</ul>`
+      : `<p class="hint">No received sessions.</p>`;
+
+    const item = (label, bytes, note = "") => `<li><span>${label}${note}</span><span class="st-num">${size(bytes)}</span></li>`;
+    const img = r.images;
+    const toRemove = c.ids.length || c.imgs
+      ? `<ul class="ports-list st-list">${r.unused.map((u) => item(`${kindLabel(u.kind)}: <code>${escapeHtml(u.label)}</code>`, u.bytes)).join("")}${
+          c.imgs ? item(`${c.imgs.unused_count} unused LocalSync image(s) (up to)`, c.imgs.unused_bytes) : ""}</ul>`
+      : `<p class="hint">Nothing.</p>`;
+    $("storage-body").innerHTML = `
+      ${r.podman_error ? `<p class="error">Couldn't reach Podman, so database and image sizes are missing.</p>` : ""}
+      <button id="storage-clean-btn" class="primary-btn st-free" type="button" ${c.ids.length || c.imgs ? "" : "disabled"}>${free}</button>
+      ${list}
+      <details id="storage-details" ${wasOpen ? "open" : ""}>
+        <summary><span class="st-show">Show details</span><span class="st-hide">Hide details</span></summary>
+        ${r.podman_error ? `<p class="hint">Podman: ${escapeHtml(r.podman_error)}</p>` : ""}
+        <h3>Breakdown</h3>
+        <table class="st-table"><tbody>${r.breakdown
+          .map((p) => `<tr><td>${escapeHtml(p.label)}${p.note ? `<div class="hint-inline">${escapeHtml(p.note)}</div>` : ""}</td><td class="st-num">${size(p.bytes)}</td></tr>`)
+          .join("")}</tbody></table>
+        ${sessions.length ? `<h3>Sessions</h3>
+        <table class="st-table"><thead><tr><th>Session</th><th class="st-num">Files</th><th class="st-num">Database</th></tr></thead><tbody>${sessions
+          .map((s) => `<tr><td>${escapeHtml(s.name)}${[...s.dirs, ...s.volumes]
+              .map((i) => `<div class="hint-inline"><code>${escapeHtml(i.name)}</code>${i.shared ? " (kept, another session uses it)" : ""}</div>`)
+              .join("")}</td>
+            <td class="st-num">${s.dirs.length ? size(s.dirs_bytes) : "—"}</td>
+            <td class="st-num">${s.volumes.length ? size(s.volumes_bytes) : "—"}</td></tr>`)
+          .join("")}</tbody></table>` : ""}
+        <h3>Free up space removes</h3>
+        ${toRemove}
+        ${img ? `<h3>Podman images</h3>
+        <p class="hint">${img.localsync_count} image(s) built by LocalSync, ${size(img.localsync_bytes)}; ${img.unused_count} not used by any container. Layers shared with base images are counted in each.</p>
+        <p class="hint">Podman's image cache is shared by everything that uses Podman on this computer. Only images LocalSync built (localhost/localsync-…) that no container uses are removed; they are rebuilt on the next Run.</p>` : ""}
+        <h3>Work folders</h3>
+        <p class="hint">${r.work_dirs.map((d) => `<code>${escapeHtml(d)}</code>`).join(", ") || "none"}. Only folders LocalSync unpacked inside them are ever removed, never your project folders.</p>
+        ${kept.length ? `<h3>Kept by the last cleanup</h3><ul class="ports-list st-list">${kept.map((k) => `<li>${escapeHtml(k)}</li>`).join("")}</ul>` : ""}
+        <p class="hint">Scanned in ${(r.scan_ms / 1000).toFixed(1)} s.</p>
+      </details>`;
+  }
 
   // ---- confirmation ----
   let pending = null;
-  function showConfirm(html, label, action) {
+  function showConfirm(text, label, action) {
+    clearMessages();
     pending = action;
-    $("storage-confirm-text").innerHTML = html;
+    $("storage-confirm-text").textContent = text;
     $("storage-confirm-go").textContent = label;
     $("storage-confirm").classList.remove("hidden");
-    $("storage-confirm").scrollIntoView({ block: "nearest" });
   }
   function hideConfirm() {
     pending = null;
     $("storage-confirm").classList.add("hidden");
   }
 
-  function showResult(res) {
-    const kept = res.kept.length ? ` Kept: ${res.kept.map(escapeHtml).join("; ")}.` : "";
-    return `Freed ${size(res.freed_bytes)} (${res.removed.length} item(s) removed).${kept}`;
-  }
-
   async function act(fn) {
-    $("storage-error").textContent = "";
+    hideConfirm();
     $("storage-confirm-go").disabled = true;
-    try {
-      const res = await fn();
-      await scan();
-      $("storage-result").innerHTML = showResult(res);
-    } catch (err) {
-      $("storage-error").textContent = String(err);
-    } finally {
-      $("storage-confirm-go").disabled = false;
-      hideConfirm();
-    }
+    let res = null, error = null;
+    try { res = await fn(); } catch (err) { error = err; }
+    await scan(); // a failed removal may still have removed some of it
+    $("storage-confirm-go").disabled = false;
+    if (error) { $("storage-error").textContent = String(error); return; }
+    kept = res.kept;
+    if (report && kept.length) render();
+    $("storage-toast").textContent = `Freed ${size(res.freed_bytes)}${kept.length ? ` · ${kept.length} kept (see details)` : ""}`;
+    toastTimer = setTimeout(() => { $("storage-toast").textContent = ""; }, 5000);
   }
 
   $("storage-body").addEventListener("click", (e) => {
@@ -121,36 +157,24 @@
     if (free) {
       const s = report.sessions.find((x) => x.id === free.dataset.free);
       if (!s) return;
-      const items = [...s.dirs.map((d) => ({ ...d, kind: "folder" })), ...s.volumes.map((v) => ({ ...v, kind: "volume" }))];
-      const total = items.filter((i) => !i.shared).reduce((n, i) => n + i.bytes, 0);
-      const warn = s.running ? `<p class="error">“${escapeHtml(s.name)}” is running. Its containers will be stopped first.</p>` : "";
+      const frees = [...s.dirs, ...s.volumes].filter((i) => !i.shared).reduce((n, i) => n + i.bytes, 0);
       showConfirm(
-        `${warn}<p>Remove these for “${escapeHtml(s.name)}”? The session stays in the list; running it again needs it to be received again.</p>
-         <ul class="ports-list st-list">${items.map((i) => `<li><span>${kindLabel(i.kind)}: <code>${escapeHtml(i.name)}</code>${i.shared ? " — kept, another session uses it" : ""}</span><span class="st-num">${size(i.bytes)}</span></li>`).join("")}</ul>
-         <p>Frees about ${size(total)}.</p>`,
-        s.running ? "Stop and free up disk" : "Free up disk",
+        `${s.running ? "Stop and delete" : "Delete"} the data for “${s.name}”? Frees ${size(frees)}.`,
+        s.running ? "Stop and delete" : "Delete",
         () => invoke("free_session_disk", { sessionId: s.id }),
       );
       return;
     }
     if (e.target.closest("#storage-clean-btn")) {
-      const ids = report.unused.map((u) => u.id);
-      showConfirm(
-        `<p>Remove these? They belong to no session in the list.</p>
-         <ul class="ports-list st-list">${report.unused.map((u) => `<li><span>${kindLabel(u.kind)}: <code>${escapeHtml(u.label)}</code></span><span class="st-num">${size(u.bytes)}</span></li>`).join("")}</ul>
-         <p>Frees ${size(report.unused_bytes)}.</p>`,
-        "Remove",
-        () => invoke("clean_up_unused", { expected: ids }),
-      );
-      return;
-    }
-    if (e.target.closest("#storage-prune-btn")) {
-      const img = report.images;
-      showConfirm(
-        `<p class="st-warn">This affects Podman's shared image cache. Only images LocalSync built that no container uses are removed (${img.unused_count}, up to ${size(img.unused_bytes)}); other Podman projects' images are left alone, but layers they share are only freed once nothing uses them.</p>`,
-        "Remove images",
-        () => invoke("prune_localsync_images"),
-      );
+      const c = cleanable(report);
+      const what = [c.ids.length && "data from sessions you've closed", c.imgs && "unused LocalSync images"].filter(Boolean).join(" and ");
+      showConfirm(`Free up ${c.upTo ? "to " : ""}${size(c.bytes)}? Removes ${what}.`, "Free up space", async () => {
+        const out = { kept: [], freed_bytes: 0 };
+        for (const res of [c.ids.length && (await invoke("clean_up_unused", { expected: c.ids })), c.imgs && (await invoke("prune_localsync_images"))]) {
+          if (res) { out.kept.push(...res.kept); out.freed_bytes += res.freed_bytes; }
+        }
+        return out;
+      });
     }
   });
 

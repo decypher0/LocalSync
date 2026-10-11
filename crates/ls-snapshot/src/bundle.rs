@@ -667,6 +667,13 @@ fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 ///      more than the OS pipe buffer holds; reading only after `wait`
 ///      returns would deadlock the exact way this function exists to avoid.
 fn git_bytes_with(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)]) -> Result<Vec<u8>> {
+    run_git(root, args, envs, GIT_TIMEOUT)
+}
+
+/// [`git_bytes_with`] with the caller's own timeout, for the few git calls
+/// that write (the desktop app's "set up git for this folder": `git add -A`
+/// on a large folder can take longer than a read). Same hardening.
+pub fn run_git(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)], timeout: Duration) -> Result<Vec<u8>> {
     let start = Instant::now();
     let mut child = git_command("git")
         .arg("-C")
@@ -694,7 +701,7 @@ fn git_bytes_with(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)])
     });
 
     let status = match child
-        .wait_timeout(GIT_TIMEOUT)
+        .wait_timeout(timeout)
         .with_context(|| format!("waiting on git {args:?}"))?
     {
         Some(status) => status,
@@ -703,8 +710,8 @@ fn git_bytes_with(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)])
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            log::warn!("git {args:?} in {} timed out after {GIT_TIMEOUT:?}", root.display());
-            bail!("git {args:?} did not finish within {GIT_TIMEOUT:?} (root: {})", root.display());
+            log::warn!("git {args:?} in {} timed out after {timeout:?}", root.display());
+            bail!("git {args:?} did not finish within {timeout:?} (root: {})", root.display());
         }
     };
 
