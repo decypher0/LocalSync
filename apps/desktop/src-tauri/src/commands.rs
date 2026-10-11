@@ -1692,7 +1692,17 @@ pub fn google_account_status() -> Result<Option<LinkedAccountInfo>, String> {
 
 #[tauri::command]
 pub fn unlink_google_account() -> Result<(), String> {
-    ls_clouddrop::store::clear_tokens().map_err(|e| e.to_string())
+    ls_clouddrop::store::clear_tokens().map_err(|e| e.to_string())?;
+    // Unlinking on purpose is not an expired sign-in.
+    ls_clouddrop::store::clear_relink_needed().map_err(|e| e.to_string())
+}
+
+/// The account whose Google sign-in expired (Google refused its saved token,
+/// so it was deleted), until it is linked again - `None` otherwise. Lets
+/// Settings say "sign-in expired" instead of a plain "not linked".
+#[tauri::command]
+pub fn google_relink_needed() -> Result<Option<String>, String> {
+    ls_clouddrop::store::relink_needed().map_err(|e| e.to_string())
 }
 
 /// Mirrors `ls_clouddrop::retention::Retention` at the IPC boundary — kept
@@ -1760,8 +1770,9 @@ pub fn cloud_drop_sender_room(send_info: &SendSessionInfo) -> &str {
     &send_info.room_id
 }
 
-/// Sender side: bundles `project_path` exactly like `share_snapshot` does,
-/// uploads it to the sender's own Drive (never grants anyone access yet),
+/// Sender side: uploads session `session_id`'s prepared artifact (the bytes
+/// `send_project_session` sends - `session_commands::cloud_drop_payload`) to
+/// the sender's own Drive (never grants anyone access yet),
 /// then hosts the same kind of signaling room `start_send_session` does —
 /// not to carry the payload (Drive already has it), only so a receiver who
 /// pastes `room_code` can reach this sender's control channel to ask for
@@ -1772,14 +1783,17 @@ pub fn cloud_drop_sender_room(send_info: &SendSessionInfo) -> &str {
 /// the code was never shown and the wait always ran out. The waiting happens
 /// in the background instead - see [`begin_cloud_drop_handoff`].
 ///
-/// `existing_file_id` (a Retry): reuse that upload if it's still in Drive,
-/// instead of bundling and uploading the project again.
+/// `existing_file_id` (a Retry): reuse that upload if it's still in Drive
+/// and still this session's current artifact, instead of uploading again.
+/// Calling this again for the same session is also how a cloud device gets
+/// a Push update - see `session_commands::record_cloud_delivery`.
 #[tauri::command]
 pub async fn start_cloud_drop_session<R: tauri::Runtime>(
     app: AppHandle<R>,
+    state: State<'_, AppState>,
+    session_id: String,
     mode: String,
     relay_url: Option<String>,
-    project_path: String,
     retention: RetentionChoiceDto,
     existing_file_id: Option<String>,
 ) -> Result<CloudDropSessionInfo, String> {
@@ -1787,30 +1801,37 @@ pub async fn start_cloud_drop_session<R: tauri::Runtime>(
     let config = cloud_drop_config()?;
     let access_token = ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map_err(|e| e.to_string())?;
 
+    // The session's prepared artifact - the same bytes a P2P send carries.
+    let (filename, artifact) = crate::session_commands::cloud_drop_payload(&state, &session_id).await?;
+
     if let Some(file_id) = existing_file_id {
-        // Still there (retention cleanup may have deleted it)? It's already
-        // tracked for retention from when it was first uploaded.
-        if ls_clouddrop::drive::list_permissions(&access_token, &file_id).await.is_ok() {
-            log::info!("start_cloud_drop_session: reusing the Drive upload {file_id}");
-            return begin_cloud_drop_handoff(&app, mode, relay_url, file_id, retention).await;
+        // Reuse only an upload of this exact artifact (the project may have
+        // changed since), and only if it's still in Drive (retention may
+        // have deleted it). It's already tracked for retention.
+        let earlier = state.cloud_drop_files.lock().map_err(|e| e.to_string())?.get(&file_id).cloned();
+        if let Some(delivery) = earlier.filter(|d| d.session_id == session_id && d.snapshot_id == artifact.snapshot_id) {
+            if ls_clouddrop::drive::list_permissions(&access_token, &file_id).await.is_ok() {
+                log::info!("start_cloud_drop_session: reusing the Drive upload {file_id}");
+                return begin_cloud_drop_handoff(&app, mode, relay_url, file_id, retention, delivery).await;
+            }
         }
-        log::info!("start_cloud_drop_session: {file_id} is no longer in Drive - uploading again");
+        log::info!("start_cloud_drop_session: not reusing {file_id} (changed or gone) - uploading again");
     }
 
-    log::info!("start_cloud_drop_session: bundling project_path={project_path}");
-    let root = PathBuf::from(&project_path);
-    let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot(&root, None))
-        .await
-        .map_err(|e| format!("snapshot task panicked: {e}"))?
-        .map_err(|e| e.to_string())?;
-    let filename = format!("{}@{}.localsync-snapshot", snapshot.manifest.project_name, snapshot.manifest.git_commit);
-    let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
-
-    log::info!("start_cloud_drop_session: uploading {filename} ({} bytes) to Drive", bytes.len());
+    log::info!("start_cloud_drop_session: uploading {filename} ({} bytes) to Drive", artifact.bytes.len());
+    let started = std::time::Instant::now();
     let folder_id = ls_clouddrop::drive::get_or_create_app_folder(&access_token).await.map_err(|e| e.to_string())?;
-    let uploaded = ls_clouddrop::drive::upload_file(&access_token, &folder_id, &filename, &bytes)
+    let uploaded = ls_clouddrop::drive::upload_file(&access_token, &folder_id, &filename, &artifact.bytes)
         .await
         .map_err(|e| e.to_string())?;
+    let delivery = crate::state::CloudDelivery {
+        session_id,
+        snapshot_id: artifact.snapshot_id.clone(),
+        commits: artifact.commits.clone(),
+        bytes: artifact.bytes.len() as u64,
+        upload_ms: started.elapsed().as_millis() as u64,
+    };
+    state.cloud_drop_files.lock().map_err(|e| e.to_string())?.insert(uploaded.file_id.clone(), delivery.clone());
 
     ls_clouddrop::retention::add_tracked_upload(ls_clouddrop::retention::TrackedUpload {
         file_id: uploaded.file_id.clone(),
@@ -1820,7 +1841,7 @@ pub async fn start_cloud_drop_session<R: tauri::Runtime>(
     })
     .map_err(|e| e.to_string())?;
 
-    begin_cloud_drop_handoff(&app, mode, relay_url, uploaded.file_id, retention).await
+    begin_cloud_drop_handoff(&app, mode, relay_url, uploaded.file_id, retention, delivery).await
 }
 
 /// Shown when nobody enters a Cloud drop code before it runs out. Not the P2P
@@ -1862,6 +1883,7 @@ pub async fn begin_cloud_drop_handoff<R: tauri::Runtime>(
     relay_url: Option<String>,
     file_id: String,
     retention: ls_clouddrop::retention::Retention,
+    delivery: crate::state::CloudDelivery,
 ) -> Result<CloudDropSessionInfo, String> {
     let send_info = start_send_session(mode, relay_url).await?;
     // See `cloud_drop_sender_room`'s own doc comment for the real,
@@ -1874,6 +1896,7 @@ pub async fn begin_cloud_drop_handoff<R: tauri::Runtime>(
         room.clone(),
         file_id.clone(),
         retention,
+        delivery,
     ));
     app.state::<AppState>().cloud_drop_waits.lock().map_err(|e| e.to_string())?.insert(room, task);
     Ok(CloudDropSessionInfo {
@@ -1891,6 +1914,7 @@ async fn wait_for_cloud_drop_receiver<R: tauri::Runtime>(
     room: String,
     file_id: String,
     retention: ls_clouddrop::retention::Retention,
+    delivery: crate::state::CloudDelivery,
 ) {
     match ls_net::connect_as_sender(&signaling_url, &room).await {
         Ok(conn) => {
@@ -1899,7 +1923,17 @@ async fn wait_for_cloud_drop_receiver<R: tauri::Runtime>(
             // display code) - the same convention every other transport in
             // this file uses.
             if let Ok(mut uploads) = app.state::<AppState>().cloud_drop_uploads.lock() {
-                uploads.insert(room.clone(), crate::state::CloudDropUpload { conn: std::sync::Arc::new(conn), file_id, retention });
+                uploads.insert(
+                    room.clone(),
+                    crate::state::CloudDropUpload {
+                        conn: std::sync::Arc::new(conn),
+                        file_id,
+                        retention,
+                        delivery,
+                        granted_to: None,
+                        recorded: Default::default(),
+                    },
+                );
             }
             let _ = app.emit("cloud-drop-receiver-joined", CloudDropRoomEvent { room_id: room.clone() });
             // Run here (not spawned separately), so aborting this task on
@@ -1973,12 +2007,19 @@ async fn listen_for_cloud_access_requests<R: tauri::Runtime>(app: AppHandle<R>, 
                 // deletion still only happens via `cleanup_expired_cloud_drops`
                 // at next startup, not from inside this listener.
                 let state = app.state::<AppState>();
-                let file_id = state.cloud_drop_uploads.lock().ok().and_then(|u| u.get(&peer_id).map(|e| e.file_id.clone()));
+                let entry = state.cloud_drop_uploads.lock().ok().and_then(|u| {
+                    u.get(&peer_id).map(|e| (e.file_id.clone(), e.delivery.clone(), e.granted_to.clone(), e.recorded.clone()))
+                });
                 let _ = app.emit("cloud-drop-downloaded", CloudDropRoomEvent { room_id: peer_id.clone() });
-                if let Some(file_id) = file_id {
+                if let Some((file_id, delivery, granted_to, recorded)) = entry {
                     log::info!("start_cloud_drop_session: receiver confirmed download of {file_id}");
                     if let Err(e) = ls_clouddrop::retention::mark_downloaded(&file_id) {
                         log::warn!("start_cloud_drop_session: could not mark {file_id} downloaded: {e:#}");
+                    }
+                    if let Some(email) = granted_to {
+                        if let Err(e) = record_cloud_drop_delivery(&app, &peer_id, &delivery, &email, &recorded) {
+                            log::warn!("start_cloud_drop_session: could not record the download on the session: {e}");
+                        }
                     }
                 }
             }
@@ -1998,12 +2039,17 @@ async fn listen_for_cloud_access_requests<R: tauri::Runtime>(app: AppHandle<R>, 
 /// targeted (`type: "user"`, one specific email) Drive permission grant, not
 /// a promise. Declining sends `CloudAccessResponse { accepted: false, .. }`
 /// and grants nothing at all.
+///
+/// On accept, the receiver's Google account is recorded on the sender
+/// session as a device (see [`finish_cloud_grant`]), and the session's
+/// updated view is returned so its page shows them.
 #[tauri::command]
-pub async fn respond_to_cloud_access_request(
+pub async fn respond_to_cloud_access_request<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     peer_id: String,
     accept: bool,
-) -> Result<(), String> {
+) -> Result<Option<crate::session_commands::ProjectSessionView>, String> {
     let google_email = state
         .cloud_access_requests
         .lock()
@@ -2022,6 +2068,7 @@ pub async fn respond_to_cloud_access_request(
         log::info!("respond_to_cloud_access_request: declined for peer_id={peer_id}");
         return ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessResponse { accepted: false, drive_file_id: None })
             .await
+            .map(|()| None)
             .map_err(|e| e.to_string());
     }
 
@@ -2043,13 +2090,76 @@ pub async fn respond_to_cloud_access_request(
         "respond_to_cloud_access_request: granted {google_email} access to {file_id} (expiration_applied={})",
         grant.expiration_applied
     );
+    finish_cloud_grant(&app, &peer_id, &google_email).await
+}
 
+/// Everything after the Drive grant (no Drive/OAuth of its own, so tests can
+/// drive it): tells the receiver which file to download, then records the
+/// delivery on the sender session ([`record_cloud_drop_delivery`]).
+/// Returns the session's updated view - `None` if the session was closed
+/// meanwhile, or (in a race the protocol makes practically impossible) the
+/// download confirmation already recorded it, in which case
+/// `cloud-drop-delivered` has carried the view.
+pub async fn finish_cloud_grant<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    peer_id: &str,
+    google_email: &str,
+) -> Result<Option<crate::session_commands::ProjectSessionView>, String> {
+    let (conn, file_id, delivery, recorded) = {
+        let state = app.state::<AppState>();
+        let mut uploads = state.cloud_drop_uploads.lock().map_err(|e| e.to_string())?;
+        let entry = uploads
+            .get_mut(peer_id)
+            .ok_or_else(|| format!("no cloud-drop upload session for peer_id={peer_id}"))?;
+        // Before the reply goes out, so a confirmation knows who it's from.
+        entry.granted_to = Some(google_email.to_string());
+        (entry.conn.clone(), entry.file_id.clone(), entry.delivery.clone(), entry.recorded.clone())
+    };
     ls_net::send_control(
         &conn,
         &ls_net::ControlMessage::CloudAccessResponse { accepted: true, drive_file_id: Some(file_id) },
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    record_cloud_drop_delivery(app, peer_id, &delivery, google_email, &recorded)
+}
+
+/// `cloud-drop-delivered`: a Cloud drop's receiver was recorded on its sender
+/// session, wherever the approval was clicked - the session page updates
+/// from `view`.
+#[derive(Clone, Serialize)]
+pub struct CloudDropDelivered {
+    pub room_id: String,
+    pub session_id: String,
+    pub view: crate::session_commands::ProjectSessionView,
+}
+
+/// Records a Cloud drop's delivery on its sender session
+/// (`session_commands::record_cloud_delivery`) and emits
+/// `cloud-drop-delivered`, unless this upload's delivery was already
+/// recorded. Called on the grant and again on the receiver's download
+/// confirmation; `recorded` makes it count once - whichever gets here first
+/// records it, in practice always the grant (the receiver can't download
+/// before the grant's reply tells it which file), so the confirmation adds
+/// no second history entry, moves no marker and emits nothing.
+pub fn record_cloud_drop_delivery<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    room_id: &str,
+    delivery: &crate::state::CloudDelivery,
+    google_email: &str,
+    recorded: &std::sync::atomic::AtomicBool,
+) -> Result<Option<crate::session_commands::ProjectSessionView>, String> {
+    if recorded.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let view = crate::session_commands::record_cloud_delivery(&app.state::<AppState>(), delivery, google_email)?;
+    if let Some(view) = &view {
+        let _ = app.emit(
+            "cloud-drop-delivered",
+            CloudDropDelivered { room_id: room_id.to_string(), session_id: delivery.session_id.clone(), view: view.clone() },
+        );
+    }
+    Ok(view)
 }
 
 #[derive(Clone, Serialize)]
@@ -2061,6 +2171,29 @@ pub struct CloudDropReceiveOutcome {
     pub info: Option<IncomingSnapshotInfo>,
 }
 
+/// What a receiver without a linked Google account is told. The UI shows a
+/// "Link Google account" button next to it (and matches on this text).
+pub const CLOUD_DROP_NOT_LINKED: &str = "Cloud drop needs a Google account so the sender can share the file with you.";
+
+/// The receiver's pre-flight before a Cloud drop request: this build can do
+/// Cloud drop, a Google account is linked, and its sign-in still works (an
+/// expired one comes back as `ls_clouddrop`'s "sign-in expired" message, and
+/// its stale token is cleared). The UI runs this before creating anything,
+/// so a receive that can't start leaves nothing behind.
+#[tauri::command]
+pub async fn cloud_drop_receive_check() -> Result<(), String> {
+    let config = cloud_drop_config()?;
+    if ls_clouddrop::store::load_tokens().map_err(|e| e.to_string())?.is_none() {
+        return Err(CLOUD_DROP_NOT_LINKED.to_string());
+    }
+    ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Serialize)]
+pub struct CloudDropRequestSent {
+    pub code: String,
+}
+
 /// Receiver side: decodes `code` (via the existing, unmodified
 /// `decode_room_code` - round 25: no longer takes a `mode` either, see its
 /// own doc comment), connects to the sender's control channel, announces
@@ -2069,7 +2202,8 @@ pub struct CloudDropReceiveOutcome {
 /// result through the same review/consent/Run pipeline every other
 /// transport already uses.
 #[tauri::command]
-pub async fn request_cloud_drop_access(
+pub async fn request_cloud_drop_access<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     code: String,
     relay_url: Option<String>,
@@ -2077,9 +2211,10 @@ pub async fn request_cloud_drop_access(
     let config = cloud_drop_config()?;
     let tokens = ls_clouddrop::store::load_tokens()
         .map_err(|e| e.to_string())?
-        .ok_or("not linked to a Google account yet - link one in Settings first")?;
+        .ok_or(CLOUD_DROP_NOT_LINKED)?;
     let access_token = ls_clouddrop::oauth::ensure_valid_access_token(&config).await.map_err(|e| e.to_string())?;
 
+    let entered = code.clone();
     let decoded = decode_room_code(code, relay_url)?;
     log::info!("request_cloud_drop_access: connecting for room={}", decoded.room_id);
     let conn = ls_net::connect_as_receiver(&decoded.signaling_url, &decoded.room_id)
@@ -2089,6 +2224,10 @@ pub async fn request_cloud_drop_access(
     ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: tokens.email.clone() })
         .await
         .map_err(|e| e.to_string())?;
+    // From here the sender has the request: a failure is now part of this
+    // receive's story, where one before it never got started (the UI then
+    // removes the half-made session instead of leaving a dead one).
+    let _ = app.emit("cloud-drop-request-sent", CloudDropRequestSent { code: entered });
 
     let outcome = request_cloud_drop_outcome(&state, &conn, &access_token).await;
     // Done either way: close now, so the sender's card hears it at once.

@@ -445,18 +445,18 @@
   <!-- ---- Storage (app menu -> Storage…): storage-view.js / storage_commands.rs ---- -->
   <section id="storage-panel" class="settings-panel hidden">
     <div class="inline-row receivers-header">
-      <h2>Storage</h2>
       <span class="inline-row">
-        <button id="storage-refresh-btn" class="ghost-btn" type="button">Rescan</button>
-        <button id="storage-close-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Close</button>
+        <h2 id="storage-headline">Storage</h2>
+        <button id="storage-refresh-btn" class="ghost-btn st-icon-btn" type="button" title="Rescan" aria-label="Rescan"><svg class="icon"><use href="#icon-refresh-cw"></use></svg></button>
       </span>
+      <button id="storage-close-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-x"></use></svg> Close</button>
     </div>
-    <p id="storage-status" class="hint"></p>
     <p id="storage-error" class="error"></p>
+    <p id="storage-toast" class="st-toast" role="status"></p>
     <div id="storage-confirm" class="st-confirm hidden">
-      <div id="storage-confirm-text"></div>
+      <p id="storage-confirm-text"></p>
       <span class="inline-row">
-        <button id="storage-confirm-go" class="ghost-btn st-danger" type="button">Remove</button>
+        <button id="storage-confirm-go" class="ghost-btn st-danger" type="button">Delete</button>
         <button id="storage-confirm-cancel" class="ghost-btn" type="button">Cancel</button>
       </span>
     </div>
@@ -887,6 +887,11 @@
           Pick one or more independent project folders to send together as one snapshot
           (e.g. several standalone Spring Boot services).
         </p>
+        <!-- Lines filled by folder-check.js from compose_catalog. -->
+        <details id="wiz-send-guide" class="send-guide">
+          <summary>What can I send?</summary>
+          <div id="wiz-send-guide-lines"></div>
+        </details>
         <button id="wiz-add-folders-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-folder-plus"></use></svg> Add folder(s)…</button>
         <ul id="wiz-folder-list" class="ports-list"></ul>
         <p id="wiz-folders-error" class="error"></p>
@@ -1216,11 +1221,12 @@
         <input type="checkbox" id="cloud-drop-receive-toggle" />
         This is a Cloud drop code (the sender uploaded to Google Drive)
       </label>
-      <p id="cloud-drop-receive-hint" class="hint hidden">
-        Needs a linked Google account (Settings → Google account). Clicking Receive sends the
-        sender your linked email and waits for them to approve access — nothing downloads
-        until they do.
-      </p>
+      <p id="cloud-drop-receive-hint" class="hint hidden">Cloud drop requires signing in to Google. P2P and relay transfers don't.</p>
+      <div id="cloud-drop-link-panel" class="cloud-link-panel hidden">
+        <p id="cloud-drop-link-note"></p>
+        <button id="cloud-drop-link-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-link"></use></svg> <span>Link Google account</span></button>
+        <p id="cloud-drop-link-error" class="error"></p>
+      </div>
       <button id="receive-btn" class="primary-btn" type="button"><svg class="icon"><use href="#icon-download"></use></svg> Receive</button>
       <p id="receive-start-error" class="error"></p>
     </div>
@@ -1295,6 +1301,7 @@
   <script src="wizard-payload.js"></script>
   <script src="session-model.js"></script>
   <script src="compose-wizard.js"></script>
+  <script src="folder-check.js"></script>
   <script src="setup-wizard.js"></script>
   <script src="app.js"></script>
   <script src="views.js"></script>

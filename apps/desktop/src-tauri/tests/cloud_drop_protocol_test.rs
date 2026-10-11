@@ -44,6 +44,15 @@ async fn declined_access_request_sends_no_grant_and_no_file_id() {
             conn: sender_conn.clone(),
             file_id: "fake-drive-file-id".to_string(),
             retention: ls_clouddrop::retention::Retention::DeleteAfterDownload,
+            delivery: localsync_desktop::state::CloudDelivery {
+                session_id: "no-such-session".into(),
+                snapshot_id: "p@c".into(),
+                commits: vec![],
+                bytes: 0,
+                upload_ms: 0,
+            },
+            granted_to: None,
+            recorded: Default::default(),
         },
     );
 
@@ -74,7 +83,7 @@ async fn declined_access_request_sends_no_grant_and_no_file_id() {
     // would fail outright, so this succeeding is proof the reject branch
     // never touches Cloud drop's Google-facing config. Either way, the
     // assertions below prove no file id (i.e. no real permission) is handed back.
-    commands::respond_to_cloud_access_request(sender.state::<AppState>(), room_id.clone(), false)
+    commands::respond_to_cloud_access_request(sender.clone(), sender.state::<AppState>(), room_id.clone(), false)
         .await
         .expect("declining a cloud-access request should succeed without any Google credentials");
 
@@ -98,7 +107,7 @@ async fn declined_access_request_sends_no_grant_and_no_file_id() {
 async fn responding_to_an_unknown_peer_is_an_error_not_a_panic() {
     let sender_app = tauri::test::mock_app();
     sender_app.manage(AppState::default());
-    let err = commands::respond_to_cloud_access_request(sender_app.state::<AppState>(), "no-such-peer".to_string(), true)
+    let err = commands::respond_to_cloud_access_request(sender_app.handle().clone(), sender_app.state::<AppState>(), "no-such-peer".to_string(), true)
         .await
         .expect_err("responding to a peer with no pending request should fail cleanly");
     assert!(err.contains("no pending"), "expected a clear error message, got: {err}");

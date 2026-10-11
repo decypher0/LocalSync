@@ -47,7 +47,8 @@
   }
   const displayName = (s) => s.displayName || s.title || "Untitled session";
   // A device key is a discovered device's persistent id, or "dev-<room code>".
-  const shortDeviceId = (key) => (key || "").replace(/^dev-/, "").slice(0, 8) || "—";
+  // A Cloud drop receiver's key is "cloud:<email>" (the email is its name).
+  const shortDeviceId = (key) => ((key || "").startsWith("cloud:") ? "Google account (Cloud drop)" : (key || "").replace(/^dev-/, "").slice(0, 8) || "—");
   const sendIsRunning = (s) => s.transfers.some((t) => t.status === "connecting" || t.status === "active" || t.status === "waiting");
   function receiveState(s) {
     if (s.status === "connecting" || s.status === "active") return "receiving";
@@ -360,7 +361,10 @@
     $id("ntr-local-slot").appendChild(discoverWrap);
     $id("ntr-relay-url").value = $id("relay-url").value || modeStore.url || "";
     showTransferArea("receive");
+    // A fresh form: nothing left over from an earlier receive.
+    $id("receive-start-error").textContent = "";
     applyReceiveMode();
+    refreshCloudLinkPanel();
     navigate("new-transfer");
     $id("receive-room-code").focus();
   });
@@ -371,7 +375,8 @@
   const RECEIVE_MODE_HINT = {
     local: "Paste the code the sender shared, or turn on discoverability below so a sender on this network can pick this device directly.",
     remote: "For a sender on a different network: both of you use the same relay server.",
-    cloud: "The sender uploaded the project to Google Drive. Paste their code; nothing downloads until they approve your linked account.",
+    // (The Google sign-in line is the receive form's own hint, right below.)
+    cloud: "The sender uploaded the project to Google Drive. Paste their code: Receive sends them your Google email, and nothing downloads until they approve it.",
   };
   function receiveMode() {
     const on = document.querySelector('input[name="ntr-mode"]:checked');
@@ -453,6 +458,22 @@
     } else if (!V.flow) {
       // A receive that arrived on its own (accepted nearby device, a pushed update).
       navigate("session", session);
+    }
+  };
+
+  // A Cloud drop request that never reached the sender is removed (app.js
+  // discardUnstartedCloudRequest): leave its page for the receive form it
+  // came from, where the reason is shown.
+  window.lsvReturnToReceiveForm = function (session) {
+    if (V.session !== session) return;
+    V.session = null;
+    if (V.flow && V.flow.mode === "receive") {
+      V.flow.pending = null;
+      V.flow.phase = "transfer";
+      navigate("new-transfer");
+      showTransferArea("receive");
+    } else {
+      navigate("home");
     }
   };
 
@@ -689,7 +710,9 @@
     const a = s.artifact;
     const commit = a && a.snapshot_id ? a.snapshot_id.split("@").pop() : null;
     const dumps = (s.folders || []).filter((f) => f.dump).map((f) => `${f.dump.engine} · ${f.dump.schema}`);
-    const lastSent = s.devices.map((d) => d.marker && d.marker.sent_at).filter(Boolean).sort().pop();
+    // A Cloud drop receiver counts too (cloud-drop-delivered refreshes s.devices).
+    const last = lastSentDevice(s.devices);
+    const lastSent = last && last.marker.sent_at;
     $id("sp-project").innerHTML =
       row("Local path", (s.folders || []).map((f) => f.path).join(", ") || "—") +
       row("Commit", commit ? shortCommit(commit) : "—") +
@@ -709,7 +732,7 @@
       $id("sp-live-devices").innerHTML =
         live
           .map((t) => {
-            const name = t.deviceName || (t.spec.kind === "cloud" ? "Cloud drop" : "Device via code");
+            const name = t.deviceName || (t.spec.kind === "cloud" ? t.grantedEmail || (t.accessRequest && t.accessRequest.email) || "Cloud drop" : "Device via code");
             const status =
               t.spec.kind === "cloud"
                 ? t.receiverJoined ? "receiver connected" : t.status === "waiting" ? "waiting for the receiver to enter the code" : "uploading to Drive"
@@ -718,7 +741,6 @@
           })
           .join("") + `<div class="lsv-device is-waiting"><span class="lsv-device-dot"></span><span class="lsv-device-name">Waiting for another device…</span></div>`;
     } else {
-      const last = [...s.devices].filter((d) => d.marker).sort((x, y) => (x.marker.sent_at || "").localeCompare(y.marker.sent_at || "")).pop();
       $id("sp-last-device").innerHTML = last
         ? row("Name", last.name) +
           row("Id", shortDeviceId(last.key)) +
@@ -855,7 +877,9 @@
           <div class="lsv-ph-title">Containers aren't running</div>
           <div class="lsv-ph-text">Press Run to bring this project back up with the database exactly as it was saved.</div>
           <p id="sp-run-error" class="lsv-error hidden"></p>
-          <button id="sp-fix-setup" type="button" class="lsv-btn lsv-btn-inline hidden">Fix setup</button></section>` + logsPanel(false)
+          <button id="sp-fix-setup" type="button" class="lsv-btn lsv-btn-inline hidden">Fix setup</button>
+          <button id="sp-relink" type="button" class="lsv-btn lsv-btn-primary lsv-btn-inline hidden">Link Google account</button>
+          <p id="sp-relink-note" class="lsv-muted lsv-small hidden"></p></section>` + logsPanel(false)
       );
       right.innerHTML =
         panel("Last run", "sp-last-run") +
@@ -864,6 +888,7 @@
           "A stopped session only shows what you can actually do right now - run it again, pull the latest update, or remove it."
         );
       $id("sp-run").addEventListener("click", runCurrent);
+      $id("sp-relink").addEventListener("click", relinkForReceive);
     }
     const arm = $id("sp-arm");
     if (arm) {
@@ -936,6 +961,30 @@
       s.armError = `Couldn't receive the update: ${err}`;
     } finally {
       s.armBusy = false;
+      if (V.session === s && V.view === "session") renderSessionPage();
+    }
+  }
+
+  async function relinkForReceive() {
+    const s = V.session;
+    if (s.relinked) {
+      s.relinked = false;
+      s.relinkNote = "";
+      return retryCloudDrop(s);
+    }
+    s.relinking = true;
+    s.relinkNote = "";
+    renderSessionPage();
+    try {
+      await invoke("link_google_account");
+      s.relinked = true;
+      s.errorText = "";
+      s.relinkNote = "Google account linked again.";
+      refreshGoogleAccountStatus();
+    } catch (err) {
+      s.relinkNote = `Linking didn't finish: ${err}`;
+    } finally {
+      s.relinking = false;
       if (V.session === s && V.view === "session") renderSessionPage();
     }
   }
@@ -1026,16 +1075,25 @@
       const failed = !!s.runErrorText;
       $id("sp-last-run").innerHTML = row("Stopped", s.endedAt ? timeAgo(s.endedAt) : "—") + row("Exit reason", failed ? "Failed to start" : s.endedAt ? "Stopped" : s.status === "error" ? "Receive failed" : "—");
       const errEl = $id("sp-run-error");
-      errEl.textContent = s.runErrorText || (s.status === "error" ? s.errorText : "");
+      errEl.textContent = plainRunError(s.runErrorText) || (s.status === "error" ? s.errorText : "");
       errEl.classList.toggle("hidden", !errEl.textContent);
       showSetupFixButton($id("sp-fix-setup"), s.runErrorText);
+      // A Cloud drop request that failed because the Google sign-in expired:
+      // link again right here, then try the same request again.
+      const relink = $id("sp-relink");
+      const expired = s.status === "error" && isGoogleSignInExpired(s.errorText);
+      relink.classList.toggle("hidden", !expired && !s.relinked);
+      relink.disabled = !!s.relinking;
+      relink.textContent = s.relinking ? "Waiting for Google sign-in…" : s.relinked ? "Try the request again" : "Link Google account";
+      $id("sp-relink-note").textContent = s.relinkNote || "";
+      $id("sp-relink-note").classList.toggle("hidden", !s.relinkNote);
       $id("sp-stopped-ph").classList.toggle("hidden", s.runInProgress);
       $id("sp-run").disabled = s.busy || s.runInProgress || s.status === "error";
       $id("sp-run").querySelector("span").textContent = s.runInProgress ? "Starting…" : "Run";
     }
     if (state === "reviewing") {
       const errEl = $id("sp-run-error");
-      errEl.textContent = s.runErrorText || "";
+      errEl.textContent = plainRunError(s.runErrorText);
       errEl.classList.toggle("hidden", !s.runErrorText);
       showSetupFixButton($id("sp-fix-setup"), s.runErrorText);
       $id("sp-run").disabled = s.busy || s.runInProgress;

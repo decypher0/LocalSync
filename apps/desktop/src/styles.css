@@ -534,6 +534,26 @@ button:disabled { opacity: 0.5; cursor: default; }
   gap: var(--space-3);
 }
 #wiz-folder-list .remove-folder-btn { flex-shrink: 0; }
+/* The folder step's per-folder chip (folder-check.js), on its own line under
+   the path. --green/--text2 exist inside the page views (.lsv); the bare
+   tokens are the old single-page chrome's. */
+#wiz-folder-list li { flex-wrap: wrap; }
+.folder-check {
+  flex-basis: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: var(--font-size-sm);
+  color: var(--text2, var(--muted));
+}
+.folder-check-text { display: inline-flex; align-items: center; gap: 6px; }
+.folder-check-text::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.folder-check-ok { color: var(--green, var(--added-text)); }
+.folder-check-bad { color: var(--danger-text); }
+.folder-check-pending .folder-check-text::before { opacity: 0.4; }
+#wiz-folder-list .folder-check-setup { margin: 0 0 0 var(--space-2); padding: 2px 10px; font-size: inherit; }
+.folder-check-note, .folder-check-error { margin: 4px 0 0; }
+.send-guide { margin: var(--space-2) 0; font-size: var(--font-size-sm); color: var(--text2, var(--muted)); }
+.send-guide summary { cursor: pointer; color: var(--accent-text); }
+.send-guide p { margin: 4px 0 0; }
 #wiz-db-folder-progress { margin: -4px 0 var(--space-3); }
 
 /* Round 22 goal 5: the live table/collection selection list - a real
@@ -764,7 +784,22 @@ button:disabled { opacity: 0.5; cursor: default; }
 .st-num { text-align: right !important; white-space: nowrap; }
 .st-list li { display: flex; justify-content: space-between; gap: var(--space-3); padding: 4px 0; font-size: 13px; }
 .st-list code { word-break: break-all; }
-.st-warn { color: var(--danger-text); }
+.st-icon-btn { padding: 4px 6px; margin-left: var(--space-2); }
+#storage-headline { margin: 0; }
+#storage-confirm-text { margin: 0 0 var(--space-2); }
+#storage-error:empty, #storage-toast:empty { display: none; }
+.st-toast { display: inline-block; margin: var(--space-2) 0 0; padding: 4px 10px; border-radius: 99px; background: var(--card-hover); color: var(--added-text); font-weight: 600; font-size: 13px; }
+.st-free { display: block; margin: var(--space-3) 0; }
+.st-sessions { list-style: none; padding: 0; margin: 0 0 var(--space-3); }
+.st-sessions li { display: flex; align-items: center; gap: var(--space-3); padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.st-sessions .st-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-sessions .ghost-btn { padding: 4px 10px; }
+.st-dot { width: 8px; height: 8px; border-radius: 99px; background: var(--muted); flex-shrink: 0; }
+.st-dot.is-running { background: var(--added); }
+#storage-details summary { cursor: pointer; color: var(--accent-text); font-size: 13px; list-style: none; }
+#storage-details summary::-webkit-details-marker { display: none; }
+#storage-details .st-hide, #storage-details[open] .st-show { display: none; }
+#storage-details[open] .st-hide { display: inline; }
 .st-confirm { border: 1px solid var(--danger-text); border-radius: 8px; padding: var(--space-3); margin: var(--space-2) 0; }
 .st-danger { color: var(--danger-text); border-color: var(--danger-text); }
 .settings-panel { box-shadow: var(--shadow-sm); }
@@ -1076,6 +1111,7 @@ body.lsv-on #storage-panel:not(.hidden) {
 .lsv-review #review-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; }
 /* the review panel's own Run/Reject/log live on the page instead */
 .lsv-review #run-btn, .lsv-review #reject-btn, .lsv-review #run-progress-wrap, .lsv-review #work-dir,
+.lsv-review #run-error, .lsv-review #run-fix-setup-btn,
 .lsv-review label:has(#work-dir) { display: none !important; }
 
 @media (max-width: 900px) {
@@ -1133,3 +1169,6 @@ label.is-unavailable { opacity: 0.6; cursor: not-allowed; }
 .cloud-step.is-done .cloud-step-mark { background: var(--green, #3fb950); border-color: transparent; color: #fff; }
 .cloud-step.is-now .cloud-step-mark { border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); }
 .cloud-approve { margin-top: 6px; }
+
+.cloud-link-panel { margin: 10px 0; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 9px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.cloud-link-panel p { margin: 0; }
