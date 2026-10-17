@@ -66,7 +66,9 @@ static PASSED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 fn pass_key(folder: &FolderPlanDto, tree: &str) -> String {
     let dump = folder.dump.as_ref().map(|d| (&d.schema, &d.file_path, &d.engine));
-    format!("{}|{tree}|{}", folder.path, serde_json::to_string(&(&folder.compose, dump)).unwrap_or_default())
+    // The external files travel with the version too: editing one is a new version to test.
+    let externals = crate::externals::externals_fingerprint(&folder.externals);
+    format!("{}|{tree}|{}", folder.path, serde_json::to_string(&(&folder.compose, dump, externals)).unwrap_or_default())
 }
 
 fn passed(key: &str) -> bool {
@@ -334,7 +336,8 @@ fn new_host_paths(folder: &FolderPlanDto, file: &str, old: &str, new: &str) -> V
         .into_iter()
         .filter(|h| !before.contains(&(h.key.clone(), h.value.clone())))
         .filter(|h| {
-            let v = norm(&h.value);
+            // The path itself, not the value as written (`C:\Users\...` in .properties).
+            let v = norm(&crate::externals::hit_path(file, &h.value).unwrap_or_else(|| h.value.clone()));
             v != project && !v.starts_with(&format!("{project}/"))
         })
         .filter(|h| !folder.externals.iter().any(|e| e.value == h.value))
@@ -486,6 +489,9 @@ mod tests {
             status: crate::externals::ExternalStatus::OutsideExists,
             size_bytes: 1,
             suggested_relative: None,
+            line: 1,
+            container_path: String::new(),
+            rewritable: true,
         });
         assert!(new_host_paths(&chosen, file, old, &new).is_empty());
     }
@@ -526,6 +532,40 @@ mod tests {
         let mut g = f.clone();
         g.compose.as_mut().unwrap().port = 9090;
         assert!(!passed(&pass_key(&g, "tree-x")), "nor for other settings");
+    }
+
+    #[test]
+    fn editing_an_external_file_makes_a_pass_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("tenants.xml");
+        std::fs::write(&outside, "<companies/>").unwrap();
+        let mut f = folder(&dir.path().join("proj"), Some(spec(Runtime::Python, BuildTool::Pip)));
+        f.externals.push(crate::externals::ExternalRef {
+            id: "t1".into(),
+            key: "tenants.file".into(),
+            config_file: "app.properties".into(),
+            value: outside.display().to_string(),
+            path: outside.display().to_string(),
+            kind: crate::externals::ExternalKind::File,
+            status: crate::externals::ExternalStatus::OutsideExists,
+            size_bytes: 12,
+            suggested_relative: None,
+            line: 1,
+            container_path: String::new(),
+            rewritable: true,
+        });
+        remember_pass(pass_key(&f, "tree-x"));
+        std::fs::write(&outside, "<companies><company/></companies>").unwrap();
+        assert!(!passed(&pass_key(&f, "tree-x")), "same tree, but the external file changed");
+    }
+
+    #[test]
+    fn an_escaped_windows_path_inside_the_project_is_not_a_problem() {
+        let f = FolderPlanDto { path: "C:/Users/Some One/proj".into(), dump: None, compose: None, externals: vec![] };
+        let new = "data.dir=C:\\\\Users\\\\Some One\\\\proj\\\\data\nlogs=C:\\\\Users\\\\Some One\\\\logs\n";
+        let found = new_host_paths(&f, "app.properties", "", new);
+        assert_eq!(found.len(), 1, "only the path outside the project: {found:?}");
+        assert!(found[0].contains("logs"), "{found:?}");
     }
 
     fn git(dir: &Path, args: &[&str]) {

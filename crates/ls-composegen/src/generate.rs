@@ -1138,7 +1138,7 @@ mod tests {
         sp.database = db(DbEngine::Postgres, "16", "shop_db");
         let g = gen(&sp, &ctx());
         let mount = "../external/t1:/localsync/external/t1:ro".to_string();
-        let yaml = add_app_volumes(&g.compose_yaml, &[mount.clone()]).unwrap();
+        let yaml = add_app_volumes(&g.compose_yaml, std::slice::from_ref(&mount)).unwrap();
         let policy = ls_security::default_policy();
         let out = receiver_compose::apply_policy(&yaml, &policy, &["postgres".to_string()], "v").unwrap();
         let y: Value = serde_yaml::from_str(&out).unwrap();
