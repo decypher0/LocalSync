@@ -31,6 +31,7 @@ const ChangesPanel = (() => {
       if (f.base_gone) notes.push("The version last sent is no longer in git - Push update sends this folder in full.");
       else if (f.not_sent && sentBefore) notes.push("Not sent to this device yet.");
       if (f.dump_changed) notes.push("Database dump exported again.");
+      for (const x of f.externals || []) notes.push(`external: ${x.name} (${x.change_type})`);
       const all = (f.files || []).map((x) => ({
         path: x.path,
         kind: KIND[x.change_type] || x.change_type,

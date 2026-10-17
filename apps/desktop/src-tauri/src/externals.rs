@@ -161,6 +161,12 @@ pub fn externals_fingerprint(refs: &[ExternalRef]) -> Option<String> {
     Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// [`externals_fingerprint`] of each chosen file or folder on its own, by
+/// id: change detection names which one changed.
+pub fn externals_fingerprints(refs: &[ExternalRef]) -> std::collections::BTreeMap<String, String> {
+    refs.iter().filter_map(|r| Some((r.id.clone(), externals_fingerprint(std::slice::from_ref(r))?))).collect()
+}
+
 /// What the snapshot bundles for `refs`: each present file/folder outside
 /// the project, with where it is now.
 pub fn bundle_entries(refs: &[ExternalRef]) -> Vec<(ls_snapshot::ExternalFile, PathBuf)> {
