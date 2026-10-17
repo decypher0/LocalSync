@@ -75,7 +75,7 @@ fn app() -> Handle {
     app.handle().clone()
 }
 
-/// Sends `sid` and receives it (a fresh receive, or an armed update).
+/// Sends `sid` and receives it.
 async fn push(sender: &Handle, receiver: &Handle, url: &str, room: &str, sid: &str) -> IncomingSnapshotInfo {
     let request = SendRequest {
         session_id: sid.to_string(),

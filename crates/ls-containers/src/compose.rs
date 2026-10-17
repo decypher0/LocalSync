@@ -270,6 +270,7 @@ mod tests {
             folders: vec![],
             database_dumps: vec![],
             externals: Vec::new(),
+            project_id: None,
         }
     }
 

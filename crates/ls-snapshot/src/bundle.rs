@@ -153,22 +153,25 @@ pub struct GitBundle {
 }
 
 pub fn bundle_project(project_root: &Path, parent_commit: Option<&str>) -> Result<GitBundle> {
-    bundle_project_with(project_root, parent_commit, None)
+    bundle_project_with(project_root, parent_commit, None, &NewFileSelection::default())
 }
 
 /// [`bundle_project`], optionally with [`GeneratedFiles`] standing in for a
 /// compose file the project doesn't have. When `generated` is given its
 /// compose YAML is used instead of reading `docker-compose.yml` from disk,
-/// and its extra files are added under `source/`.
+/// and its extra files are added under `source/`. `selection` picks which of
+/// the folder's new files go in (see [`snapshot_commit_with`]).
 pub fn bundle_project_with(
     project_root: &Path,
     parent_commit: Option<&str>,
     generated: Option<&crate::types::GeneratedFiles>,
+    selection: &NewFileSelection,
 ) -> Result<GitBundle> {
     log::info!("bundling started: project_root={}", project_root.display());
-    // HEAD, or a commit of HEAD plus the folder's uncommitted changes - see
-    // `snapshot_commit`. Everything below (archive, diff, diff stat) is of it.
-    let git_commit = snapshot_commit(project_root)?;
+    // HEAD, or a commit of HEAD plus the folder's uncommitted changes and new
+    // files - see `snapshot_commit_with`. Everything below (archive, diff,
+    // diff stat) is of it.
+    let git_commit = snapshot_commit_with(project_root, selection)?;
 
     let diff_stat = build_diff_stat(project_root, parent_commit, &git_commit)?;
     let diff_stat_json = serde_json::to_vec_pretty(&diff_stat)?;
@@ -593,26 +596,102 @@ pub fn head_commit(project_root: &Path) -> Result<String> {
     Ok(git_text(project_root, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
+/// Which of a folder's new files - untracked, and not ignored by git - go
+/// into its snapshot: every one, except those in `excluded` and secret-looking
+/// ones ([`looks_secret`]) that are not in `included`. Paths are relative to
+/// the folder, with `/` separators, as git prints them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NewFileSelection {
+    pub excluded: Vec<String>,
+    pub included: Vec<String>,
+}
+
+impl NewFileSelection {
+    pub fn includes(&self, path: &str) -> bool {
+        !self.excluded.iter().any(|p| p == path) && (!looks_secret(path) || self.included.iter().any(|p| p == path))
+    }
+}
+
+/// One of a folder's new files (see [`new_files`]).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NewFile {
+    /// Relative to the folder, `/`-separated.
+    pub path: String,
+    /// [`looks_secret`]: left out until the user includes it.
+    pub secret: bool,
+    /// The snapshot includes it ([`NewFileSelection::includes`]).
+    pub included: bool,
+}
+
+/// A file name that usually holds credentials (any letter case): `.env*`,
+/// `*.env`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`, `credentials*`,
+/// `secrets*`. A new file named like this stays out of the snapshot until
+/// the user includes it.
+pub fn looks_secret(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name.starts_with(".env")
+        || name.ends_with(".env")
+        || [".pem", ".key", ".p12"].iter().any(|ext| name.ends_with(ext))
+        || ["id_rsa", "credentials", "secrets"].iter().any(|p| name.starts_with(p))
+}
+
+/// The folder's new files: untracked and not ignored (`.gitignore`,
+/// `.git/info/exclude`, the global excludes file), each marked with whether
+/// `selection` includes it. Left out entirely: an untracked nested git
+/// repository (git lists it as `dir/`, not as files), files under a
+/// [`NOISE_DIR_NAMES`] directory (never shipped anyway), and names that
+/// aren't UTF-8.
+pub fn new_files(project_root: &Path, selection: &NewFileSelection) -> Result<Vec<NewFile>> {
+    let out = git_bytes(project_root, &["ls-files", "--others", "--exclude-standard", "-z", "--", "."])?;
+    Ok(out
+        .split(|b| *b == 0)
+        .filter_map(|p| std::str::from_utf8(p).ok())
+        .filter(|p| !p.is_empty() && !p.ends_with('/') && !has_noise_component(Path::new(p)))
+        .map(|p| NewFile { path: p.to_string(), secret: looks_secret(p), included: selection.includes(p) })
+        .collect())
+}
+
+/// The commit a snapshot of `project_root` is built from, with every new
+/// file the default [`NewFileSelection`] includes. See [`snapshot_commit_with`].
+pub fn snapshot_commit(project_root: &Path) -> Result<String> {
+    snapshot_commit_with(project_root, &NewFileSelection::default())
+}
+
 /// The commit a snapshot of `project_root` is built from - and what decides
 /// whether the project changed since a device last received it.
 ///
-/// HEAD when the folder has no uncommitted changes to tracked files.
-/// Otherwise a commit of HEAD plus those changes, made the way `git stash
-/// create` does: nothing the developer sees is touched (no branch, ref, index
-/// or file changes). Their index is copied to a temporary one, the folder's
-/// edits to tracked files are staged there, and that tree is committed with a
-/// fixed author and date, so the same content always gives the same id.
-/// Untracked files are left out unless they were `git add`ed - an untracked
-/// `.env` must never ship just because it exists.
+/// HEAD when the folder has no uncommitted changes to tracked files and no
+/// new file `selection` includes. Otherwise a commit of HEAD plus those
+/// changes and files, made the way `git stash create` does: nothing the
+/// developer sees is touched (no branch, ref, index or file changes). Their
+/// index is copied to a temporary one, the folder's edits to tracked files
+/// and its chosen new files are staged there, and that tree is committed with
+/// a fixed author and date, so the same content always gives the same id.
+/// Ignored files never go in, and neither does a secret-looking new file
+/// (an untracked `.env`) unless the user included it.
 ///
 /// ponytail: the commit is unreachable, so `git gc` may prune it after ~2
-/// weeks; a later push diffing against it then falls back to a full diff
-/// (`ensure_artifact` already handles a parent that no longer exists).
-pub fn snapshot_commit(project_root: &Path) -> Result<String> {
+/// weeks; a later push diffing against it then sends the full snapshot
+/// (`session_commands::ensure_artifact` checks [`commit_exists`] first).
+pub fn snapshot_commit_with(project_root: &Path, selection: &NewFileSelection) -> Result<String> {
     let head = head_commit(project_root)?;
-    let dirty = git_text(project_root, &["status", "--porcelain", "--untracked-files=no", "--", "."])?;
-    if dirty.trim().is_empty() {
-        return Ok(head);
+    let files = new_files(project_root, selection)?;
+    commit_with_new_files(project_root, &head, &files)
+}
+
+/// [`snapshot_commit_with`] for a [`new_files`] list the caller already has.
+pub fn snapshot_commit_of(project_root: &Path, files: &[NewFile]) -> Result<String> {
+    let head = head_commit(project_root)?;
+    commit_with_new_files(project_root, &head, files)
+}
+
+fn commit_with_new_files(project_root: &Path, head: &str, files: &[NewFile]) -> Result<String> {
+    let added: Vec<&str> = files.iter().filter(|f| f.included).map(|f| f.path.as_str()).collect();
+    // --no-optional-locks: a plain `git status` refreshes the stat info in
+    // the developer's own index and writes it back; this must not touch it.
+    let dirty = git_text(project_root, &["--no-optional-locks", "status", "--porcelain", "--untracked-files=no", "--", "."])?;
+    if dirty.trim().is_empty() && added.is_empty() {
+        return Ok(head.to_string());
     }
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp_index = std::env::temp_dir().join(format!(
@@ -620,6 +699,7 @@ pub fn snapshot_commit(project_root: &Path) -> Result<String> {
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    let tmp_paths = tmp_index.with_extension("paths");
     let real_index = git_text(project_root, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
     let real_index = Path::new(real_index.trim());
     if real_index.is_file() {
@@ -630,6 +710,19 @@ pub fn snapshot_commit(project_root: &Path) -> Result<String> {
     let index_env = [("GIT_INDEX_FILE", tmp_index.as_os_str())];
     let made = (|| -> Result<String> {
         git_bytes_with(project_root, &["add", "-u", "--", "."], &index_env)?;
+        if !added.is_empty() {
+            // From a file, not the command line (which a few thousand paths
+            // would overflow on Windows); literal, so a `[` or `*` in a file
+            // name is just a character.
+            let mut list = Vec::new();
+            for path in &added {
+                list.extend_from_slice(path.as_bytes());
+                list.push(0);
+            }
+            fs::write(&tmp_paths, list).with_context(|| format!("writing {}", tmp_paths.display()))?;
+            let from_file = format!("--pathspec-from-file={}", tmp_paths.display());
+            git_bytes_with(project_root, &["--literal-pathspecs", "add", &from_file, "--pathspec-file-nul"], &index_env)?;
+        }
         let tree = String::from_utf8(git_bytes_with(project_root, &["write-tree"], &index_env)?)?;
         let fixed = std::ffi::OsStr::new;
         let author = [
@@ -642,12 +735,13 @@ pub fn snapshot_commit(project_root: &Path) -> Result<String> {
         ];
         let commit = git_bytes_with(
             project_root,
-            &["commit-tree", "--no-gpg-sign", tree.trim(), "-p", &head, "-m", "LocalSync: uncommitted changes"],
+            &["commit-tree", "--no-gpg-sign", tree.trim(), "-p", head, "-m", "LocalSync: uncommitted changes"],
             &author,
         )?;
         Ok(String::from_utf8(commit)?.trim().to_string())
     })();
     let _ = fs::remove_file(&tmp_index);
+    let _ = fs::remove_file(&tmp_paths);
     made
 }
 
@@ -656,6 +750,46 @@ pub fn snapshot_commit(project_root: &Path) -> Result<String> {
 /// commit of an uncommitted edit, and the real commit made of it afterwards.
 pub fn folder_tree(project_root: &Path, commit: &str) -> Result<String> {
     Ok(git_text(project_root, &["rev-parse", &format!("{commit}:./")])?.trim().to_string())
+}
+
+/// `commit` is still in `project_root`'s repository. An unreachable snapshot
+/// commit (see [`snapshot_commit_with`]) can be pruned by `git gc`, and a
+/// rewritten history drops commits too - neither can be diffed against.
+pub fn commit_exists(project_root: &Path, commit: &str) -> bool {
+    git_bytes(project_root, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
+}
+
+/// One file that differs between two commits of a folder.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChangedFile {
+    /// Relative to the folder, `/`-separated.
+    pub path: String,
+    /// "added", "modified" or "deleted" - the same words as the review's
+    /// `diff_stat.json`.
+    pub change_type: String,
+}
+
+/// What changed in `project_root` from `from` to `to`, limited to and
+/// relative to the folder, with the same noise filtering as the payload.
+/// Only names and kinds (no line counts), so it is cheap enough to poll.
+pub fn changed_files(project_root: &Path, from: &str, to: &str) -> Result<Vec<ChangedFile>> {
+    let out = git_bytes(project_root, &["diff", "--relative", "--no-renames", "--name-status", "-z", from, to])?;
+    // `-z`: "<status>\0<path>\0" per file (no renames, so one path each).
+    let mut fields = out.split(|b| *b == 0).filter(|f| !f.is_empty());
+    let mut files = Vec::new();
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        let path = String::from_utf8_lossy(path).into_owned();
+        if has_noise_component(Path::new(&path)) {
+            continue;
+        }
+        let change_type = match status.first().copied() {
+            Some(b'A') => "added",
+            Some(b'D') => "deleted",
+            _ => "modified",
+        };
+        files.push(ChangedFile { path, change_type: change_type.to_string() });
+    }
+    Ok(files)
 }
 
 fn git_text(root: &Path, args: &[&str]) -> Result<String> {

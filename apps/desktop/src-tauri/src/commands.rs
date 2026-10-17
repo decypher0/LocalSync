@@ -967,9 +967,13 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     log::info!("receive_snapshot: data channel open, receiving payload");
 
     let progress_session_id = room_code.clone();
-    let bytes = ls_net::receive_payload(&conn, |received, total| {
-        let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
-    })
+    let bytes = ls_net::receive_payload_answering(
+        &conn,
+        |received, total| {
+            let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
+        },
+        |msg| answer_while_receiving(state.inner(), msg),
+    )
     .await
     .map_err(|e| {
         log::warn!("receive_snapshot: receive_payload failed: {e}");
@@ -979,9 +983,10 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot)?;
     log::info!("receive_snapshot: done, id={}", info.snapshot_id);
-    // An armed session's next push landed - let the frontend route it to the
-    // existing tab. A fresh session needs no extra signal: the caller's own
-    // return value already carries `info` for that case.
+    // An update to a session this device already has landed - let the
+    // frontend route it to the existing tab. A fresh session needs no extra
+    // signal: the caller's own return value already carries `info` for that
+    // case.
     if let crate::receiver_session_commands::ReceivedSessionOutcome::Updated(session_id) = &outcome {
         let _ = app.emit(
             "session-update-available",
@@ -994,6 +999,23 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     tauri::async_runtime::spawn(listen_for_pushed_updates(app, conn, room_code));
 
     Ok(info)
+}
+
+/// The receiver's reply to a control message that arrives while it waits for
+/// a payload: a push asks which version of the project this device holds
+/// (`ControlMessage::BaseCheck`) before sending a diff against it, answered
+/// from the received sessions (`receiver_session_commands::
+/// held_base_commits`). An older sender asks nothing and just sends.
+fn answer_while_receiving(state: &AppState, msg: ls_net::ControlMessage) -> Option<ls_net::ControlMessage> {
+    match msg {
+        ls_net::ControlMessage::BaseCheck { project_id, sender_pubkey_hex } => Some(ls_net::ControlMessage::BaseCheckResponse {
+            commits: crate::receiver_session_commands::held_base_commits(state, &sender_pubkey_hex, &project_id),
+        }),
+        other => {
+            log::warn!("receive: unexpected control message from sender before its payload: {other:?}");
+            None
+        }
+    }
 }
 
 /// Background task (receiver side): waits for the sender to push a fresh
@@ -1048,6 +1070,14 @@ async fn listen_for_pushed_updates<R: tauri::Runtime>(
                     Err(e) => log::warn!("receive_snapshot: finalizing pushed update failed: {e}"),
                 }
             }
+            Ok(msg @ ls_net::ControlMessage::BaseCheck { .. }) => {
+                let reply = answer_while_receiving(app.state::<AppState>().inner(), msg);
+                if let Some(reply) = reply {
+                    if let Err(e) = ls_net::send_control(&conn, &reply).await {
+                        log::warn!("receive_snapshot: couldn't answer the sender's BaseCheck: {e:#}");
+                    }
+                }
+            }
             Ok(other) => {
                 log::warn!("receive_snapshot: unexpected control message from sender: {other:?}");
             }
@@ -1096,8 +1126,8 @@ pub fn finalize_received_snapshot(
 
 /// Everything `finalize_received_snapshot` does, plus filing the push under
 /// the receiver-session model (`crate::receiver_session_commands`) and
-/// reporting whether that created a fresh `ReceivedSession` or updated an
-/// armed, already-existing one.
+/// reporting whether that created a fresh `ReceivedSession` or updated the
+/// already-existing one of the same project from the same sender.
 ///
 /// Split out as its own function - rather than changing
 /// `finalize_received_snapshot`'s own signature or `IncomingSnapshotInfo`'s
@@ -1139,9 +1169,9 @@ pub fn finalize_received_snapshot_tracked(
     };
 
     // Files this push under the receiver-session model (creates a fresh
-    // ReceivedSession, or updates one that was explicitly armed for it) -
-    // never affects the diff-review-then-Run gate below, only which session
-    // the eventual Run attaches to.
+    // ReceivedSession, or updates the one this device already has of the
+    // project) - never affects the diff-review-then-Run gate below, only
+    // which session the eventual Run attaches to.
     let outcome = crate::receiver_session_commands::track_received_snapshot(state, &manifest, &snapshot_id, &sender_pubkey_hex)?;
 
     state
@@ -1501,9 +1531,13 @@ pub async fn respond_to_connection_request<R: tauri::Runtime>(
     }
 
     let progress_session_id = peer_id.clone();
-    let bytes = ls_net::receive_payload(&conn, |received, total| {
-        let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
-    })
+    let bytes = ls_net::receive_payload_answering(
+        &conn,
+        |received, total| {
+            let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
+        },
+        |msg| answer_while_receiving(state.inner(), msg),
+    )
     .await
     .map_err(|e| e.to_string())?;
 
