@@ -490,7 +490,7 @@ fn file_changes(changed: Vec<ls_snapshot::ChangedFile>, new_files: &[ls_snapshot
             let new = new_files.iter().find(|n| n.path == c.path);
             FileChange {
                 new_file: new.is_some(),
-                included: new.map_or(true, |n| n.included),
+                included: new.is_none_or(|n| n.included),
                 secret: new.is_some_and(|n| n.secret),
                 path: c.path,
                 change_type: c.change_type,
