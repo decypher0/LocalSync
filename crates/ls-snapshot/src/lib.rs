@@ -4,7 +4,7 @@ mod sign;
 mod types;
 
 pub use bundle::{folder_tree, git_available, head_commit, run_git, snapshot_commit, GIT_MISSING};
-pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, GeneratedFiles, Manifest, PendingDump, ServiceDef, Snapshot};
+pub use types::{DatabaseDumpEntry, DumpSource, ExternalFile, ExternalKind, FolderInfo, GeneratedFiles, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};
 use std::fs::File;
@@ -51,6 +51,7 @@ pub fn create_snapshot(project_root: &Path, parent_commit: Option<&str>) -> Resu
         // and never populates either: see Manifest::folders' doc comment.
         folders: Vec::new(),
         database_dumps: Vec::new(),
+        externals: Vec::new(),
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &bundle.payload)?;
@@ -274,6 +275,7 @@ pub fn create_snapshot_multi_with(
         created_at: time::OffsetDateTime::now_utc(),
         folders: folder_infos,
         database_dumps,
+        externals: Vec::new(),
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &payload)?;

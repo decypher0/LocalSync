@@ -96,7 +96,7 @@ async fn a_cloud_drop_is_recorded_once_announced_and_pushed_again_as_a_new_drop(
     let sender = sender.handle().clone();
     let delivered = record(&sender, "cloud-drop-delivered");
     let ended = record(&sender, "cloud-drop-ended");
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }];
     let sid = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap().id;
 
     // ---- first drop: recorded on the grant, and announced ----

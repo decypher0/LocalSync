@@ -108,6 +108,7 @@ async fn push(sender: &Handle, receiver: &Handle, url: &str, room: &str, project
         path: project.display().to_string(),
         dump: Some(DumpPlanDto { schema: "appdb".into(), file_path: dump_path.display().to_string(), engine: "mysql".into() }),
         compose: Some(spec),
+        externals: vec![],
     }];
     let sid = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap().id;
     let request = SendRequest {

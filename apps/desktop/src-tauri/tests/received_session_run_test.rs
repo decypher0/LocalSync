@@ -82,7 +82,7 @@ fn app() -> Handle {
 }
 
 async fn sender_session(sender: &Handle, project: &Path) -> String {
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }];
     session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap().id
 }
 
