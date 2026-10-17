@@ -150,7 +150,7 @@ pub fn push_base(parents: &[Option<String>], answer: Option<Option<&[String]>>) 
     let holds_every_parent = parents
         .iter()
         .enumerate()
-        .all(|(i, parent)| parent.as_ref().map_or(true, |p| held.get(i) == Some(p)));
+        .all(|(i, parent)| parent.as_ref().is_none_or(|p| held.get(i) == Some(p)));
     if holds_every_parent {
         PushBase::Diff
     } else {
