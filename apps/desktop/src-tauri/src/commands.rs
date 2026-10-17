@@ -635,10 +635,12 @@ pub(crate) fn generated_files_for(
                 Some(ls_composegen::DumpInfo { engine, file_name: format!("{}.{ext}", d.schema) })
             });
             let ctx = ls_composegen::GenerateContext { folder_label: label.clone(), dump, host_port };
-            let generated = ls_composegen::generate(spec, &ctx).map_err(|e| e.to_string())?;
+            let mut generated = ls_composegen::generate(spec, &ctx).map_err(|e| e.to_string())?;
+            crate::externals::apply_to_generated(std::path::Path::new(&f.path), &f.externals, &mut generated)?;
             Ok(Some(ls_snapshot::GeneratedFiles {
                 compose_yaml: generated.compose_yaml,
                 files: generated.files.into_iter().map(|g| (g.path, g.contents.into_bytes())).collect(),
+                externals: crate::externals::bundle_entries(&f.externals),
             }))
         })
         .collect()

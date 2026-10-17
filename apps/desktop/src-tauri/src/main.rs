@@ -318,6 +318,7 @@ fn main() {
             compose_wizard::inspect_project,
             init_repo::init_project_repo,
             externals::detect_external_refs,
+            externals::describe_external,
             compose_wizard::validate_compose_spec,
             compose_wizard::preview_compose,
             compose_wizard::test_run_compose,

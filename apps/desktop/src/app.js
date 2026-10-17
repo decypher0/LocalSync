@@ -2270,6 +2270,7 @@ function renderComposeServices() {
     extras.appendChild(li);
   }
   renderComposeEnvRows();
+  ExternalsStep.show($("wiz-externals"), wizardFolders[0], { invoke, open, onChange: () => (composeState.testedKey = null) });
   showWizardStep(CW_STEP_ID.services);
 }
 
@@ -2389,6 +2390,7 @@ async function showComposeReview(spec, map) {
       spec,
       folderLabel: wizFolderLabel(wizardFolders[0].path),
       dump: dump ? { engine: dump.engine, file_name: cwBasename(dump.filePath) } : null,
+      folderPath: wizardFolders[0].path, externals: wizardFolders[0].externals || [],
     });
     if (composeState !== cs) return;
     status.textContent = "";

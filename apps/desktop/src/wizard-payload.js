@@ -41,6 +41,7 @@ function buildWizardFoldersPayload(wizardFolders) {
     // The compose wizard's spec (a project with no compose file of its own),
     // only when there is one - the key is absent otherwise.
     ...(f.compose ? { compose: f.compose } : {}),
+    ...(f.externals && f.externals.length ? { externals: f.externals } : {}), // files outside the project (externals-step.js)
   }));
 }
 

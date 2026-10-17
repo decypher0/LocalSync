@@ -453,6 +453,27 @@ pub(crate) fn generate_unchecked(spec: &ComposeSpec, ctx: &GenerateContext) -> R
     })
 }
 
+/// Adds bind mounts (`host:container[:ro]`, host relative to the compose
+/// file) to the app service of a compose file [`generate`] produced - how
+/// files from outside the project reach the container.
+pub fn add_app_volumes(compose_yaml: &str, volumes: &[String]) -> Result<String, GenerateError> {
+    if volumes.is_empty() {
+        return Ok(compose_yaml.to_string());
+    }
+    let internal = |e: serde_yaml::Error| GenerateError::Internal(e.to_string());
+    let mut doc: Value = serde_yaml::from_str(compose_yaml).map_err(internal)?;
+    let app = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut(APP_SERVICE))
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| GenerateError::Internal("the compose file has no app service".into()))?;
+    let list = app.entry(s("volumes")).or_insert_with(|| Value::Sequence(vec![]));
+    if let Value::Sequence(seq) = list {
+        seq.extend(volumes.iter().map(|v| s(v)));
+    }
+    serde_yaml::to_string(&doc).map_err(internal)
+}
+
 // `ls_containers::compose` is a private module, so the round-trip test compiles
 // its source file directly (the same code the receiver runs).
 #[cfg(test)]
@@ -1109,5 +1130,20 @@ mod tests {
         let mut bad = java_maven();
         bad.run_command = String::new();
         assert!(matches!(generate(&bad, &ctx()), Err(GenerateError::Invalid(_))));
+    }
+
+    #[test]
+    fn external_mounts_go_on_the_app_service_and_survive_the_receivers_policy() {
+        let mut sp = python();
+        sp.database = db(DbEngine::Postgres, "16", "shop_db");
+        let g = gen(&sp, &ctx());
+        let mount = "../external/t1:/localsync/external/t1:ro".to_string();
+        let yaml = add_app_volumes(&g.compose_yaml, &[mount.clone()]).unwrap();
+        let policy = ls_security::default_policy();
+        let out = receiver_compose::apply_policy(&yaml, &policy, &["postgres".to_string()], "v").unwrap();
+        let y: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(strs(&svc(&y, APP_SERVICE)["volumes"]), [mount.as_str()]);
+        assert_eq!(strs(&svc(&y, "postgres")["volumes"])[0], "db-data:/var/lib/postgresql/data", "other services untouched");
+        assert_eq!(add_app_volumes(&g.compose_yaml, &[]).unwrap(), g.compose_yaml);
     }
 }

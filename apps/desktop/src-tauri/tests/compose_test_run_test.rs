@@ -141,6 +141,7 @@ fn snapshot_as_sent(dir: &Path, spec: &ComposeSpec) -> ls_security::VerifiedSnap
     let files = ls_snapshot::GeneratedFiles {
         compose_yaml: generated.compose_yaml,
         files: generated.files.into_iter().map(|g| (g.path, g.contents.into_bytes())).collect(),
+        externals: vec![],
     };
     let snapshot = ls_snapshot::create_snapshot_multi_with(&folders, &[], &[Some(files)]).expect("snapshot");
     ls_security::verify(snapshot, &[]).expect("verify")
