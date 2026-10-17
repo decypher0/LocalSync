@@ -699,10 +699,10 @@
           "is-send"
         );
     }
-    $id("sp-send-again").addEventListener("click", () => startSendTransfer(V.session, true));
+    $id("sp-send-again").addEventListener("click", () => { const s = V.session; CompatCheck.gate(s.id, () => startSendTransfer(s, true)); });
     $id("sp-push").addEventListener("click", pushUpdate);
     // The push flow's progress ("Looking for the devices on the network…").
-    $id("sp-push").after(reuse.pushStatus);
+    $id("sp-push").after(reuse.pushStatus, CompatCheck.slot());
     $id("sp-close").addEventListener("click", closeCurrent);
   }
 
@@ -767,6 +767,7 @@
     $id("sp-push").disabled = s.busy || !!reason;
     $id("sp-push").title = reason || `Send what changed since the last send to ${st.last_device_name}.`;
     $id("sp-send-again").disabled = s.busy;
+    CompatCheck.slot(s.id);
   }
 
   async function refreshPushStatus() {
@@ -789,7 +790,7 @@
     s.pushSelection ||= new Set();
     // Only the diff, to the last-known device: pushUpdateToDevices finds it on
     // the network or falls back to a fresh code, like Send again.
-    pushUpdateToDevices(s, [key]).finally(refreshPushStatus);
+    CompatCheck.gate(s.id, () => pushUpdateToDevices(s, [key]).finally(refreshPushStatus));
   }
 
   // LAN discovery for the running sender page's Devices panel.

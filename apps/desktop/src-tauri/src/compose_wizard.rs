@@ -403,7 +403,7 @@ fn with_output(reason: String, output: &str) -> String {
     }
 }
 
-fn wait_timeout() -> Duration {
+pub(crate) fn wait_timeout() -> Duration {
     let secs = std::env::var("LOCALSYNC_TESTRUN_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_WAIT_SECS);
     Duration::from_secs(secs)
 }
