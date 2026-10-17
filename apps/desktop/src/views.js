@@ -634,7 +634,7 @@
   function buildSend(state) {
     const left = $id("sp-left");
     const right = $id("sp-right");
-    left.innerHTML = panel("Project", "sp-project");
+    left.innerHTML = panel("Project", "sp-project") + `<div id="sp-changes"></div>`;
     if (state === "running") {
       left.insertAdjacentHTML(
         "beforeend",
@@ -756,17 +756,18 @@
   }
 
   // Push update needs a previous recipient AND a project that changed since
-  // the last send to it (project_push_status compares the folders' current
-  // git commits with what that device received).
+  // the last send to it (project_changes compares the folders' current
+  // git commits with what that device received, and lists the changes).
   function updatePushButtons(s) {
     const st = V.pushStatus && V.pushStatus.sessionId === s.id ? V.pushStatus : { pending: true };
     let reason = "";
     if (st.pending) reason = "Checking for changes…";
-    else if (!st.last_device_key) reason = "No previous recipient on record - send this project to a device first.";
+    else if (!st.last_device_key) reason = "Not sent to this device yet.";
     else if (!st.changed) reason = `No changes to push since the last send to ${st.last_device_name}.`;
     $id("sp-push").disabled = s.busy || !!reason;
     $id("sp-push").title = reason || `Send what changed since the last send to ${st.last_device_name}.`;
     $id("sp-send-again").disabled = s.busy;
+    ChangesPanel.render($id("sp-changes"), s.id, st, refreshPushStatus);
   }
 
   async function refreshPushStatus() {
@@ -774,9 +775,9 @@
     if (V.view !== "session" || !s || s.kind !== "send") return;
     let st;
     try {
-      st = await invoke("project_push_status", { sessionId: s.id });
-    } catch (_) {
-      st = { last_device_key: null, changed: false };
+      st = await invoke("project_changes", { sessionId: s.id });
+    } catch (err) {
+      st = { last_device_key: null, changed: false, error: String(err) };
     }
     V.pushStatus = { ...st, sessionId: s.id };
     if (V.view === "session" && V.session === s && $id("sp-push")) updatePushButtons(s);
@@ -825,10 +826,10 @@
       invoke("stop_discovery_browsing").catch(() => {});
     }
   }
-  // A commit made while the page is open enables Push update within 10 s.
+  // An edit or commit made while the page is open shows up within 5 s.
   setInterval(() => {
     if (V.view === "session" && !document.hidden && V.session && V.session.kind === "send") refreshPushStatus();
-  }, 10000);
+  }, 5000);
   window.addEventListener("focus", refreshPushStatus);
 
   // ----- receiver -----
