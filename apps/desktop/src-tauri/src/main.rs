@@ -325,6 +325,8 @@ fn main() {
             receiver_session_commands::stop_received_session,
             session_list_commands::list_sessions,
             session_commands::project_push_status,
+            session_commands::project_changes,
+            session_commands::set_project_change_selection,
             session_list_commands::rename_session,
             session_list_commands::close_session,
             receiver_session_commands::discard_received_session,
