@@ -9,10 +9,10 @@
 //! - re-running it **after simulating an app restart** (no `VerifiedSnapshot`
 //!   left in memory) still works, via `ls_containers::run_existing` against
 //!   what a prior run already unpacked to disk;
-//! - **arming** a session for its next update makes a matching push (same
-//!   sender, same project) land on the *same* session instead of creating a
-//!   second one, while an unarmed push still creates a fresh session exactly
-//!   as it always has (no regression to plain code-paste receiving);
+//! - a push of the same project from the same sender lands on the *same*
+//!   session as an update - automatically, nothing to arm - and is applied
+//!   there, while a different project from that sender still creates a
+//!   session of its own;
 //! - saving is opt-in, and a saved session's `compose_dir` survives a
 //!   simulated restart (fresh `AppState`) so it can be re-run from disk.
 
@@ -36,8 +36,8 @@ fn sh(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
 
-fn make_project(base: &Path) -> PathBuf {
-    let root = base.join("receiver-session-project");
+fn make_project(base: &Path, name: &str) -> PathBuf {
+    let root = base.join(name);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("README.md"), "v1\n").unwrap();
     std::fs::write(
@@ -133,7 +133,7 @@ async fn receiver_session_model_end_to_end() {
     std::env::set_var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, home.path());
     std::env::set_var("XDG_DATA_HOME", home.path().join("data"));
     let base = tempfile::tempdir().unwrap();
-    let project = make_project(base.path());
+    let project = make_project(base.path(), "receiver-session-project");
     let (url, _server) = signaling_url(8161).await;
 
     let sender_app = tauri::test::mock_app();
@@ -144,7 +144,7 @@ async fn receiver_session_model_end_to_end() {
     receiver_app.manage(AppState::default());
     let receiver = receiver_app.handle().clone();
 
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }];
     let view = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap();
     let sid = view.id.clone();
 
@@ -207,48 +207,50 @@ async fn receiver_session_model_end_to_end() {
         eprintln!("skipping container run/restart assertions: podman/podman-compose not on PATH");
     }
 
-    // ---- 4. arming: a matching push updates the existing session ----
-    receiver_session_commands::arm_received_session_for_update(receiver.state::<AppState>(), received_id.clone())
-        .expect("arming an existing session should succeed");
+    // ---- 4. the same project pushed again lands on the existing session ----
+    let ran = podman_stack_available();
     commit_change(&project, "v2\n");
     let (_sent2, info2) = send_and_receive(&sender, &receiver, &url, "roomB", request(&sid, None, "Alice", false)).await;
     assert_ne!(info2.snapshot_id, info1.snapshot_id, "the project actually moved, so this is a genuinely new push");
+    assert_eq!(info2.received_session_id, received_id, "an update to a project this device has lands on its session");
     {
         let state = receiver.state::<AppState>();
         let sessions = state.received_sessions.lock().unwrap();
-        assert_eq!(sessions.len(), 1, "an armed push must update the existing session, not create a second one");
+        assert_eq!(sessions.len(), 1, "an update must not create a second session");
         let session = sessions.get(&received_id).unwrap();
         assert_eq!(session.snapshot_id, info2.snapshot_id, "the existing session's version moved to the new push");
         assert_eq!(session.git_commit, info2.manifest.git_commit);
-        assert!(
-            state.armed_updates.lock().unwrap().is_empty(),
-            "arming is consumed by the push it matches, not left standing"
-        );
+        assert_eq!(session.pending_update.is_some(), ran, "a session that ran waits for the update to be applied");
+    }
+    if ran {
+        let applied = receiver_session_commands::apply_received_update(
+            receiver.clone(),
+            receiver.state::<AppState>(),
+            received_id.clone(),
+            None,
+        )
+        .await
+        .expect("applying the update runs the new version");
+        commands::stop_session(receiver.state::<AppState>(), applied.running.session_id.clone())
+            .await
+            .expect("stop_session should tear the applied update down");
+        let state = receiver.state::<AppState>();
+        let session = state.received_sessions.lock().unwrap().get(&received_id).cloned().unwrap();
+        assert!(session.pending_update.is_none(), "an applied update is the session's version now");
+        assert!(session.compose_dir.contains(&info2.manifest.git_commit), "runs from the new version's folder: {}", session.compose_dir);
     }
 
-    // ---- an unarmed push must still create a fresh session (no regression
-    //      to plain "just pasting a code cold" receiving) - even though the
-    //      project hasn't moved since the last push, so this exercises the
-    //      exact snapshot_id collision ReceivedSession::id is designed
-    //      around: two different sessions legitimately sharing one
-    //      snapshot_id. ----
-    let (_sent3, info3) = send_and_receive(&sender, &receiver, &url, "roomC", request(&sid, None, "Alice", false)).await;
-    assert_eq!(info3.snapshot_id, info2.snapshot_id, "nothing changed project-side between these two pushes");
-    {
-        let state = receiver.state::<AppState>();
-        let sessions = state.received_sessions.lock().unwrap();
-        assert_eq!(sessions.len(), 2, "an unarmed push must create a fresh session even with no arming in place");
-        let ids: Vec<&String> = sessions.keys().collect();
-        assert_ne!(ids[0], ids[1], "two sessions sharing a snapshot_id must still have distinct session ids");
-        assert!(
-            sessions.values().filter(|s| s.snapshot_id == info2.snapshot_id).count() == 2,
-            "both sessions legitimately hold the same snapshot_id"
-        );
-    }
+    // ---- a different project from the same sender is a session of its own ----
+    let other = make_project(base.path(), "receiver-session-other");
+    let other_folders = vec![FolderPlanDto { path: other.display().to_string(), dump: None, compose: None, externals: vec![] }];
+    let other_sid = session_commands::create_project_session(sender.state::<AppState>(), other_folders, None).await.unwrap().id;
+    let (_sent3, info3) = send_and_receive(&sender, &receiver, &url, "roomC", request(&other_sid, None, "Alice", false)).await;
+    assert_ne!(info3.received_session_id, received_id, "a different project is not an update");
+    assert_eq!(receiver.state::<AppState>().received_sessions.lock().unwrap().len(), 2);
 
     // ---- 5. save -> simulate a full restart (fresh AppState) -> reopen ----
     receiver_session_commands::save_received_session(receiver.state::<AppState>(), received_id.clone())
-        .expect("saving the (armed-updated) session should succeed");
+        .expect("saving the updated session should succeed");
     let saved = localsync_desktop::session_history::find_received(&received_id)
         .unwrap()
         .expect("the session should now be saved");
@@ -264,7 +266,6 @@ async fn receiver_session_model_end_to_end() {
     assert_eq!(reopened.id, received_id);
     assert!(reopened.saved);
     assert_eq!(reopened.snapshot_id, saved.snapshot_id);
-    assert!(!reopened.armed, "arming is not persisted - a fresh AppState never has it armed");
 
     if podman_stack_available() && !saved.compose_dir.is_empty() {
         // The compose_dir a prior successful run wrote survived the save,

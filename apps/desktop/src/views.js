@@ -480,13 +480,21 @@
   const origApplyReview = window.applyReviewInfoToSession;
   window.applyReviewInfoToSession = function (session, info) {
     origApplyReview(session, info);
-    if (V.flow && V.flow.pending === session) {
+    const pending = V.flow && V.flow.pending;
+    if (pending === session) {
       V.flow = null;
       if (info.received_session_id) {
         invoke("rename_session", { sessionId: info.received_session_id, name: session.displayName }).catch((e) =>
           console.warn("couldn't name the received session:", e)
         );
       }
+    } else if (pending && sessions.get(pending.id) !== pending) {
+      // The receive was an update to a session already open: its page, not the placeholder's.
+      V.flow = null;
+      navigate("session", session);
+    } else if (!V.flow && V.session !== session) {
+      // An update that arrived on its own (a pushed update, an accepted nearby device).
+      navigate("session", session);
     }
   };
 
@@ -539,7 +547,7 @@
   // backend (which asks Podman) every 15 s while it's on screen.
   setInterval(async () => {
     const s = V.session;
-    if (V.view !== "session" || document.hidden || !s || s.kind !== "receive" || s.busy || s.runInProgress || s.stopping || s.armBusy) return;
+    if (V.view !== "session" || document.hidden || !s || s.kind !== "receive" || s.busy || s.runInProgress || s.stopping || s.updateBusy) return;
     if (!s.snapshotId || receiveState(s) === "receiving" || receiveState(s) === "reviewing") return;
     try {
       const view = await invoke("open_saved_received_session", { sessionId: s.id });
@@ -609,7 +617,8 @@
     if (s.kind === "send") {
       $id("sp-subtitle").textContent = "Sending";
     } else {
-      const from = s.recognizedPeer ? ` from ${s.recognizedPeer.name}` : "";
+      const sender = s.recognizedPeer ? s.recognizedPeer.name : s.senderName;
+      const from = sender ? ` from ${sender}` : "";
       const when = s.lastReceivedAt || s.startedAt;
       $id("sp-subtitle").textContent = `Received${from}${when ? ` · ${timeAgo(when)}` : ""}`;
     }
@@ -634,7 +643,7 @@
   function buildSend(state) {
     const left = $id("sp-left");
     const right = $id("sp-right");
-    left.innerHTML = panel("Project", "sp-project");
+    left.innerHTML = panel("Project", "sp-project") + `<div id="sp-changes"></div>`;
     if (state === "running") {
       left.insertAdjacentHTML(
         "beforeend",
@@ -699,10 +708,10 @@
           "is-send"
         );
     }
-    $id("sp-send-again").addEventListener("click", () => startSendTransfer(V.session, true));
+    $id("sp-send-again").addEventListener("click", () => { const s = V.session; CompatCheck.gate(s.id, () => startSendTransfer(s, true)); });
     $id("sp-push").addEventListener("click", pushUpdate);
     // The push flow's progress ("Looking for the devices on the network…").
-    $id("sp-push").after(reuse.pushStatus);
+    $id("sp-push").after(reuse.pushStatus, CompatCheck.slot());
     $id("sp-close").addEventListener("click", closeCurrent);
   }
 
@@ -756,17 +765,19 @@
   }
 
   // Push update needs a previous recipient AND a project that changed since
-  // the last send to it (project_push_status compares the folders' current
-  // git commits with what that device received).
+  // the last send to it (project_changes compares the folders' current
+  // git commits with what that device received, and lists the changes).
   function updatePushButtons(s) {
     const st = V.pushStatus && V.pushStatus.sessionId === s.id ? V.pushStatus : { pending: true };
     let reason = "";
     if (st.pending) reason = "Checking for changes…";
-    else if (!st.last_device_key) reason = "No previous recipient on record - send this project to a device first.";
+    else if (!st.last_device_key) reason = "Not sent to this device yet.";
     else if (!st.changed) reason = `No changes to push since the last send to ${st.last_device_name}.`;
     $id("sp-push").disabled = s.busy || !!reason;
     $id("sp-push").title = reason || `Send what changed since the last send to ${st.last_device_name}.`;
     $id("sp-send-again").disabled = s.busy;
+    CompatCheck.slot(s.id);
+    ChangesPanel.render($id("sp-changes"), s.id, st, refreshPushStatus);
   }
 
   async function refreshPushStatus() {
@@ -774,9 +785,9 @@
     if (V.view !== "session" || !s || s.kind !== "send") return;
     let st;
     try {
-      st = await invoke("project_push_status", { sessionId: s.id });
-    } catch (_) {
-      st = { last_device_key: null, changed: false };
+      st = await invoke("project_changes", { sessionId: s.id });
+    } catch (err) {
+      st = { last_device_key: null, changed: false, error: String(err) };
     }
     V.pushStatus = { ...st, sessionId: s.id };
     if (V.view === "session" && V.session === s && $id("sp-push")) updatePushButtons(s);
@@ -789,7 +800,7 @@
     s.pushSelection ||= new Set();
     // Only the diff, to the last-known device: pushUpdateToDevices finds it on
     // the network or falls back to a fresh code, like Send again.
-    pushUpdateToDevices(s, [key]).finally(refreshPushStatus);
+    CompatCheck.gate(s.id, () => pushUpdateToDevices(s, [key]).finally(refreshPushStatus));
   }
 
   // LAN discovery for the running sender page's Devices panel.
@@ -825,10 +836,10 @@
       invoke("stop_discovery_browsing").catch(() => {});
     }
   }
-  // A commit made while the page is open enables Push update within 10 s.
+  // An edit or commit made while the page is open shows up within 5 s.
   setInterval(() => {
     if (V.view === "session" && !document.hidden && V.session && V.session.kind === "send") refreshPushStatus();
-  }, 10000);
+  }, 5000);
   window.addEventListener("focus", refreshPushStatus);
 
   // ----- receiver -----
@@ -843,8 +854,6 @@
         actionsPanel(
           btn("sp-stop", "Stop", icon.stop, "lsv-btn-danger") +
             `<p id="sp-stop-error" class="lsv-error hidden"></p>` +
-            btn("sp-arm", "Pull update", icon.down) +
-            armedPanel() +
             btn("sp-save", "Saved automatically", icon.save) +
             btn("sp-close", "Close session", "", "lsv-btn-danger")
         );
@@ -854,7 +863,7 @@
       left.insertAdjacentHTML("beforeend", `<div id="sp-review-slot" class="lsv-review"></div>`);
       $id("sp-review-slot").appendChild(reuse.review);
       left.insertAdjacentHTML("beforeend", logsPanel(false));
-      right.innerHTML = actionsPanel(
+      right.innerHTML = `<div id="sp-update"></div>` + actionsPanel(
         btn("sp-run", "Run", icon.play, "lsv-btn-primary") +
           `<p id="sp-run-error" class="lsv-error hidden"></p><button id="sp-fix-setup" type="button" class="lsv-btn hidden">Fix setup</button>` +
           btn("sp-reject", "Reject", "") +
@@ -884,85 +893,13 @@
       right.innerHTML =
         panel("Last run", "sp-last-run") +
         actionsPanel(
-          btn("sp-run", "Run", icon.play, "lsv-btn-primary") + btn("sp-arm", "Receive update", icon.down) + armedPanel() + btn("sp-close", "Close session", "", "lsv-btn-danger"),
-          "A stopped session only shows what you can actually do right now - run it again, pull the latest update, or remove it."
+          btn("sp-run", "Run", icon.play, "lsv-btn-primary") + btn("sp-close", "Close session", "", "lsv-btn-danger"),
+          "A stopped session only shows what you can actually do right now - run it again, or remove it. The sender's next update lands here on its own."
         );
       $id("sp-run").addEventListener("click", runCurrent);
       $id("sp-relink").addEventListener("click", relinkForReceive);
     }
-    const arm = $id("sp-arm");
-    if (arm) {
-      arm.addEventListener("click", toggleArm);
-      $id("sp-arm-receive").addEventListener("click", receiveUpdateByCode);
-      $id("sp-arm-code").addEventListener("keydown", (e) => e.key === "Enter" && receiveUpdateByCode());
-      $id("sp-arm-discoverable").addEventListener("click", () => {
-        const t = $id("discoverable-toggle");
-        if (!t.checked && !t.disabled) {
-          t.checked = true;
-          t.dispatchEvent(new Event("change"));
-        }
-        setTimeout(() => V.view === "session" && renderSessionPage(), 600);
-      });
-    }
     $id("sp-close").addEventListener("click", closeCurrent);
-  }
-
-  // Shown under "Pull update" while the session waits for the sender's next
-  // push: it arrives on its own from a nearby sender (discoverable), or by
-  // the code the sender's Push update shows.
-  function armedPanel() {
-    return `<div id="sp-armed" class="lsv-armed hidden">
-      <p id="sp-armed-text" class="lsv-small"></p>
-      <button id="sp-arm-discoverable" type="button" class="lsv-btn lsv-btn-small hidden">Make this device discoverable</button>
-      <label class="lsv-field">Or paste the code from the sender's Push update
-        <span class="lsv-inline-row"><input id="sp-arm-code" class="lsv-input" type="text" placeholder="e.g. 4XzmFsM6ggcAJ8" autocomplete="off" />
-        <button id="sp-arm-receive" type="button" class="lsv-btn lsv-btn-small lsv-btn-primary">Receive update</button></span>
-      </label>
-    </div><p id="sp-arm-error" class="lsv-error hidden"></p>`;
-  }
-
-  async function toggleArm() {
-    const s = V.session;
-    s.armError = "";
-    s.armBusy = true;
-    renderSessionPage();
-    try {
-      await invoke(s.armed ? "disarm_received_session_for_update" : "arm_received_session_for_update", { sessionId: s.id });
-      s.armed = !s.armed;
-    } catch (err) {
-      s.armError = `Couldn't ${s.armed ? "cancel waiting for" : "get ready for"} an update: ${err}`;
-    } finally {
-      s.armBusy = false;
-      if (V.session === s && V.view === "session") renderSessionPage();
-    }
-  }
-
-  // The update by code: received straight onto this session (it's armed, so
-  // the backend files the push under it) and shown here for review.
-  async function receiveUpdateByCode() {
-    const s = V.session;
-    const code = $id("sp-arm-code").value.trim();
-    s.armError = code ? "" : "Paste the code the sender's Push update shows.";
-    if (!code) return renderSessionPage();
-    s.armBusy = true;
-    renderSessionPage();
-    try {
-      const decoded = await invoke("decode_room_code", { code, relayUrl: relayUrl() || null });
-      const info = await invoke("receive_snapshot", { roomCode: decoded.room_id, signalingUrl: decoded.signaling_url });
-      if (info.received_session_id && info.received_session_id !== s.id) {
-        // Not this project/sender: it became a session of its own.
-        startReceiveSessionFromInfo(info, info.received_session_id);
-        s.armError = "That code was for a different project or sender, so it opened as its own session.";
-      } else {
-        applyReviewInfoToSession(s, info);
-        renderSessionTabs();
-      }
-    } catch (err) {
-      s.armError = `Couldn't receive the update: ${err}`;
-    } finally {
-      s.armBusy = false;
-      if (V.session === s && V.view === "session") renderSessionPage();
-    }
   }
 
   async function relinkForReceive() {
@@ -1036,9 +973,11 @@
 
   function updateReceive(s, state) {
     const m = s.manifest;
-    const dumps = m && m.database_dumps && m.database_dumps.length ? m.database_dumps.map((d) => `${d.engine} · ${d.schema}`).join(", ") : m ? "None" : "—";
+    // A live receive has the manifest; a reopened session what the backend kept of it.
+    const dbs = m ? m.database_dumps || [] : s.databases;
+    const dumps = dbs && dbs.length ? dbs.map((d) => `${d.engine} · ${d.schema}`).join(", ") : m || s.databases ? "None" : "—";
     $id("sp-project").innerHTML =
-      row("Received from", s.recognizedPeer ? s.recognizedPeer.name : "Unknown sender") +
+      row("Received from", s.recognizedPeer ? s.recognizedPeer.name : s.senderName || "Unknown sender") +
       row("Project", s.title || "—") +
       row("Commit", s.gitCommit || (m && m.git_commit) ? shortCommit(s.gitCommit || m.git_commit) : "—") +
       row("Database", dumps) +
@@ -1073,7 +1012,11 @@
       $id("sp-ph-text").textContent = s.status === "active" && s.progressTotal ? `${formatBytes(s.progressBytes)} of ${formatBytes(s.progressTotal)} (${pct}%)` : "Share-code receives wait here until the sender starts the transfer.";
     } else if (state === "stopped") {
       const failed = !!s.runErrorText;
-      $id("sp-last-run").innerHTML = row("Stopped", s.endedAt ? timeAgo(s.endedAt) : "—") + row("Exit reason", failed ? "Failed to start" : s.endedAt ? "Stopped" : s.status === "error" ? "Receive failed" : "—");
+      // This window's own record first, then what the backend kept (after a restart).
+      const stoppedAt = s.endedAt || s.lastStoppedAt;
+      const exit = failed || (!s.endedAt && s.lastExit === "failed") ? "Failed to start" : s.endedAt || s.lastExit === "stopped" ? "Stopped" : s.status === "error" ? "Receive failed" : "—";
+      $id("sp-last-run").innerHTML =
+        (s.lastRunAt ? row("Started", timeAgo(s.lastRunAt)) : "") + row("Stopped", stoppedAt ? timeAgo(stoppedAt) : "—") + row("Exit reason", exit);
       const errEl = $id("sp-run-error");
       errEl.textContent = plainRunError(s.runErrorText) || (s.status === "error" ? s.errorText : "");
       errEl.classList.toggle("hidden", !errEl.textContent);
@@ -1099,24 +1042,7 @@
       $id("sp-run").disabled = s.busy || s.runInProgress;
       $id("sp-run").querySelector("span").textContent = s.runInProgress ? "Starting…" : "Run";
     }
-    const arm = $id("sp-arm");
-    if (arm) {
-      const discoverable = $id("discoverable-toggle").checked;
-      arm.disabled = s.busy || s.armBusy || s.stopping;
-      arm.querySelector("span").textContent = s.armed ? "Stop waiting for an update" : state === "running" ? "Pull update" : "Receive update";
-      arm.title = s.armed ? "" : "Get ready for the sender's next Push update - it lands on this session, for review before it runs.";
-      $id("sp-armed").classList.toggle("hidden", !s.armed);
-      $id("sp-armed-text").textContent =
-        `Waiting for ${s.recognizedPeer ? s.recognizedPeer.name : "the sender"}'s next Push update. ` +
-        (discoverable
-          ? "This device is discoverable, so a sender nearby can push it straight here."
-          : "This device isn't discoverable, so the update needs the code the sender's Push update shows - or make it discoverable.");
-      $id("sp-arm-discoverable").classList.toggle("hidden", discoverable);
-      $id("sp-arm-receive").disabled = !!s.armBusy;
-      $id("sp-arm-receive").textContent = s.armBusy && s.armed ? "Receiving…" : "Receive update";
-      $id("sp-arm-error").textContent = s.armError || "";
-      $id("sp-arm-error").classList.toggle("hidden", !s.armError);
-    }
+    if (typeof UpdateFlow !== "undefined") UpdateFlow.render(s, state);
     renderLogs();
   }
 

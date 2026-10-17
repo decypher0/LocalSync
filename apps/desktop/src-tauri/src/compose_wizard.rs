@@ -186,8 +186,18 @@ pub fn validate_compose_spec(spec: ComposeSpec) -> Vec<FieldError> {
 /// What would be generated, for the wizard's preview. The error string is the
 /// `GenerateError`'s own message.
 #[tauri::command]
-pub fn preview_compose(spec: ComposeSpec, folder_label: String, dump: Option<DumpInfo>) -> Result<Generated, String> {
-    ls_composegen::generate(&spec, &GenerateContext { folder_label, dump, host_port: None }).map_err(|e| e.to_string())
+pub fn preview_compose(
+    spec: ComposeSpec,
+    folder_label: String,
+    dump: Option<DumpInfo>,
+    folder_path: Option<String>,
+    externals: Option<Vec<crate::externals::ExternalRef>>,
+) -> Result<Generated, String> {
+    let mut g = ls_composegen::generate(&spec, &GenerateContext { folder_label, dump, host_port: None }).map_err(|e| e.to_string())?;
+    if let (Some(path), Some(refs)) = (folder_path, externals) {
+        crate::externals::apply_to_generated(Path::new(&path), &refs, &mut g)?;
+    }
+    Ok(g)
 }
 
 // ---------- test run ----------
@@ -265,12 +275,16 @@ pub async fn run_compose_test<R: tauri::Runtime>(
     };
 
     let work_dir = fresh_work_dir();
-    let db_service = spec.database.as_ref().map(|db| ls_composegen::catalog::db_service_name(db.engine));
-    let outcome = boot_and_wait(&app, &verified, &work_dir, host_port, wait, &mut notes).await;
-    // Leave no database state behind: a later test run of the same dump must
-    // import it again rather than find this run's volume and skip the import.
-    if db_service.is_some() {
-        if let Err(e) = ls_containers::remove_db_volume(&verified.snapshot().manifest.db_seed_hash).await {
+    // Its own database volume, never the dump's usual `localsync-db-<hash>`:
+    // on a computer that also runs a received copy of this project, that
+    // volume holds the receiver's data, and the cleanup below must not
+    // touch it. Fresh, so the dump is imported every time.
+    let test_volume = spec.database.as_ref().map(|_| {
+        format!("localsync-test-{}", work_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).to_lowercase()
+    });
+    let outcome = boot_and_wait(&app, &verified, &work_dir, host_port, wait, test_volume.as_deref(), &mut notes).await;
+    if let Some(volume) = &test_volume {
+        if let Err(e) = ls_containers::remove_volume(volume).await {
             notes.push(format!("Couldn't remove the test database's volume ({e:#}); `podman volume ls` will show it."));
         }
     }
@@ -309,12 +323,13 @@ async fn boot_and_wait<R: tauri::Runtime>(
     work_dir: &Path,
     host_port: u16,
     timeout: Duration,
+    db_volume: Option<&str>,
     notes: &mut Vec<String>,
 ) -> Result<String, (String, String)> {
     let lines: Arc<Mutex<VecDeque<String>>> = Arc::default();
     let tail_task = tauri::async_runtime::spawn(tail_provisioning_log(app.clone(), lines.clone()));
     emit_line(app, "Building and starting the containers (the first run downloads images and can take a few minutes)...");
-    let started = ls_containers::run_snapshot(verified, work_dir).await;
+    let started = ls_containers::run_snapshot_on_volume(verified, work_dir, db_volume).await;
     // Let the tailer see the last lines the run wrote before it goes away.
     tokio::time::sleep(Duration::from_millis(400)).await;
     tail_task.abort();
@@ -393,7 +408,7 @@ fn with_output(reason: String, output: &str) -> String {
     }
 }
 
-fn wait_timeout() -> Duration {
+pub(crate) fn wait_timeout() -> Duration {
     let secs = std::env::var("LOCALSYNC_TESTRUN_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_WAIT_SECS);
     Duration::from_secs(secs)
 }
@@ -788,7 +803,7 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(AppState::default());
         let handle = app.handle().clone();
-        let folder = FolderPlanDto { path: "/nonexistent".into(), dump: None, compose: None };
+        let folder = FolderPlanDto { path: "/nonexistent".into(), dump: None, compose: None, externals: vec![] };
         let err = test_run_compose(handle.clone(), handle.state::<AppState>(), folder).await.unwrap_err();
         assert!(err.contains("no compose settings"), "{err}");
     }

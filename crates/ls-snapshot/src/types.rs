@@ -76,6 +76,42 @@ pub struct Manifest {
     /// forward compatibility reasoning as `folders` above.
     #[serde(default)]
     pub database_dumps: Vec<DatabaseDumpEntry>,
+    /// Files or folders outside the project that a config value points at,
+    /// bundled under `external/<id>/` (see the desktop app's `externals.rs`).
+    /// Left out of the JSON when empty, so snapshots without any keep
+    /// their signed bytes (the signature covers the re-serialized manifest).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub externals: Vec<ExternalFile>,
+    /// The sender's project-session id: what lets a receiver recognize a
+    /// later snapshot as an update to a session it already has. `None` for
+    /// snapshots from before this existed (matched by sender + title), and
+    /// left out of the JSON when `None` so their signed bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExternalKind {
+    File,
+    Dir,
+}
+
+/// One file or folder from outside the project, carried in the payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalFile {
+    pub id: String,
+    /// The config key that points at it, e.g. `company.configuration.filepath`.
+    pub key: String,
+    /// The config file holding that key, relative to the project root.
+    pub config_file: String,
+    /// The value as the sender's config wrote it.
+    pub original_value: String,
+    pub kind: ExternalKind,
+    /// Where it sits inside the payload, from the payload root (next to
+    /// `db-dumps/`): `external/<id>/<file name>` for a file, `external/<id>`
+    /// for a folder.
+    pub bundle_path: String,
 }
 
 /// One folder's identity within a multi-folder snapshot — see
@@ -135,6 +171,10 @@ pub struct GeneratedFiles {
     /// sit if they had been committed - so a compose `build:` context of "."
     /// finds them.
     pub files: Vec<(String, Vec<u8>)>,
+    /// Files or folders from outside the project to carry at
+    /// `ExternalFile::bundle_path`, each with where it is on this computer.
+    /// Streamed from disk when the payload is built.
+    pub externals: Vec<(ExternalFile, std::path::PathBuf)>,
 }
 
 /// Where a [`PendingDump`]'s content actually lives.

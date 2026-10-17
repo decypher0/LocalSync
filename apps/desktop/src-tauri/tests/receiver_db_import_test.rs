@@ -88,7 +88,7 @@ fn volume_exists(name: &str) -> bool {
 }
 
 /// Sends `project` (with its MySQL dump at `dump_path`) from a fresh
-/// project session and receives it - an unarmed, fresh receive each time.
+/// project session and receives it.
 async fn push(sender: &Handle, receiver: &Handle, url: &str, room: &str, project: &Path, dump_path: &Path) -> IncomingSnapshotInfo {
     let spec = ComposeSpec {
         runtime: Runtime::Python,
@@ -108,6 +108,7 @@ async fn push(sender: &Handle, receiver: &Handle, url: &str, room: &str, project
         path: project.display().to_string(),
         dump: Some(DumpPlanDto { schema: "appdb".into(), file_path: dump_path.display().to_string(), engine: "mysql".into() }),
         compose: Some(spec),
+        externals: vec![],
     }];
     let sid = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap().id;
     let request = SendRequest {

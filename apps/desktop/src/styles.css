@@ -1172,3 +1172,11 @@ label.is-unavailable { opacity: 0.6; cursor: not-allowed; }
 
 .cloud-link-panel { margin: 10px 0; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 9px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .cloud-link-panel p { margin: 0; }
+
+/* Files outside the project (#wiz-externals, externals-step.js) */
+#wiz-externals { margin-top: var(--space-4); }
+.ext-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+.ext-path { font-size: var(--font-size-xs); overflow-wrap: anywhere; margin-top: var(--space-1); }
+.ext-row .warn { margin-top: var(--space-2); }
+.ext-add { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-top: var(--space-2); }
+.ext-add input { flex: 1 1 18rem; }

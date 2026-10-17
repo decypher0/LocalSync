@@ -4,7 +4,7 @@
 // android`, which this project doesn't use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use localsync_desktop::{commands, compose_wizard, init_repo, receiver_session_commands, send_log, session_commands, session_list_commands, setup_commands, state::AppState, storage_commands};
+use localsync_desktop::{commands, compat, compose_wizard, externals, init_repo, receiver_session_commands, send_log, session_commands, session_list_commands, setup_commands, state::AppState, storage_commands};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
@@ -317,21 +317,26 @@ fn main() {
             compose_wizard::compose_catalog,
             compose_wizard::inspect_project,
             init_repo::init_project_repo,
+            externals::detect_external_refs,
+            externals::describe_external,
             compose_wizard::validate_compose_spec,
             compose_wizard::preview_compose,
             compose_wizard::test_run_compose,
+            compat::check_update_compat,
             receiver_session_commands::run_received_session,
             receiver_session_commands::save_received_session,
             receiver_session_commands::stop_received_session,
             session_list_commands::list_sessions,
             session_commands::project_push_status,
+            session_commands::project_changes,
+            session_commands::set_project_change_selection,
             session_list_commands::rename_session,
             session_list_commands::close_session,
             receiver_session_commands::discard_received_session,
             receiver_session_commands::delete_saved_received_session,
             receiver_session_commands::open_saved_received_session,
-            receiver_session_commands::arm_received_session_for_update,
-            receiver_session_commands::disarm_received_session_for_update,
+            receiver_session_commands::apply_received_update,
+            receiver_session_commands::rollback_received_update,
             storage_commands::default_work_dir,
             storage_commands::storage_report,
             storage_commands::clean_up_unused,

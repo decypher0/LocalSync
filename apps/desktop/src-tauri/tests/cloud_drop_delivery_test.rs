@@ -106,6 +106,7 @@ async fn a_wizard_project_with_a_mysql_dump_arrives_runnable_and_the_receiver_is
         path: project.display().to_string(),
         dump: Some(DumpPlanDto { schema: "appdb".into(), file_path: dump_path.display().to_string(), engine: "mysql".into() }),
         compose: Some(spec),
+        externals: vec![],
     }];
     let sender = app();
     let sid = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap().id;

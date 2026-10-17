@@ -170,10 +170,11 @@ async fn direct_path_blocked_turn_rescues_transfer() {
         return;
     }
 
-    let nat_peer = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/debug/examples/nat_peer"
-    );
+    // Next to this test binary (<target>/debug/deps/), so a CARGO_TARGET_DIR
+    // outside the workspace works too.
+    let exe = std::env::current_exe().unwrap();
+    let nat_peer = exe.parent().and_then(|deps| deps.parent()).unwrap().join("examples/nat_peer");
+    let nat_peer = nat_peer.to_str().unwrap();
     assert!(
         std::path::Path::new(nat_peer).exists(),
         "nat_peer example not built - run: cargo build --example nat_peer -p ls-net"

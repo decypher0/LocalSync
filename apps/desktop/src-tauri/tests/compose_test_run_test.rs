@@ -81,7 +81,7 @@ fn spec(runtime: Runtime, version: &str, tool: BuildTool, run_command: &str, por
 }
 
 fn plan(dir: &Path, spec: ComposeSpec) -> FolderPlanDto {
-    FolderPlanDto { path: dir.display().to_string(), dump: None, compose: Some(spec) }
+    FolderPlanDto { path: dir.display().to_string(), dump: None, compose: Some(spec), externals: vec![] }
 }
 
 async fn test_run(folder: FolderPlanDto) -> (TestRunReport, Vec<String>) {
@@ -141,6 +141,7 @@ fn snapshot_as_sent(dir: &Path, spec: &ComposeSpec) -> ls_security::VerifiedSnap
     let files = ls_snapshot::GeneratedFiles {
         compose_yaml: generated.compose_yaml,
         files: generated.files.into_iter().map(|g| (g.path, g.contents.into_bytes())).collect(),
+        externals: vec![],
     };
     let snapshot = ls_snapshot::create_snapshot_multi_with(&folders, &[], &[Some(files)]).expect("snapshot");
     ls_security::verify(snapshot, &[]).expect("verify")
@@ -468,7 +469,7 @@ async fn a_request_without_compose_settings_is_an_error_not_a_failed_boot() {
     let app = tauri::test::mock_app();
     app.manage(AppState::default());
     let handle = app.handle().clone();
-    let folder = FolderPlanDto { path: "/nowhere".into(), dump: None, compose: None };
+    let folder = FolderPlanDto { path: "/nowhere".into(), dump: None, compose: None, externals: vec![] };
     assert!(compose_wizard::test_run_compose(handle.clone(), handle.state::<AppState>(), folder).await.is_err());
 
     // An invalid spec (privileged port) is rejected before anything runs.

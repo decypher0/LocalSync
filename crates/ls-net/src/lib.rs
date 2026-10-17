@@ -281,6 +281,16 @@ pub enum ControlMessage {
     /// same bundle-then-send that already runs for a manually-entered room
     /// code proceeds next, unmodified.
     ConnectionResponse { accepted: bool },
+    /// Sender -> receiver, before a push that diffs against what this device
+    /// was last sent: "which version of this project do you hold?"
+    /// `project_id` is `Manifest::project_id`; the receiver matches it with
+    /// the sender's key the same way an incoming update is matched.
+    BaseCheck { project_id: String, sender_pubkey_hex: String },
+    /// Receiver -> sender, only ever sent in reply to a `BaseCheck`: the
+    /// per-folder commits (`Manifest::folders` order) of the version it holds
+    /// for that project, `None` if it has no such session. Only ids the
+    /// sender itself produced - nothing of the receiver's.
+    BaseCheckResponse { commits: Option<Vec<String>> },
 }
 
 /// Sends one [`ControlMessage`] on `conn`'s control channel. Independent of
@@ -307,6 +317,18 @@ pub async fn recv_control(conn: &DataChannelConn) -> Result<ControlMessage> {
         .await
         .context("control channel closed before a message arrived")?;
     serde_json::from_slice(&bytes).context("received bytes were not a valid control message")
+}
+
+/// Sends `msg` on `conn`'s control channel and waits up to `timeout` for the
+/// next control message, its reply. `Ok(None)` if none came in time - an
+/// older peer that doesn't know `msg` never answers it (it can't even decode
+/// it), so a caller asking something new must have a default for that.
+pub async fn request_control(conn: &DataChannelConn, msg: &ControlMessage, timeout: Duration) -> Result<Option<ControlMessage>> {
+    send_control(conn, msg).await?;
+    match tokio::time::timeout(timeout, recv_control(conn)).await {
+        Ok(reply) => reply.map(Some),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Which path an established [`DataChannelConn`] actually took. TURN is
@@ -817,4 +839,46 @@ pub async fn receive_payload(
     log::info!("receiver: transfer done, {} bytes", buf.len());
 
     Ok(buf)
+}
+
+/// [`receive_payload`], answering control messages that arrive while it
+/// waits: `answer` maps each one to its reply (`None`: no reply). A sender
+/// may ask something before it starts sending (a push asks
+/// [`ControlMessage::BaseCheck`]) and wait for the reply; one that asks
+/// nothing just starts sending, and this is then exactly `receive_payload` -
+/// the two channels are independent, so neither waits on the other.
+///
+/// Answering stops when the payload is complete. A control message that is
+/// not valid (from a newer peer) is skipped; a closed control channel just
+/// ends the answering, and the payload side reports the connection's fate.
+pub async fn receive_payload_answering(
+    conn: &DataChannelConn,
+    on_progress: impl FnMut(usize, usize),
+    mut answer: impl FnMut(ControlMessage) -> Option<ControlMessage>,
+) -> Result<Vec<u8>> {
+    let answering = async {
+        let mut incoming = conn.control_incoming.lock().await;
+        while let Some(bytes) = incoming.recv().await {
+            let msg = match serde_json::from_slice::<ControlMessage>(&bytes) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::warn!("receiver: skipping a control message it can't read: {e}");
+                    continue;
+                }
+            };
+            if let Some(reply) = answer(msg) {
+                if let Err(e) = send_control(conn, &reply).await {
+                    log::warn!("receiver: couldn't answer a control message: {e:#}");
+                }
+            }
+        }
+        // Control channel closed: nothing left to answer. Never finishes, so
+        // the payload side decides the result.
+        std::future::pending::<Result<Vec<u8>>>().await
+    };
+    tokio::select! {
+        biased;
+        received = receive_payload(conn, on_progress) => received,
+        never = answering => never,
+    }
 }
