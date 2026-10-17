@@ -67,7 +67,7 @@ async fn drop_to_bob(sender: &Handle, sid: &str) -> (session_commands::ProjectSe
     let room = handoff.room_id.clone();
     let decoded = commands::decode_room_code(handoff.room_code, None).unwrap();
     let conn = ls_net::connect_as_receiver(&decoded.signaling_url, &decoded.room_id).await.unwrap();
-    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: "bob@example.com".into() }).await.unwrap();
+    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: "bob@example.com".into(), protocol: ls_net::PROTOCOL_VERSION }).await.unwrap();
     until("the access request", || state.cloud_access_requests.lock().unwrap().contains_key(&room)).await;
 
     let view = commands::finish_cloud_grant(sender, &room, "bob@example.com").await.unwrap().expect("session open");

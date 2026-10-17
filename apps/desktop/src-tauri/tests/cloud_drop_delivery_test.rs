@@ -182,7 +182,7 @@ async fn a_wizard_project_with_a_mysql_dump_arrives_runnable_and_the_receiver_is
     .unwrap();
     let decoded = commands::decode_room_code(handoff.room_code.clone(), None).unwrap();
     let conn = ls_net::connect_as_receiver(&decoded.signaling_url, &decoded.room_id).await.unwrap();
-    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: "bob@example.com".into() }).await.unwrap();
+    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: "bob@example.com".into(), protocol: ls_net::PROTOCOL_VERSION }).await.unwrap();
     until("the access request", || sender.state::<AppState>().cloud_access_requests.lock().unwrap().contains_key(&handoff.room_id)).await;
     let filed = sender.state::<AppState>().cloud_drop_uploads.lock().unwrap().get(&handoff.room_id).map(|u| u.delivery.session_id.clone());
     assert_eq!(filed.as_deref(), Some(sid.as_str()), "the upload knows its sender session");

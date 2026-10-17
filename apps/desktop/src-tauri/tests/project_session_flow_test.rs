@@ -113,6 +113,7 @@ async fn push_to_receiver_holding(
         let conn = ls_net::connect_as_receiver(&r_url, &r_room).await.expect("receiver connects");
         let mut asked = None;
         let bytes = ls_net::receive_payload_answering(&conn, |_, _| {}, |msg| match msg {
+            ls_net::ControlMessage::Version { .. } => Some(ls_net::ControlMessage::Version { protocol: ls_net::PROTOCOL_VERSION }),
             ls_net::ControlMessage::BaseCheck { project_id, sender_pubkey_hex } => {
                 asked = Some((project_id, sender_pubkey_hex));
                 Some(ls_net::ControlMessage::BaseCheckResponse { commits: Some(held.clone()) })
