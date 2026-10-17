@@ -83,3 +83,10 @@ test("pending and failed checks say so, and names are escaped", () => {
   assert.doesNotMatch(h, /<b>\.txt/);
   assert.match(h, /<p class="lsv-error">Couldn&#39;t change what is sent: nope<\/p>/);
 });
+
+test("an edited file from outside the project shows as external: <name> (modified)", () => {
+  const m = CP.model(changes({ folders: [folder({ externals: [{ name: "company_configuration.xml", change_type: "modified" }] })] }));
+  assert.equal(m.message, "");
+  assert.deepEqual(m.folders[0].notes, ["external: company_configuration.xml (modified)"]);
+  assert.match(CP.html(m), /external: company_configuration\.xml \(modified\)/);
+});

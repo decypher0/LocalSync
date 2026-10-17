@@ -62,17 +62,18 @@ async fn current_state(session: &ProjectSession) -> Result<Vec<(FolderCommit, Ve
     for f in &session.folders {
         let path = f.path.clone();
         let selection = session.new_file_selection(&f.path);
-        let (commit, tree, new_files) = tauri::async_runtime::spawn_blocking(move || {
+        let refs = f.externals.clone();
+        let (commit, tree, new_files, externals) = tauri::async_runtime::spawn_blocking(move || {
             let root = Path::new(&path);
             let new_files = ls_snapshot::new_files(root, &selection)?;
             let commit = ls_snapshot::snapshot_commit_of(root, &new_files)?;
             let tree = ls_snapshot::folder_tree(root, &commit).ok();
-            anyhow::Ok((commit, tree, new_files))
+            anyhow::Ok((commit, tree, new_files, crate::externals::externals_fingerprints(&refs)))
         })
         .await
         .map_err(|e| format!("git task panicked: {e}"))?
         .map_err(|e| format!("reading the current commit of {}: {e:#}", f.path))?;
-        out.push((FolderCommit { path: f.path.clone(), commit, dump: dump_fingerprint(f), tree }, new_files));
+        out.push((FolderCommit { path: f.path.clone(), commit, dump: dump_fingerprint(f), tree, externals }, new_files));
     }
     Ok(out)
 }
@@ -128,6 +129,7 @@ async fn build_artifact(
             commit: info.git_commit.clone(),
             dump: dump_fingerprint(f),
             tree: ls_snapshot::folder_tree(Path::new(&f.path), &info.git_commit).ok(),
+            externals: Default::default(),
         })
         .collect();
     let bytes = tauri::async_runtime::spawn_blocking(move || serde_json::to_vec(&snapshot))
@@ -429,6 +431,43 @@ pub struct FolderChanges {
     /// What the device last received is no longer in git, so the changes
     /// can't be listed; a push sends the whole project.
     pub base_gone: bool,
+    /// Files from outside the project (Setup's "Files outside the project")
+    /// added, edited or dropped since the last send.
+    pub externals: Vec<ExternalChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExternalChange {
+    /// The file or folder's name.
+    pub name: String,
+    /// "added", "modified" or "removed".
+    pub change_type: String,
+}
+
+/// `sent` against `now` (external id -> fingerprint); names from the
+/// folder's chosen external files.
+fn external_changes(
+    sent: &std::collections::BTreeMap<String, String>,
+    now: &std::collections::BTreeMap<String, String>,
+    refs: &[crate::externals::ExternalRef],
+) -> Vec<ExternalChange> {
+    let name = |id: &str| {
+        refs.iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.path.rsplit(['/', '\\']).find(|s| !s.is_empty()).map(str::to_string))
+            .unwrap_or_else(|| id.to_string())
+    };
+    let mut out: Vec<ExternalChange> = now
+        .iter()
+        .filter_map(|(id, fp)| match sent.get(id) {
+            None => Some("added"),
+            Some(old) if old != fp => Some("modified"),
+            Some(_) => None,
+        }.map(|t| ExternalChange { name: name(id), change_type: t.into() }))
+        .chain(sent.keys().filter(|id| !now.contains_key(*id)).map(|id| ExternalChange { name: name(id), change_type: "removed".into() }))
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// What `project_changes` reports: [`PushStatus`] (same fields, same
@@ -492,7 +531,7 @@ pub async fn project_changes(state: State<'_, AppState>, session_id: String) -> 
     for (now, new_files) in current {
         let sent = marker.as_ref().and_then(|m| m.commits.iter().find(|c| c.path == now.path)).cloned();
         let Some(sent) = sent else {
-            folders.push(FolderChanges { files: new_file_lines(&new_files), dump_changed: false, not_sent: true, base_gone: false, path: now.path });
+            folders.push(FolderChanges { files: new_file_lines(&new_files), dump_changed: false, not_sent: true, base_gone: false, externals: vec![], path: now.path });
             continue;
         };
         let (root, from, to) = (now.path.clone(), sent.commit.clone(), now.commit.clone());
@@ -517,6 +556,7 @@ pub async fn project_changes(state: State<'_, AppState>, session_id: String) -> 
             dump_changed: sent.dump != now.dump,
             not_sent: false,
             base_gone,
+            externals: external_changes(&sent.externals, &now.externals, session.folders.iter().find(|f| f.path == now.path).map_or(&[], |f| &f.externals)),
             path: now.path,
         });
     }
@@ -831,6 +871,20 @@ pub fn device_id() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_changes_name_what_was_added_edited_or_dropped() {
+        let map = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let refs: Vec<crate::externals::ExternalRef> = serde_json::from_str(
+            r#"[{"id":"x1","key":"k","config_file":"a.properties","value":"v","path":"C:\\Users\\Some One\\configuration\\company_configuration.xml","kind":"file","status":"outside_exists"},
+                {"id":"x2","key":"k2","config_file":"a.properties","value":"v","path":"/srv/logos/","kind":"dir","status":"outside_exists"}]"#,
+        )
+        .unwrap();
+        let got = external_changes(&map(&[("x1", "a"), ("x3", "c")]), &map(&[("x1", "b"), ("x2", "n")]), &refs);
+        let got: Vec<(&str, &str)> = got.iter().map(|c| (c.name.as_str(), c.change_type.as_str())).collect();
+        assert_eq!(got, [("company_configuration.xml", "modified"), ("logos", "added"), ("x3", "removed")]);
+        assert!(external_changes(&map(&[("x1", "a")]), &map(&[("x1", "a")]), &refs).is_empty());
+    }
+
     use super::*;
 
     #[test]
