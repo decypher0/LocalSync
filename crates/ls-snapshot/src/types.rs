@@ -76,6 +76,12 @@ pub struct Manifest {
     /// forward compatibility reasoning as `folders` above.
     #[serde(default)]
     pub database_dumps: Vec<DatabaseDumpEntry>,
+    /// The sender's project-session id: what lets a receiver recognize a
+    /// later snapshot as an update to a session it already has. `None` for
+    /// snapshots from before this existed (matched by sender + title), and
+    /// left out of the JSON when `None` so their signed bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// One folder's identity within a multi-folder snapshot — see
