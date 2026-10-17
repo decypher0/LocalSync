@@ -275,12 +275,16 @@ pub async fn run_compose_test<R: tauri::Runtime>(
     };
 
     let work_dir = fresh_work_dir();
-    let db_service = spec.database.as_ref().map(|db| ls_composegen::catalog::db_service_name(db.engine));
-    let outcome = boot_and_wait(&app, &verified, &work_dir, host_port, wait, &mut notes).await;
-    // Leave no database state behind: a later test run of the same dump must
-    // import it again rather than find this run's volume and skip the import.
-    if db_service.is_some() {
-        if let Err(e) = ls_containers::remove_db_volume(&verified.snapshot().manifest.db_seed_hash).await {
+    // Its own database volume, never the dump's usual `localsync-db-<hash>`:
+    // on a computer that also runs a received copy of this project, that
+    // volume holds the receiver's data, and the cleanup below must not
+    // touch it. Fresh, so the dump is imported every time.
+    let test_volume = spec.database.as_ref().map(|_| {
+        format!("localsync-test-{}", work_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).to_lowercase()
+    });
+    let outcome = boot_and_wait(&app, &verified, &work_dir, host_port, wait, test_volume.as_deref(), &mut notes).await;
+    if let Some(volume) = &test_volume {
+        if let Err(e) = ls_containers::remove_volume(volume).await {
             notes.push(format!("Couldn't remove the test database's volume ({e:#}); `podman volume ls` will show it."));
         }
     }
@@ -319,12 +323,13 @@ async fn boot_and_wait<R: tauri::Runtime>(
     work_dir: &Path,
     host_port: u16,
     timeout: Duration,
+    db_volume: Option<&str>,
     notes: &mut Vec<String>,
 ) -> Result<String, (String, String)> {
     let lines: Arc<Mutex<VecDeque<String>>> = Arc::default();
     let tail_task = tauri::async_runtime::spawn(tail_provisioning_log(app.clone(), lines.clone()));
     emit_line(app, "Building and starting the containers (the first run downloads images and can take a few minutes)...");
-    let started = ls_containers::run_snapshot(verified, work_dir).await;
+    let started = ls_containers::run_snapshot_on_volume(verified, work_dir, db_volume).await;
     // Let the tailer see the last lines the run wrote before it goes away.
     tokio::time::sleep(Duration::from_millis(400)).await;
     tail_task.abort();

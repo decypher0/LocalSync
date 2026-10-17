@@ -8,7 +8,8 @@
 //! project. A changed file that now holds a secret-looking value is a note,
 //! never a problem.
 //!
-//! When the changes touch build or config files, the folder is also
+//! When the changes touch build or config files (or a chosen file from
+//! outside the project was edited), the folder is also
 //! test-run exactly like the Setup wizard's test run (`compose_wizard::
 //! run_compose_test`: packaged as sent, built and started in Podman with a
 //! temp host port and a fresh database volume). A pass is remembered for
@@ -107,8 +108,10 @@ struct FolderState {
     changed: Vec<String>,
 }
 
-fn folder_state(root: &Path, base: Option<String>) -> Result<FolderState, String> {
-    let current = ls_snapshot::snapshot_commit(root).map_err(|e| format!("reading {}: {e:#}", root.display()))?;
+/// `selection`: the session's choice of new files, so `current` is the
+/// commit a send would build from.
+fn folder_state(root: &Path, base: Option<String>, selection: &ls_snapshot::NewFileSelection) -> Result<FolderState, String> {
+    let current = ls_snapshot::snapshot_commit_with(root, selection).map_err(|e| format!("reading {}: {e:#}", root.display()))?;
     let tree = ls_snapshot::folder_tree(root, &current).unwrap_or_else(|_| current.clone());
     let changed = match &base {
         None => Vec::new(),
@@ -147,8 +150,13 @@ pub async fn check_session<R: tauri::Runtime>(app: AppHandle<R>, session: &Proje
     for folder in &session.folders {
         let name = folder_name(folder);
         let root = Path::new(&folder.path).to_path_buf();
-        let base = marker.as_ref().and_then(|m| m.commits.iter().find(|c| c.path == folder.path)).map(|c| c.commit.clone());
-        let st = match tauri::async_runtime::spawn_blocking(move || folder_state(&root, base)).await {
+        let sent = marker.as_ref().and_then(|m| m.commits.iter().find(|c| c.path == folder.path));
+        let base = sent.map(|c| c.commit.clone());
+        // A file from outside the project (config the app reads) edited since
+        // that device's version: as likely to break the start as a build file.
+        let externals_changed = sent.is_some_and(|c| c.externals != crate::externals::externals_fingerprints(&folder.externals));
+        let selection = session.new_file_selection(&folder.path);
+        let st = match tauri::async_runtime::spawn_blocking(move || folder_state(&root, base, &selection)).await {
             Ok(Ok(st)) => st,
             Ok(Err(e)) => {
                 report.problems.push(e);
@@ -182,7 +190,7 @@ pub async fn check_session<R: tauri::Runtime>(app: AppHandle<R>, session: &Proje
         report.problems.extend(paths);
         report.notes.extend(secrets);
 
-        if needs_test_run(&st.changed) {
+        if needs_test_run(&st.changed) || externals_changed {
             if folder.compose.is_some() {
                 to_test.push((folder.clone(), st.tree.clone()));
             } else {
@@ -593,12 +601,12 @@ mod tests {
         let base = ls_snapshot::head_commit(&sub).unwrap();
         std::fs::write(sub.join("requirements.txt"), "flask\nrequests\n").unwrap(); // uncommitted
         std::fs::write(repo.path().join("outside.txt"), "y").unwrap();
-        let st = folder_state(&sub, Some(base.clone())).unwrap();
+        let st = folder_state(&sub, Some(base.clone()), &Default::default()).unwrap();
         assert_eq!(st.changed, vec!["requirements.txt"]);
         assert_eq!(file_at(&sub, &st.current, "requirements.txt").as_deref(), Some("flask\nrequests\n"));
         assert_eq!(file_at(&sub, &base, "requirements.txt").as_deref(), Some("flask\n"));
-        assert!(folder_state(&sub, None).unwrap().changed.is_empty(), "no device yet: nothing to compare");
-        let gone = folder_state(&sub, Some("0".repeat(40))).unwrap();
+        assert!(folder_state(&sub, None, &Default::default()).unwrap().changed.is_empty(), "no device yet: nothing to compare");
+        let gone = folder_state(&sub, Some("0".repeat(40)), &Default::default()).unwrap();
         assert!(gone.changed.contains(&"src/a.py".to_string()), "a missing base counts everything: {:?}", gone.changed);
     }
 }

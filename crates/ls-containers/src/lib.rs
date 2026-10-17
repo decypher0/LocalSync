@@ -549,6 +549,11 @@ pub async fn remove_db_volume(db_seed_hash: &str) -> Result<()> {
     podman::volume_remove(&compose::db_volume_name(db_seed_hash)).await
 }
 
+/// `podman volume rm -f` of one named volume (and any container using it).
+pub async fn remove_volume(name: &str) -> Result<()> {
+    podman::volume_remove(name).await
+}
+
 pub async fn service_logs(session: &RunningSession, service: &str, tail: usize) -> Result<String> {
     podman::service_logs(&session.compose_project_name, service, tail).await
 }
