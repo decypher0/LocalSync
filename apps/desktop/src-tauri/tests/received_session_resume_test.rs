@@ -114,7 +114,7 @@ async fn a_saved_session_reopened_after_a_restart_reports_running_with_its_ports
 
     // ---- first app process: receive, Run, save ----
     let (sender, receiver) = (app(), app());
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }];
     let sid = session_commands::create_project_session(sender.state::<AppState>(), folders, None).await.unwrap().id;
     let r = receiver.clone();
     let r_url = url.clone();

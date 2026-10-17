@@ -70,7 +70,7 @@ async fn every_named_session_is_listed_after_a_restart_and_closing_removes_it() 
 
     // ---- a sent session, named in the wizard, never explicitly saved ----
     let (sender, receiver) = (app(), app());
-    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
+    let folders = vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }];
     let send = session_commands::create_project_session(sender.state::<AppState>(), folders, Some("Client Demo Backend".into()))
         .await
         .unwrap();

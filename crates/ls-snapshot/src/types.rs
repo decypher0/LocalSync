@@ -76,6 +76,32 @@ pub struct Manifest {
     /// forward compatibility reasoning as `folders` above.
     #[serde(default)]
     pub database_dumps: Vec<DatabaseDumpEntry>,
+    /// Files or folders outside the project that a config value points at,
+    /// bundled under `external/<id>/` (see the desktop app's `externals.rs`).
+    #[serde(default)]
+    pub externals: Vec<ExternalFile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExternalKind {
+    File,
+    Dir,
+}
+
+/// One file or folder from outside the project, carried in the payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalFile {
+    pub id: String,
+    /// The config key that points at it, e.g. `company.configuration.filepath`.
+    pub key: String,
+    /// The config file holding that key, relative to the project root.
+    pub config_file: String,
+    /// The value as the sender's config wrote it.
+    pub original_value: String,
+    pub kind: ExternalKind,
+    /// Where it sits inside the payload: `external/<id>/...`.
+    pub bundle_path: String,
 }
 
 /// One folder's identity within a multi-folder snapshot — see

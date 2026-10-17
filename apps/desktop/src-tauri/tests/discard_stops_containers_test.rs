@@ -120,7 +120,7 @@ async fn removing_a_running_session_never_leaves_its_containers_running() {
     let project = make_project(base.path(), "discard-running", 18141);
     let sid = session_commands::create_project_session(
         sender.state::<AppState>(),
-        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }],
+        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }],
         None,
     )
     .await
@@ -140,7 +140,7 @@ async fn removing_a_running_session_never_leaves_its_containers_running() {
     let project2 = make_project(base.path(), "close-after-update", 18142);
     let sid2 = session_commands::create_project_session(
         sender.state::<AppState>(),
-        vec![FolderPlanDto { path: project2.display().to_string(), dump: None, compose: None }],
+        vec![FolderPlanDto { path: project2.display().to_string(), dump: None, compose: None, externals: vec![] }],
         None,
     )
     .await

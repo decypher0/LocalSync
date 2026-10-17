@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     fn folder(path: &str) -> FolderPlanDto {
-        FolderPlanDto { path: path.to_string(), dump: None, compose: None }
+        FolderPlanDto { path: path.to_string(), dump: None, compose: None, externals: vec![] }
     }
 
     fn commits(pairs: &[(&str, &str)]) -> Vec<FolderCommit> {
