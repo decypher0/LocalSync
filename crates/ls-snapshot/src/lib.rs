@@ -51,6 +51,7 @@ pub fn create_snapshot(project_root: &Path, parent_commit: Option<&str>) -> Resu
         // and never populates either: see Manifest::folders' doc comment.
         folders: Vec::new(),
         database_dumps: Vec::new(),
+        project_id: None,
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &bundle.payload)?;
@@ -274,6 +275,7 @@ pub fn create_snapshot_multi_with(
         created_at: time::OffsetDateTime::now_utc(),
         folders: folder_infos,
         database_dumps,
+        project_id: None,
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &payload)?;

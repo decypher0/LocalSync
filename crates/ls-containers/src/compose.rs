@@ -269,6 +269,7 @@ mod tests {
             created_at: time::OffsetDateTime::now_utc(),
             folders: vec![],
             database_dumps: vec![],
+            project_id: None,
         }
     }
 

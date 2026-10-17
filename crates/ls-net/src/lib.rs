@@ -281,6 +281,16 @@ pub enum ControlMessage {
     /// same bundle-then-send that already runs for a manually-entered room
     /// code proceeds next, unmodified.
     ConnectionResponse { accepted: bool },
+    /// Sender -> receiver, before a push that diffs against what this device
+    /// was last sent: "which version of this project do you hold?"
+    /// `project_id` is `Manifest::project_id`; the receiver matches it with
+    /// the sender's key the same way an incoming update is matched.
+    BaseCheck { project_id: String, sender_pubkey_hex: String },
+    /// Receiver -> sender, only ever sent in reply to a `BaseCheck`: the
+    /// per-folder commits (`Manifest::folders` order) of the version it holds
+    /// for that project, `None` if it has no such session. Only ids the
+    /// sender itself produced - nothing of the receiver's.
+    BaseCheckResponse { commits: Option<Vec<String>> },
 }
 
 /// Sends one [`ControlMessage`] on `conn`'s control channel. Independent of
