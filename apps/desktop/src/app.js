@@ -3032,6 +3032,12 @@ async function runTransfer(session, tr) {
     } else {
       tr.status = "done";
       tr.resultText = `Sent as ${result.snapshot_id}`;
+      // A push the receiver couldn't take as a diff went whole - say so
+      // where Push update is, which every session page shows.
+      if (result.full_reason) {
+        tr.resultText = `Sent in full (${result.full_reason}) as ${result.snapshot_id}`;
+        $("send-push-status").textContent = `Sent in full to ${tr.deviceName} (${result.full_reason}).`;
+      }
     }
   } catch (err) {
     // A code that timed out already reads "expired"; that's the more useful
