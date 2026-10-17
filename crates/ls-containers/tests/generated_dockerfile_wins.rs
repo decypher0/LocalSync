@@ -127,6 +127,7 @@ async fn a_projects_own_dockerfile_is_never_built_instead_of_the_generated_one()
     let files = ls_snapshot::GeneratedFiles {
         compose_yaml: generated.compose_yaml,
         files: generated.files.into_iter().map(|g| (g.path, g.contents.into_bytes())).collect(),
+        externals: vec![],
     };
     let snapshot = ls_snapshot::create_snapshot_multi_with(&folders, &[], &[Some(files)]).unwrap();
     let verified = ls_security::verify(snapshot, &[]).unwrap();
@@ -197,6 +198,7 @@ async fn a_subfolder_of_a_larger_repo_builds_and_runs() {
     let files = ls_snapshot::GeneratedFiles {
         compose_yaml: generated.compose_yaml,
         files: generated.files.into_iter().map(|g| (g.path, g.contents.into_bytes())).collect(),
+        externals: vec![],
     };
     let snapshot = ls_snapshot::create_snapshot_multi_with(&folders, &[], &[Some(files)]).unwrap();
     let verified = ls_security::verify(snapshot, &[]).unwrap();
