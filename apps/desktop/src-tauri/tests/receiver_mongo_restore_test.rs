@@ -131,6 +131,7 @@ async fn a_mongodb_dump_is_restored_on_the_receivers_first_run() {
         path: project.display().to_string(),
         dump: Some(DumpPlanDto { schema: "srcdb".into(), file_path: dump_path.display().to_string(), engine: "mongodb".into() }),
         compose: Some(spec),
+        externals: vec![],
     }];
 
     let (url, _server) = signaling_url(8174).await;

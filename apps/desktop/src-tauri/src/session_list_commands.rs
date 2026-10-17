@@ -46,7 +46,9 @@ fn receive_item(s: &ReceivedSession, running: &std::collections::HashSet<String>
         id: s.id.clone(),
         kind: "receive".into(),
         name: if s.name.trim().is_empty() { s.title.clone() } else { s.name.clone() },
-        running: running.contains(&ls_containers::compose_project_name(&s.title, &s.git_commit)),
+        // The version before an update may still be the one running.
+        running: running.contains(&ls_containers::compose_project_name(&s.title, &s.git_commit))
+            || s.previous_run.as_ref().is_some_and(|(_, commit)| running.contains(&ls_containers::compose_project_name(s.previous_title(), commit))),
         created_at: s.created_at.clone(),
         updated_at: s.last_received_at.clone(),
     }
@@ -121,6 +123,5 @@ pub async fn close_session(state: State<'_, AppState>, session_id: String) -> Re
     }
     state.received_sessions.lock().map_err(|e| e.to_string())?.remove(&session_id);
     state.project_sessions.lock().map_err(|e| e.to_string())?.remove(&session_id);
-    state.armed_updates.lock().map_err(|e| e.to_string())?.retain(|_, v| v != &session_id);
     crate::session_history::remove(&session_id)
 }

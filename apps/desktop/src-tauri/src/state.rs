@@ -209,14 +209,4 @@ pub struct AppState {
     /// currently open, keyed by its own id - the receiving counterpart to
     /// `project_sessions`. See [`ReceivedSession`].
     pub received_sessions: Mutex<HashMap<String, ReceivedSession>>,
-    /// Receiver-side (session-model refactor): explicit "I'm ready for the
-    /// next push to land on this session" arming - **not** persisted (reset
-    /// every app start, by design: explicit, not passive - a session that
-    /// was armed before a restart is not silently still armed after one).
-    /// Keyed `"<sender_pubkey_hex>|<project title>"` so a push is matched to
-    /// the right armed session by who sent it and what project it is, not by
-    /// connection identity (a fresh ephemeral connection every time has
-    /// none - see `receiver_session_commands`'s doc comment). Value is the
-    /// `ReceivedSession::id` to update.
-    pub armed_updates: Mutex<HashMap<String, String>>,
 }

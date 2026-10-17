@@ -123,8 +123,8 @@ async fn share_snapshot_wizard_bundles_multiple_folders_without_a_database() {
     let receiver_handle = receiver_app.handle().clone();
 
     let folders = vec![
-        commands::FolderPlanDto { path: a.display().to_string(), dump: None, compose: None },
-        commands::FolderPlanDto { path: b.display().to_string(), dump: None, compose: None },
+        commands::FolderPlanDto { path: a.display().to_string(), dump: None, compose: None, externals: vec![] },
+        commands::FolderPlanDto { path: b.display().to_string(), dump: None, compose: None, externals: vec![] },
     ];
 
     let sender_room = room.clone();
@@ -360,6 +360,7 @@ async fn full_wizard_flow_against_a_real_local_mysql_instance() {
             engine: detected.details.engine.clone(),
         }),
         compose: None,
+        externals: vec![],
     }];
 
     let sender_room = room.clone();
@@ -467,7 +468,7 @@ services:
     receiver_app.manage(AppState::default());
     let receiver_handle = receiver_app.handle().clone();
 
-    let folders = vec![commands::FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }];
+    let folders = vec![commands::FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }];
 
     let sender_room = room.clone();
     let sender_url = url.clone();
@@ -620,6 +621,7 @@ services:
             engine: "mysql".to_string(),
         }),
         compose: None,
+        externals: vec![],
     }];
 
     let sender_room = room.clone();

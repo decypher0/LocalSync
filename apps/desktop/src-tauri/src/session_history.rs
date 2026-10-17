@@ -247,7 +247,7 @@ mod tests {
         let mut s = ProjectSession::new(
             id.to_string(),
             "xusom-admin".to_string(),
-            vec![FolderPlanDto { path: "/work/xusom-admin".to_string(), dump: None, compose: None }],
+            vec![FolderPlanDto { path: "/work/xusom-admin".to_string(), dump: None, compose: None, externals: vec![] }],
             "2026-01-01T00:00:00Z".to_string(),
         );
         s.record_send(
@@ -255,7 +255,7 @@ mod tests {
             "Alice",
             DeviceMarker {
                 snapshot_id: "xusom-admin@abc".to_string(),
-                commits: vec![FolderCommit { path: "/work/xusom-admin".to_string(), commit: "abc".to_string(), dump: None, tree: None }],
+                commits: vec![FolderCommit { path: "/work/xusom-admin".to_string(), commit: "abc".to_string(), dump: None, tree: None, externals: Default::default() }],
                 sent_at: "2026-01-01T00:01:00Z".to_string(),
             },
         );
@@ -398,6 +398,23 @@ mod tests {
         let reloaded = find_received_in(dir.path(), "r1").unwrap().unwrap();
         assert_eq!(reloaded.snapshot_id, "xusom-admin@cafef00d");
         assert_eq!(reloaded.git_commit, "cafef00d");
+    }
+
+    #[test]
+    fn what_the_stopped_page_shows_survives_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = received_session("r1");
+        session.sender_name = "Alice's laptop".to_string();
+        session.databases = vec![crate::received_session::ReceivedDatabase { engine: "mysql".into(), schema: "appdb".into() }];
+        session.record_started("2026-01-01T00:02:00Z".to_string());
+        session.record_stopped("2026-01-01T00:09:00Z".to_string());
+        save_received_in(dir.path(), &session).unwrap();
+        let reloaded = find_received_in(dir.path(), "r1").unwrap().unwrap();
+        assert_eq!(reloaded.sender_name, "Alice's laptop");
+        assert_eq!(reloaded.databases, session.databases);
+        assert_eq!(reloaded.last_run_at, "2026-01-01T00:02:00Z");
+        assert_eq!(reloaded.last_stopped_at, "2026-01-01T00:09:00Z");
+        assert_eq!(reloaded.last_exit, "stopped");
     }
 
     #[test]

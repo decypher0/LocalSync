@@ -36,13 +36,20 @@ pub struct FolderCommit {
     /// this, and is not a change to push. `None` on markers from before this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<String>,
+    /// Content fingerprint of each file from outside the project chosen to
+    /// travel with this folder (`externals::externals_fingerprint`), by
+    /// external id: editing one is a change to push.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub externals: std::collections::BTreeMap<String, String>,
 }
 
 impl FolderCommit {
-    /// Same folder with the same content (same commit, or same tree) and dump.
+    /// Same folder with the same content (same commit, or same tree), dump
+    /// and external files.
     pub fn same_content(&self, other: &FolderCommit) -> bool {
         self.path == other.path
             && self.dump == other.dump
+            && self.externals == other.externals
             && (self.commit == other.commit || (self.tree.is_some() && self.tree == other.tree))
     }
 }
@@ -101,11 +108,81 @@ pub struct ProjectSession {
     /// RFC3339.
     pub created_at: String,
     pub devices: Vec<DeviceRecord>,
+    /// New (untracked) files the user chose not to send, as
+    /// `<folder path>/<path relative to it>`: the folder's path exactly as in
+    /// `folders`, then `/`, then git's `/`-separated path inside it.
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
+    /// Secret-looking new files (`ls_snapshot::looks_secret`) the user chose
+    /// to send anyway, same format. Any other new file is sent unless it is
+    /// in `excluded_paths`.
+    #[serde(default)]
+    pub included_paths: Vec<String>,
+}
+
+/// The receiver didn't hold what a push would diff against (or no longer has
+/// the project): the full snapshot went instead.
+pub const FULL_DIFFERENT_VERSION: &str = "the receiver had a different version";
+/// The receiver didn't say which version it holds (an older LocalSync, or no
+/// reply in time): the full snapshot went instead.
+pub const FULL_NO_ANSWER: &str = "the receiver didn't confirm which version it has";
+/// What the device last received is gone from the project's git history
+/// (pruned, or the history was rewritten): the full snapshot went instead.
+pub const FULL_BASE_GONE: &str = "the version last sent is no longer in git";
+
+/// What a push that diffs against a device's marker sends, once the receiver
+/// has answered which version it holds (`ls_net::ControlMessage::BaseCheck`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PushBase {
+    /// The receiver holds every commit the diff is against.
+    Diff,
+    /// Send the full snapshot instead, for this reason (shown to the sender).
+    Full(&'static str),
+}
+
+/// Decides [`PushBase`]. `parents` is, per folder, the commit the diff is
+/// against (`None` for a folder that goes in full anyway). `answer` is the
+/// receiver's reply: `None` for no reply, `Some(None)` for "no session for
+/// this project", `Some(Some(commits))` for the per-folder commits it holds.
+pub fn push_base(parents: &[Option<String>], answer: Option<Option<&[String]>>) -> PushBase {
+    let Some(held) = answer else { return PushBase::Full(FULL_NO_ANSWER) };
+    let Some(held) = held else { return PushBase::Full(FULL_DIFFERENT_VERSION) };
+    let holds_every_parent = parents
+        .iter()
+        .enumerate()
+        .all(|(i, parent)| parent.as_ref().is_none_or(|p| held.get(i) == Some(p)));
+    if holds_every_parent {
+        PushBase::Diff
+    } else {
+        PushBase::Full(FULL_DIFFERENT_VERSION)
+    }
 }
 
 impl ProjectSession {
     pub fn new(id: String, title: String, folders: Vec<FolderPlanDto>, created_at: String) -> Self {
-        Self { id, title, folders, created_at, devices: Vec::new() }
+        Self { id, title, folders, created_at, devices: Vec::new(), excluded_paths: Vec::new(), included_paths: Vec::new() }
+    }
+
+    /// Which of `folder`'s new files its snapshot includes.
+    pub fn new_file_selection(&self, folder: &str) -> ls_snapshot::NewFileSelection {
+        let prefix = format!("{folder}/");
+        let inside = |paths: &Vec<String>| -> Vec<String> {
+            paths.iter().filter_map(|p| p.strip_prefix(prefix.as_str())).map(str::to_string).collect()
+        };
+        ls_snapshot::NewFileSelection { excluded: inside(&self.excluded_paths), included: inside(&self.included_paths) }
+    }
+
+    /// Ticks (`include`) or unticks one of `folder`'s new files (`path`
+    /// relative to it). The last choice for a file is the one that counts.
+    pub fn set_new_file_included(&mut self, folder: &str, path: &str, include: bool) {
+        let key = format!("{folder}/{path}");
+        self.excluded_paths.retain(|p| *p != key);
+        self.included_paths.retain(|p| *p != key);
+        if include {
+            self.included_paths.push(key);
+        } else {
+            self.excluded_paths.push(key);
+        }
     }
 
     pub fn device(&self, key: &str) -> Option<&DeviceRecord> {
@@ -183,11 +260,11 @@ mod tests {
     use super::*;
 
     fn folder(path: &str) -> FolderPlanDto {
-        FolderPlanDto { path: path.to_string(), dump: None, compose: None }
+        FolderPlanDto { path: path.to_string(), dump: None, compose: None, externals: vec![] }
     }
 
     fn commits(pairs: &[(&str, &str)]) -> Vec<FolderCommit> {
-        pairs.iter().map(|(p, c)| FolderCommit { path: p.to_string(), commit: c.to_string(), dump: None, tree: None }).collect()
+        pairs.iter().map(|(p, c)| FolderCommit { path: p.to_string(), commit: c.to_string(), dump: None, tree: None, externals: Default::default() }).collect()
     }
 
     fn marker(id: &str, pairs: &[(&str, &str)]) -> DeviceMarker {
@@ -239,6 +316,7 @@ mod tests {
             commit: commit.into(),
             dump: dump.map(Into::into),
             tree: tree.map(Into::into),
+            externals: Default::default(),
         };
         let sent = DeviceMarker { snapshot_id: "p@wt".into(), commits: vec![fc("wt1", Some("t1"), Some("10:1"))], sent_at: "2026-01-01T00:00:00Z".into() };
         s.record_send("dev-a", "Alice", sent);
@@ -246,6 +324,26 @@ mod tests {
         assert!(!s.is_up_to_date("dev-a", &[fc("c3", Some("t2"), Some("10:1"))]), "new content");
         assert!(!s.is_up_to_date("dev-a", &[fc("wt1", Some("t1"), Some("11:2"))]), "a re-exported dump");
         assert!(!s.is_up_to_date("dev-a", &[fc("c2", None, Some("10:1"))]), "unknown tree: only the commit can say");
+    }
+
+    #[test]
+    fn an_edited_file_from_outside_the_project_is_a_change_to_push() {
+        let mut s = session();
+        let fc = |ext: &[(&str, &str)]| FolderCommit {
+            path: "/a".into(),
+            commit: "c1".into(),
+            dump: None,
+            tree: Some("t1".into()),
+            externals: ext.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        };
+        s.record_send("dev-a", "Alice", DeviceMarker { snapshot_id: "p@c1".into(), commits: vec![fc(&[("x1", "fp1")])], sent_at: "2026-01-01T00:00:00Z".into() });
+        assert!(s.is_up_to_date("dev-a", &[fc(&[("x1", "fp1")])]));
+        assert!(!s.is_up_to_date("dev-a", &[fc(&[("x1", "fp2")])]), "edited");
+        assert!(!s.is_up_to_date("dev-a", &[fc(&[])]), "no longer chosen");
+        // A marker saved before this existed reads back with none.
+        let old: FolderCommit = serde_json::from_str(r#"{"path":"/a","commit":"c1","tree":"t1"}"#).unwrap();
+        assert!(old.externals.is_empty());
+        assert!(!serde_json::to_string(&fc(&[])).unwrap().contains("externals"), "none: not written");
     }
 
     #[test]
@@ -290,6 +388,58 @@ mod tests {
     fn a_record_saved_before_transfer_stats_still_loads() {
         let json = r#"{"key":"k","name":"n","marker":null,"history":[]}"#;
         assert_eq!(serde_json::from_str::<DeviceRecord>(json).unwrap().last_transfer, None);
+    }
+
+    #[test]
+    fn new_file_choices_are_kept_per_folder_and_the_last_one_counts() {
+        let mut s = session();
+        assert_eq!(s.new_file_selection("/a"), ls_snapshot::NewFileSelection::default());
+        s.set_new_file_included("/a", "notes.txt", false);
+        s.set_new_file_included("/a", ".env", true);
+        s.set_new_file_included("/b", "notes.txt", true);
+        let a = s.new_file_selection("/a");
+        assert_eq!(a.excluded, vec!["notes.txt".to_string()]);
+        assert_eq!(a.included, vec![".env".to_string()]);
+        assert!(!a.includes("notes.txt"), "unticked");
+        assert!(a.includes(".env"), "a secret-looking file the user ticked");
+        assert!(!a.includes("id_rsa"), "secret-looking files start unticked");
+        assert!(a.includes("src/new.rs"), "every other new file is sent");
+        assert!(s.new_file_selection("/b").includes("notes.txt"), "another folder's choice is its own");
+
+        s.set_new_file_included("/a", "notes.txt", true);
+        s.set_new_file_included("/a", ".env", false);
+        let a = s.new_file_selection("/a");
+        assert!(a.includes("notes.txt") && !a.includes(".env"));
+        assert_eq!(s.excluded_paths, vec!["/a/.env".to_string()], "one entry per file, not a growing log");
+    }
+
+    #[test]
+    fn a_session_saved_before_new_file_choices_still_loads() {
+        let mut v = serde_json::to_value(session()).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("excluded_paths");
+        obj.remove("included_paths");
+        let loaded: ProjectSession = serde_json::from_value(v).unwrap();
+        assert!(loaded.excluded_paths.is_empty() && loaded.included_paths.is_empty());
+    }
+
+    #[test]
+    fn a_push_diffs_only_when_the_receiver_holds_what_it_is_against() {
+        fn ids(c: &[&str]) -> Vec<String> {
+            c.iter().map(|s| s.to_string()).collect()
+        }
+        fn check(parents: &[Option<String>], held: Option<Vec<String>>) -> PushBase {
+            push_base(parents, Some(held.as_deref()))
+        }
+        let parents = vec![Some("a1".to_string()), None];
+        assert_eq!(check(&parents, Some(ids(&["a1", "b9"]))), PushBase::Diff, "a folder sent in full anyway needs no match");
+        assert_eq!(check(&parents, Some(ids(&["a0", "b1"]))), PushBase::Full(FULL_DIFFERENT_VERSION));
+        assert_eq!(check(&parents, Some(ids(&[]))), PushBase::Full(FULL_DIFFERENT_VERSION));
+        assert_eq!(check(&parents, None), PushBase::Full(FULL_DIFFERENT_VERSION), "the receiver's session is gone");
+        assert_eq!(push_base(&parents, None), PushBase::Full(FULL_NO_ANSWER), "an older receiver never answers");
+        let both = vec![Some("a1".to_string()), Some("b1".to_string())];
+        assert_eq!(check(&both, Some(ids(&["a1", "b1"]))), PushBase::Diff);
+        assert_eq!(check(&both, Some(ids(&["a1"]))), PushBase::Full(FULL_DIFFERENT_VERSION));
     }
 
     #[test]

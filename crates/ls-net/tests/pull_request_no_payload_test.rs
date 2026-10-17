@@ -105,6 +105,10 @@ fn only_eight_control_message_variants_exist_and_none_carry_arbitrary_bytes() {
         ControlMessage::CloudDownloadConfirmed,
         ControlMessage::ConnectionRequest { sender_name: "Alice's Laptop".to_string() },
         ControlMessage::ConnectionResponse { accepted: true },
+        // Push update's base check: a project id and a public key one way,
+        // commit ids back - ids only, no path or bytes.
+        ControlMessage::BaseCheck { project_id: "p1".to_string(), sender_pubkey_hex: "ab".repeat(32) },
+        ControlMessage::BaseCheckResponse { commits: Some(vec!["deadbeef".to_string()]) },
     ];
     for msg in all {
         match msg {
@@ -116,6 +120,8 @@ fn only_eight_control_message_variants_exist_and_none_carry_arbitrary_bytes() {
             ControlMessage::CloudDownloadConfirmed => {}
             ControlMessage::ConnectionRequest { sender_name: _ } => {}
             ControlMessage::ConnectionResponse { accepted: _ } => {}
+            ControlMessage::BaseCheck { project_id: _, sender_pubkey_hex: _ } => {}
+            ControlMessage::BaseCheckResponse { commits: _ } => {}
         }
     }
 }

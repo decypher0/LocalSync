@@ -56,6 +56,15 @@ pub struct RunningSession {
 /// this), point any database service at the deterministic seed-hash-keyed
 /// volume, and bring the project up via `podman-compose`.
 pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Result<RunningSession> {
+    run_snapshot_on_volume(verified, work_dir, None).await
+}
+
+/// [`run_snapshot`], with the database services pointed at `db_volume`
+/// instead of the volume `manifest.db_seed_hash` names - what an update that
+/// keeps the receiver's own data needs: its dump changed (so the seed-hash
+/// volume would be a different, freshly imported one), but the version it
+/// replaces ran on `db_volume`. `None` is exactly `run_snapshot`.
+pub async fn run_snapshot_on_volume(verified: &VerifiedSnapshot, work_dir: &Path, db_volume: Option<&str>) -> Result<RunningSession> {
     // The readiness gate: podman + podman-compose present, a stopped podman
     // machine started, and a memory-limited test container really runs
     // (cached on success). Never installs anything - that's the setup
@@ -119,7 +128,7 @@ pub async fn run_snapshot(verified: &VerifiedSnapshot, work_dir: &Path) -> Resul
     )?;
 
     let database_services = compose::database_service_names(manifest);
-    let db_volume = compose::db_volume_name(&manifest.db_seed_hash);
+    let db_volume = db_volume.map(str::to_string).unwrap_or_else(|| compose::db_volume_name(&manifest.db_seed_hash));
     let policy = ls_security::default_policy();
     let rewritten = compose::apply_policy(&original_yaml, &policy, &database_services, &db_volume)?;
     tokio::fs::write(&compose_path, &rewritten).await?;
@@ -349,6 +358,57 @@ async fn bring_up(
     })
 }
 
+/// How long [`wait_until_healthy`] waits. `LOCALSYNC_HEALTH_TIMEOUT_SECS`
+/// overrides it.
+fn health_timeout() -> std::time::Duration {
+    let secs = std::env::var("LOCALSYNC_HEALTH_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(180);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Waits until every service `up` started passes its own health check - one
+/// that defines none counts once it runs, a one-shot job once it exited 0.
+/// What an update waits for before the version it replaces is let go. `Err`
+/// (a plain reason, with the service's log) if a service stops, or isn't
+/// healthy within the timeout.
+pub async fn wait_until_healthy(session: &RunningSession) -> std::result::Result<(), String> {
+    let project = &session.compose_project_name;
+    let with_log = |reason: String, logs: String| {
+        if logs.trim().is_empty() { reason } else { format!("{reason}\n\nIts log:\n{logs}") }
+    };
+    let timeout = health_timeout();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut waiting = session.started_by_default.clone();
+    loop {
+        let mut not_yet = Vec::new();
+        for service in &waiting {
+            match podman::service_state(project, service).await {
+                Ok(ServiceState::Exited(0)) => continue,
+                Ok(ServiceState::Exited(code)) => {
+                    let logs = podman::service_logs(project, service, 40).await.unwrap_or_default();
+                    return Err(with_log(format!("The `{service}` service stopped (exit code {code}) while starting."), logs));
+                }
+                Ok(ServiceState::Missing | ServiceState::NotStarted) => {
+                    return Err(format!("The `{service}` service's container isn't running."));
+                }
+                _ => {}
+            }
+            if !matches!(podman::service_health(project, service).await, Ok(podman::Health::Healthy | podman::Health::NoCheck)) {
+                not_yet.push(service.clone());
+            }
+        }
+        let Some(first) = not_yet.first() else { return Ok(()) };
+        if tokio::time::Instant::now() >= deadline {
+            let logs = podman::service_logs(project, first, 40).await.unwrap_or_default();
+            return Err(with_log(
+                format!("The `{first}` service didn't pass its health check within {}s.", timeout.as_secs()),
+                logs,
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        waiting = not_yet;
+    }
+}
+
 /// How long after starting a service must still be up to count as started.
 /// `LOCALSYNC_SETTLE_SECS` overrides it.
 fn settle_time() -> std::time::Duration {
@@ -489,6 +549,11 @@ pub async fn remove_db_volume(db_seed_hash: &str) -> Result<()> {
     podman::volume_remove(&compose::db_volume_name(db_seed_hash)).await
 }
 
+/// `podman volume rm -f` of one named volume (and any container using it).
+pub async fn remove_volume(name: &str) -> Result<()> {
+    podman::volume_remove(name).await
+}
+
 pub async fn service_logs(session: &RunningSession, service: &str, tail: usize) -> Result<String> {
     podman::service_logs(&session.compose_project_name, service, tail).await
 }
@@ -527,8 +592,9 @@ pub fn pinned_volumes_in(compose_dir: &Path) -> Vec<String> {
         .collect()
 }
 
+pub use compose::db_volume_name;
 pub use podman::{
-    disk_totals, image_remove, images, volume_remove_unused, volume_usage, DiskTotals, ImageInfo, VolumeUsage,
+    disk_totals, image_remove, images, volume_exists, volume_remove_unused, volume_usage, DiskTotals, ImageInfo, VolumeUsage,
 };
 
 async fn unpack_payload(payload: &[u8], dest: &Path) -> Result<()> {
@@ -838,6 +904,8 @@ mod tests {
             created_at: time::OffsetDateTime::now_utc(),
             folders: vec![],
             database_dumps: vec![],
+            externals: Vec::new(),
+            project_id: None,
         };
 
         let manifest_digest = Sha256::digest(serde_json::to_vec(&manifest).unwrap());

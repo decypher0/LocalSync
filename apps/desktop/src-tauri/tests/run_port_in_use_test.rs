@@ -75,7 +75,7 @@ fn app() -> Handle {
     app.handle().clone()
 }
 
-/// Sends `sid` and receives it (a fresh receive, or an armed update).
+/// Sends `sid` and receives it.
 async fn push(sender: &Handle, receiver: &Handle, url: &str, room: &str, sid: &str) -> IncomingSnapshotInfo {
     let request = SendRequest {
         session_id: sid.to_string(),
@@ -111,7 +111,7 @@ async fn a_run_whose_port_is_taken_fails_instead_of_showing_running() {
     let project = make_project(base.path(), "port-taken", 18143);
     let sid = session_commands::create_project_session(
         sender.state::<AppState>(),
-        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }],
+        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }],
         None,
     )
     .await

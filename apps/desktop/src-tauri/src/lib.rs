@@ -8,7 +8,9 @@
 //! own copies.
 
 pub mod commands;
+pub mod compat;
 pub mod compose_wizard;
+pub mod externals;
 pub mod init_repo;
 pub mod project_session;
 pub mod received_session;

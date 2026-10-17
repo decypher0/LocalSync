@@ -15,12 +15,13 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::{await_recipient_consent, generated_files_for, plan_to_snapshot_inputs, FolderPlanDto, Progress, ReceiverJoined};
-use crate::project_session::{DeviceMarker, FolderCommit, ProjectSession};
+use crate::project_session::{push_base, DeviceMarker, FolderCommit, ProjectSession, PushBase, FULL_BASE_GONE, FULL_NO_ANSWER};
 use crate::state::{AppState, CachedArtifact};
 
 fn now_rfc3339() -> String {
@@ -38,25 +39,41 @@ fn new_session_id() -> String {
     format!("s{nanos:x}{:x}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
+/// How long a push waits for the receiver to say which version it holds
+/// (`ControlMessage::BaseCheck`) before sending the full snapshot - an older
+/// receiver never answers. Answering is an in-memory lookup, so this is
+/// only ever waited out in full by such a receiver.
+const BASE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// What each folder is at right now: its snapshot commit (HEAD, or HEAD plus
-/// uncommitted edits to tracked files - see `ls_snapshot::snapshot_commit`)
-/// and its dump's fingerprint. Cheap (git status, plus staging only when
-/// something is edited), and what decides whether a cached artifact is still
-/// current and whether a device is behind.
-async fn current_commits(folders: &[FolderPlanDto]) -> Result<Vec<FolderCommit>, String> {
-    let mut out = Vec::with_capacity(folders.len());
-    for f in folders {
+/// uncommitted edits to tracked files and the new files the session sends -
+/// see `ls_snapshot::snapshot_commit_with`) and its dump's fingerprint. Cheap
+/// (git status and a list of new files, plus staging only when something
+/// changed), and what decides whether a cached artifact is still current and
+/// whether a device is behind.
+async fn current_commits(session: &ProjectSession) -> Result<Vec<FolderCommit>, String> {
+    Ok(current_state(session).await?.into_iter().map(|(commit, _)| commit).collect())
+}
+
+/// [`current_commits`], with each folder's new files alongside
+/// (`ls_snapshot::new_files`, the included ones and the rest).
+async fn current_state(session: &ProjectSession) -> Result<Vec<(FolderCommit, Vec<ls_snapshot::NewFile>)>, String> {
+    let mut out = Vec::with_capacity(session.folders.len());
+    for f in &session.folders {
         let path = f.path.clone();
-        let (commit, tree) = tauri::async_runtime::spawn_blocking(move || {
+        let selection = session.new_file_selection(&f.path);
+        let refs = f.externals.clone();
+        let (commit, tree, new_files, externals) = tauri::async_runtime::spawn_blocking(move || {
             let root = Path::new(&path);
-            let commit = ls_snapshot::snapshot_commit(root)?;
+            let new_files = ls_snapshot::new_files(root, &selection)?;
+            let commit = ls_snapshot::snapshot_commit_of(root, &new_files)?;
             let tree = ls_snapshot::folder_tree(root, &commit).ok();
-            anyhow::Ok((commit, tree))
+            anyhow::Ok((commit, tree, new_files, crate::externals::externals_fingerprints(&refs)))
         })
         .await
         .map_err(|e| format!("git task panicked: {e}"))?
         .map_err(|e| format!("reading the current commit of {}: {e:#}", f.path))?;
-        out.push(FolderCommit { path: f.path.clone(), commit, dump: dump_fingerprint(f), tree });
+        out.push((FolderCommit { path: f.path.clone(), commit, dump: dump_fingerprint(f), tree, externals }, new_files));
     }
     Ok(out)
 }
@@ -84,13 +101,21 @@ fn artifact_key(session_id: &str, parents: &[Option<String>]) -> String {
 
 async fn build_artifact(
     state: &AppState,
-    folders: &[FolderPlanDto],
+    session: &ProjectSession,
     parents: &[Option<String>],
 ) -> Result<CachedArtifact, String> {
+    let folders = &session.folders;
     let (specs, dumps) = plan_to_snapshot_inputs(folders, parents)?;
     let generated = generated_files_for(folders, &specs, None)?;
+    // The session id travels as the manifest's project id: what a receiver
+    // files the project under, and what a later push's BaseCheck names.
+    let options = ls_snapshot::SnapshotOptions {
+        project_id: Some(session.id.clone()),
+        new_files: folders.iter().map(|f| session.new_file_selection(&f.path)).collect(),
+    };
     state.artifact_builds.fetch_add(1, Ordering::SeqCst);
-    let snapshot = tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi_with(&specs, &dumps, &generated))
+    let snapshot =
+        tauri::async_runtime::spawn_blocking(move || ls_snapshot::create_snapshot_multi_opts(&specs, &dumps, &generated, &options))
         .await
         .map_err(|e| format!("snapshot task panicked: {e}"))?
         .map_err(|e| format!("{e:#}"))?;
@@ -104,6 +129,7 @@ async fn build_artifact(
             commit: info.git_commit.clone(),
             dump: dump_fingerprint(f),
             tree: ls_snapshot::folder_tree(Path::new(&f.path), &info.git_commit).ok(),
+            externals: crate::externals::externals_fingerprints(&f.externals),
         })
         .collect();
     let bytes = tauri::async_runtime::spawn_blocking(move || serde_json::to_vec(&snapshot))
@@ -122,31 +148,96 @@ async fn ensure_artifact(
     session: &ProjectSession,
     since: Option<&str>,
 ) -> Result<Arc<CachedArtifact>, String> {
-    let current = current_commits(&session.folders).await?;
     let parents = match since {
         Some(device) => session.parent_commits_for(device),
         None => vec![None; session.folders.len()],
     };
+    Ok(ensure_artifact_against(state, session, parents).await?.0)
+}
+
+/// [`ensure_artifact`] diffing each folder against `parents`, and the
+/// parents it actually diffs against: a marker commit that is no longer in
+/// the folder's repository (an unsent-edit commit `git gc` pruned, or a
+/// rewritten history) can't be diffed against, so that folder goes in full;
+/// if building the diff fails anyway, the whole artifact goes in full rather
+/// than failing the push.
+async fn ensure_artifact_against(
+    state: &AppState,
+    session: &ProjectSession,
+    parents: Vec<Option<String>>,
+) -> Result<(Arc<CachedArtifact>, Vec<Option<String>>), String> {
+    let current = current_commits(session).await?;
+    let parents = existing_parents(session, parents).await;
     let key = artifact_key(&session.id, &parents);
     if let Some(cached) = state.artifacts.lock().map_err(|e| e.to_string())?.get(&key) {
         if cached.commits == current {
-            return Ok(cached.clone());
+            return Ok((cached.clone(), parents));
         }
     }
-    let built = match build_artifact(state, &session.folders, &parents).await {
-        Ok(a) => a,
-        // A marker commit that no longer exists in the repo (history was
-        // rewritten) can't be diffed against - fall back to a full diff
-        // rather than failing the whole push.
+    let (built, parents) = match build_artifact(state, session, &parents).await {
+        Ok(a) => (a, parents),
         Err(e) if parents.iter().any(Option::is_some) => {
             log::warn!("ensure_artifact: diff against the device's marker failed ({e}); using a full diff instead");
-            build_artifact(state, &session.folders, &vec![None; session.folders.len()]).await?
+            let full = vec![None; session.folders.len()];
+            (build_artifact(state, session, &full).await?, full)
         }
         Err(e) => return Err(e),
     };
     let built = Arc::new(built);
-    state.artifacts.lock().map_err(|e| e.to_string())?.insert(key, built.clone());
-    Ok(built)
+    state.artifacts.lock().map_err(|e| e.to_string())?.insert(artifact_key(&session.id, &parents), built.clone());
+    Ok((built, parents))
+}
+
+/// `parents`, with each commit that no longer exists in its folder's
+/// repository replaced by `None` (that folder is sent in full).
+async fn existing_parents(session: &ProjectSession, parents: Vec<Option<String>>) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(parents.len());
+    for (f, parent) in session.folders.iter().zip(parents) {
+        let Some(commit) = parent else {
+            out.push(None);
+            continue;
+        };
+        let (root, check) = (f.path.clone(), commit.clone());
+        let exists = tauri::async_runtime::spawn_blocking(move || ls_snapshot::commit_exists(Path::new(&root), &check))
+            .await
+            .unwrap_or(false);
+        if !exists {
+            log::info!("ensure_artifact: {commit} is no longer in {}; sending that folder in full", f.path);
+        }
+        out.push(exists.then_some(commit));
+    }
+    out
+}
+
+/// Asks the receiver which version of this project it holds
+/// (`ControlMessage::BaseCheck`) and decides whether a diff against
+/// `parents` is any use to it. No answer in [`BASE_CHECK_TIMEOUT`] (an older
+/// receiver) counts as "unknown": the full snapshot goes.
+async fn check_receiver_base(conn: &ls_net::DataChannelConn, project_id: &str, parents: &[Option<String>]) -> PushBase {
+    let sender_pubkey_hex = match ls_snapshot::sender_pubkey_hex() {
+        Ok(key) => key,
+        Err(e) => {
+            log::warn!("send_project_session: couldn't read this device's sender key ({e:#}); sending in full");
+            return PushBase::Full(FULL_NO_ANSWER);
+        }
+    };
+    let ask = ls_net::ControlMessage::BaseCheck { project_id: project_id.to_string(), sender_pubkey_hex };
+    let answer = match ls_net::request_control(conn, &ask, BASE_CHECK_TIMEOUT).await {
+        Ok(Some(ls_net::ControlMessage::BaseCheckResponse { commits })) => Some(commits),
+        Ok(Some(other)) => {
+            log::warn!("send_project_session: unexpected reply to BaseCheck: {other:?}");
+            None
+        }
+        Ok(None) => {
+            log::info!("send_project_session: no BaseCheck reply within {BASE_CHECK_TIMEOUT:?} (an older receiver?)");
+            None
+        }
+        Err(e) => {
+            log::warn!("send_project_session: BaseCheck failed: {e:#}");
+            None
+        }
+    };
+    push_base(parents, answer.as_ref().map(|commits| commits.as_deref()))
 }
 
 // ---------- what the frontend sees ----------
@@ -281,9 +372,23 @@ pub struct PushStatus {
     pub last_device_key: Option<String>,
     pub last_device_name: Option<String>,
     /// The project differs from what that device last received - a new
-    /// commit, an uncommitted edit to a tracked file, or a re-exported
-    /// database dump. There is something to push.
+    /// commit, an uncommitted edit to a tracked file, a new file it sends, or
+    /// a re-exported database dump. There is something to push.
     pub changed: bool,
+}
+
+/// Push update's target (the device this session last sent to) and whether
+/// the project, as `current`, differs from what it last received - the one
+/// answer `project_push_status` and `project_changes` both give.
+fn push_target(session: &ProjectSession, current: &[FolderCommit]) -> PushStatus {
+    match session.last_device() {
+        Some(last) => PushStatus {
+            last_device_key: Some(last.key.clone()),
+            last_device_name: Some(last.name.clone()),
+            changed: !session.is_up_to_date(&last.key, current),
+        },
+        None => PushStatus { last_device_key: None, last_device_name: None, changed: false },
+    }
 }
 
 /// Whether "Push update" has anything to do: compares each folder's current
@@ -292,15 +397,195 @@ pub struct PushStatus {
 #[tauri::command]
 pub async fn project_push_status(state: State<'_, AppState>, session_id: String) -> Result<PushStatus, String> {
     let session = get_session(&state, &session_id)?;
-    let Some(last) = session.last_device() else {
-        return Ok(PushStatus { last_device_key: None, last_device_name: None, changed: false });
+    if session.last_device().is_none() {
+        return Ok(push_target(&session, &[]));
+    }
+    let current = current_commits(&session).await?;
+    Ok(push_target(&session, &current))
+}
+
+/// One line of the "Changes since last send" panel.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FileChange {
+    /// Relative to the folder, `/`-separated.
+    pub path: String,
+    /// "added", "modified" or "deleted".
+    pub change_type: String,
+    /// A new (untracked) file: the user ticks it in or out.
+    pub new_file: bool,
+    /// The next send carries it (always, for a file that isn't new).
+    pub included: bool,
+    /// Secret-looking (`ls_snapshot::looks_secret`): starts out unticked.
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderChanges {
+    pub path: String,
+    pub files: Vec<FileChange>,
+    /// Its database dump was exported again since the last send.
+    pub dump_changed: bool,
+    /// The device never received this folder (or nothing was sent yet):
+    /// `files` lists only its new files, to choose before sending.
+    pub not_sent: bool,
+    /// What the device last received is no longer in git, so the changes
+    /// can't be listed; a push sends the whole project.
+    pub base_gone: bool,
+    /// Files from outside the project (Setup's "Files outside the project")
+    /// added, edited or dropped since the last send.
+    pub externals: Vec<ExternalChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExternalChange {
+    /// The file or folder's name.
+    pub name: String,
+    /// "added", "modified" or "removed".
+    pub change_type: String,
+}
+
+/// `sent` against `now` (external id -> fingerprint); names from the
+/// folder's chosen external files.
+fn external_changes(
+    sent: &std::collections::BTreeMap<String, String>,
+    now: &std::collections::BTreeMap<String, String>,
+    refs: &[crate::externals::ExternalRef],
+) -> Vec<ExternalChange> {
+    let name = |id: &str| {
+        refs.iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.path.rsplit(['/', '\\']).find(|s| !s.is_empty()).map(str::to_string))
+            .unwrap_or_else(|| id.to_string())
     };
-    let current = current_commits(&session.folders).await?;
-    Ok(PushStatus {
-        last_device_key: Some(last.key.clone()),
-        last_device_name: Some(last.name.clone()),
-        changed: !session.is_up_to_date(&last.key, &current),
-    })
+    let mut out: Vec<ExternalChange> = now
+        .iter()
+        .filter_map(|(id, fp)| match sent.get(id) {
+            None => Some("added"),
+            Some(old) if old != fp => Some("modified"),
+            Some(_) => None,
+        }.map(|t| ExternalChange { name: name(id), change_type: t.into() }))
+        .chain(sent.keys().filter(|id| !now.contains_key(*id)).map(|id| ExternalChange { name: name(id), change_type: "removed".into() }))
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// What `project_changes` reports: [`PushStatus`] (same fields, same
+/// answer) plus the per-folder list.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectChanges {
+    #[serde(flatten)]
+    pub status: PushStatus,
+    pub folders: Vec<FolderChanges>,
+}
+
+/// A folder's panel lines: `changed` (git's list from what was sent to the
+/// current snapshot commit), with new files marked - and the new files the
+/// user unticked, which the snapshot leaves out, listed unticked. A file sent
+/// before as a new file and unticked since shows as deleted, unticked.
+fn file_changes(changed: Vec<ls_snapshot::ChangedFile>, new_files: &[ls_snapshot::NewFile]) -> Vec<FileChange> {
+    let mut files: Vec<FileChange> = changed
+        .into_iter()
+        .map(|c| {
+            let new = new_files.iter().find(|n| n.path == c.path);
+            FileChange {
+                new_file: new.is_some(),
+                included: new.is_none_or(|n| n.included),
+                secret: new.is_some_and(|n| n.secret),
+                path: c.path,
+                change_type: c.change_type,
+            }
+        })
+        .collect();
+    for n in new_files.iter().filter(|n| !n.included) {
+        if !files.iter().any(|f| f.path == n.path) {
+            files.push(FileChange { path: n.path.clone(), change_type: "added".into(), new_file: true, included: false, secret: n.secret });
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+/// A not-yet-sent folder's panel lines: just its new files, to choose.
+fn new_file_lines(new_files: &[ls_snapshot::NewFile]) -> Vec<FileChange> {
+    new_files
+        .iter()
+        .map(|n| FileChange { path: n.path.clone(), change_type: "added".into(), new_file: true, included: n.included, secret: n.secret })
+        .collect()
+}
+
+/// "Changes since last send", for the session page: per folder, what was
+/// added, modified or deleted since the last send to Push update's target
+/// device (`project_push_status`'s device, and the same `changed`), with a
+/// tick box for each new file. Cheap enough to poll: the current snapshot
+/// commit is computed as `project_push_status` does, then one `git diff
+/// --name-status` against the device's marker - nothing is rebuilt.
+#[tauri::command]
+pub async fn project_changes(state: State<'_, AppState>, session_id: String) -> Result<ProjectChanges, String> {
+    let session = get_session(&state, &session_id)?;
+    let current = current_state(&session).await?;
+    let commits: Vec<FolderCommit> = current.iter().map(|(c, _)| c.clone()).collect();
+    let status = push_target(&session, &commits);
+    let marker = session.last_device().and_then(|d| d.marker.clone());
+    let mut folders = Vec::with_capacity(current.len());
+    for (now, new_files) in current {
+        let sent = marker.as_ref().and_then(|m| m.commits.iter().find(|c| c.path == now.path)).cloned();
+        let Some(sent) = sent else {
+            folders.push(FolderChanges { files: new_file_lines(&new_files), dump_changed: false, not_sent: true, base_gone: false, externals: vec![], path: now.path });
+            continue;
+        };
+        let (root, from, to) = (now.path.clone(), sent.commit.clone(), now.commit.clone());
+        let listed = if from == to {
+            Ok(Some(Vec::new()))
+        } else {
+            tauri::async_runtime::spawn_blocking(move || {
+                let root = Path::new(&root);
+                match ls_snapshot::changed_files(root, &from, &to) {
+                    Ok(files) => Ok(Some(files)),
+                    Err(_) if !ls_snapshot::commit_exists(root, &from) => Ok(None),
+                    Err(e) => Err(e),
+                }
+            })
+            .await
+            .map_err(|e| format!("git task panicked: {e}"))?
+        };
+        let listed = listed.map_err(|e| format!("listing the changes in {}: {e:#}", now.path))?;
+        let base_gone = listed.is_none();
+        folders.push(FolderChanges {
+            files: listed.map(|changed| file_changes(changed, &new_files)).unwrap_or_default(),
+            dump_changed: sent.dump != now.dump,
+            not_sent: false,
+            base_gone,
+            externals: external_changes(&sent.externals, &now.externals, session.folders.iter().find(|f| f.path == now.path).map_or(&[], |f| &f.externals)),
+            path: now.path,
+        });
+    }
+    Ok(ProjectChanges { status, folders })
+}
+
+/// Ticks a new file of one of the session's folders in or out of what is
+/// sent from now on, and keeps that choice with the session.
+#[tauri::command]
+pub fn set_project_change_selection(
+    state: State<'_, AppState>,
+    session_id: String,
+    folder: String,
+    path: String,
+    include: bool,
+) -> Result<(), String> {
+    let updated = {
+        let mut sessions = state.project_sessions.lock().map_err(|e| e.to_string())?;
+        let session = sessions.get_mut(&session_id).ok_or_else(|| format!("no open session with id {session_id}"))?;
+        if !session.folders.iter().any(|f| f.path == folder) {
+            return Err(format!("{folder} isn't one of this session's folders"));
+        }
+        session.set_new_file_included(&folder, &path, include);
+        session.clone()
+    };
+    if let Err(e) = crate::session_history::save_project(&updated) {
+        log::warn!("set_project_change_selection: couldn't update the saved copy of {}: {e}", updated.id);
+    }
+    Ok(())
 }
 
 /// Re-checks the session against the project as it is on disk right now
@@ -310,7 +595,7 @@ pub async fn project_push_status(state: State<'_, AppState>, session_id: String)
 pub async fn refresh_project_session(state: State<'_, AppState>, session_id: String) -> Result<ProjectSessionView, String> {
     let session = get_session(&state, &session_id)?;
     ensure_artifact(&state, &session, None).await?;
-    let current = current_commits(&session.folders).await?;
+    let current = current_commits(&session).await?;
     Ok(build_view(&state, &session, Some(&current)))
 }
 
@@ -340,11 +625,21 @@ pub struct SendResult {
     /// The device already had this version - nothing was sent, and no
     /// connection was made.
     pub up_to_date: bool,
+    /// A push that went as the full snapshot instead of a diff, and why
+    /// (`project_session::FULL_*`, e.g. "the receiver had a different
+    /// version") - for the sender to show. `None` otherwise.
+    pub full_reason: Option<String>,
     pub view: ProjectSessionView,
 }
 
 /// One transfer: connect, (optionally) get the recipient's consent, send the
 /// session's artifact, **disconnect**, then move that one device's marker.
+///
+/// A push (`since_last`) diffs against what the device last received - but
+/// only once the receiver confirms it still holds exactly that (BaseCheck,
+/// right before the payload); otherwise, or without an answer, the full
+/// snapshot goes. The payload always carries the whole project; the diff
+/// only shapes what the receiver reviews.
 #[tauri::command]
 pub async fn send_project_session<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -355,7 +650,14 @@ pub async fn send_project_session<R: tauri::Runtime>(
     let known_key = request.device_key.as_deref().filter(|k| session.device(k).is_some());
     let since = if request.since_last { known_key } else { None };
 
-    let artifact = ensure_artifact(&state, &session, since).await?;
+    let wanted = match since {
+        Some(device) => session.parent_commits_for(device),
+        None => vec![None; session.folders.len()],
+    };
+    let wanted_diff = wanted.iter().any(Option::is_some);
+    let (mut artifact, parents) = ensure_artifact_against(&state, &session, wanted).await?;
+    let diffed = parents.iter().any(Option::is_some);
+    let mut full_reason = (wanted_diff && !diffed).then(|| FULL_BASE_GONE.to_string());
     let device_key = request
         .device_key
         .clone()
@@ -364,7 +666,7 @@ pub async fn send_project_session<R: tauri::Runtime>(
     if let Some(k) = since {
         if session.is_up_to_date(k, &artifact.commits) {
             let view = build_view(&state, &session, Some(&artifact.commits));
-            return Ok(SendResult { snapshot_id: artifact.snapshot_id.clone(), device_key, up_to_date: true, view });
+            return Ok(SendResult { snapshot_id: artifact.snapshot_id.clone(), device_key, up_to_date: true, full_reason: None, view });
         }
     }
 
@@ -379,6 +681,13 @@ pub async fn send_project_session<R: tauri::Runtime>(
         await_recipient_consent(&conn, request.sender_name.clone()).await?;
     }
     let _ = app.emit("receiver-connecting", ReceiverJoined { session_id: request.room_code.clone() });
+    if diffed {
+        if let PushBase::Full(reason) = check_receiver_base(&conn, &session.id, &parents).await {
+            log::info!("send_project_session: sending {} in full: {reason}", session.id);
+            artifact = ensure_artifact(&state, &session, None).await?;
+            full_reason = Some(reason.to_string());
+        }
+    }
 
     let progress_id = request.room_code.clone();
     let started = std::time::Instant::now();
@@ -415,6 +724,7 @@ pub async fn send_project_session<R: tauri::Runtime>(
             snapshot_id: artifact.snapshot_id.clone(),
             device_key,
             up_to_date: false,
+            full_reason,
             view: build_view(&state, &session, Some(&artifact.commits)),
         });
     };
@@ -422,13 +732,13 @@ pub async fn send_project_session<R: tauri::Runtime>(
     if let Err(e) = crate::session_history::save_project(&updated) {
         log::warn!("send_project_session: couldn't update the saved copy of {}: {e}", updated.id);
     }
-    // A per-device diff artifact has done its job; only the plain one stays cached.
-    if since.is_some() {
-        let key = artifact_key(&session.id, &session.parent_commits_for(&device_key));
-        state.artifacts.lock().map_err(|e| e.to_string())?.remove(&key);
+    // A per-device diff artifact has done its job (used or not); only the
+    // plain one stays cached.
+    if diffed {
+        state.artifacts.lock().map_err(|e| e.to_string())?.remove(&artifact_key(&session.id, &parents));
     }
     let view = build_view(&state, &updated, Some(&artifact.commits));
-    Ok(SendResult { snapshot_id: artifact.snapshot_id.clone(), device_key, up_to_date: false, view })
+    Ok(SendResult { snapshot_id: artifact.snapshot_id.clone(), device_key, up_to_date: false, full_reason, view })
 }
 
 // ---------- Cloud drop ----------
@@ -561,6 +871,20 @@ pub fn device_id() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_changes_name_what_was_added_edited_or_dropped() {
+        let map = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let refs: Vec<crate::externals::ExternalRef> = serde_json::from_str(
+            r#"[{"id":"x1","key":"k","config_file":"a.properties","value":"v","path":"C:\\Users\\Some One\\configuration\\company_configuration.xml","kind":"file","status":"outside_exists"},
+                {"id":"x2","key":"k2","config_file":"a.properties","value":"v","path":"/srv/logos/","kind":"dir","status":"outside_exists"}]"#,
+        )
+        .unwrap();
+        let got = external_changes(&map(&[("x1", "a"), ("x3", "c")]), &map(&[("x1", "b"), ("x2", "n")]), &refs);
+        let got: Vec<(&str, &str)> = got.iter().map(|c| (c.name.as_str(), c.change_type.as_str())).collect();
+        assert_eq!(got, [("company_configuration.xml", "modified"), ("logos", "added"), ("x3", "removed")]);
+        assert!(external_changes(&map(&[("x1", "a")]), &map(&[("x1", "a")]), &refs).is_empty());
+    }
+
     use super::*;
 
     #[test]
@@ -582,10 +906,34 @@ mod tests {
     }
 
     #[test]
+    fn the_changes_list_marks_new_files_and_keeps_unticked_ones() {
+        let changed = |path: &str, change_type: &str| ls_snapshot::ChangedFile { path: path.into(), change_type: change_type.into() };
+        let new = |path: &str, secret: bool, included: bool| ls_snapshot::NewFile { path: path.into(), secret, included };
+        let lines = file_changes(
+            vec![changed("src/app.rs", "modified"), changed("old.txt", "deleted"), changed("notes.md", "added"), changed("sent-once.txt", "deleted")],
+            &[new("notes.md", false, true), new(".env", true, false), new("sent-once.txt", false, false)],
+        );
+        let summary: Vec<(&str, &str, bool, bool, bool)> =
+            lines.iter().map(|l| (l.path.as_str(), l.change_type.as_str(), l.new_file, l.included, l.secret)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (".env", "added", true, false, true),
+                ("notes.md", "added", true, true, false),
+                ("old.txt", "deleted", false, true, false),
+                ("sent-once.txt", "deleted", true, false, false),
+                ("src/app.rs", "modified", false, true, false),
+            ],
+            "an unticked new file is listed once: as added if never sent, as deleted if the device has it"
+        );
+        assert_eq!(new_file_lines(&[new("a.txt", false, true)]).len(), 1);
+    }
+
+    #[test]
     fn a_default_title_names_the_folders() {
         let folders = vec![
-            FolderPlanDto { path: "/w/xusom-admin".into(), dump: None, compose: None },
-            FolderPlanDto { path: "/w/xusom-api".into(), dump: None, compose: None },
+            FolderPlanDto { path: "/w/xusom-admin".into(), dump: None, compose: None, externals: vec![] },
+            FolderPlanDto { path: "/w/xusom-api".into(), dump: None, compose: None, externals: vec![] },
         ];
         assert_eq!(default_title(&folders), "xusom-admin, xusom-api");
     }
