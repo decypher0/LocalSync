@@ -186,8 +186,18 @@ pub fn validate_compose_spec(spec: ComposeSpec) -> Vec<FieldError> {
 /// What would be generated, for the wizard's preview. The error string is the
 /// `GenerateError`'s own message.
 #[tauri::command]
-pub fn preview_compose(spec: ComposeSpec, folder_label: String, dump: Option<DumpInfo>) -> Result<Generated, String> {
-    ls_composegen::generate(&spec, &GenerateContext { folder_label, dump, host_port: None }).map_err(|e| e.to_string())
+pub fn preview_compose(
+    spec: ComposeSpec,
+    folder_label: String,
+    dump: Option<DumpInfo>,
+    folder_path: Option<String>,
+    externals: Option<Vec<crate::externals::ExternalRef>>,
+) -> Result<Generated, String> {
+    let mut g = ls_composegen::generate(&spec, &GenerateContext { folder_label, dump, host_port: None }).map_err(|e| e.to_string())?;
+    if let (Some(path), Some(refs)) = (folder_path, externals) {
+        crate::externals::apply_to_generated(Path::new(&path), &refs, &mut g)?;
+    }
+    Ok(g)
 }
 
 // ---------- test run ----------
