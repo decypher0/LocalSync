@@ -403,6 +403,20 @@ pub async fn service_health(project: &str, service: &str) -> Result<Health> {
     })
 }
 
+/// How many times the service's container has been restarted (its restart
+/// policy brings a crashing app back up) - `None` without a container.
+pub async fn restart_count(project: &str, service: &str) -> Result<Option<u64>> {
+    let Some((name, _, _)) = service_container(project, service).await? else { return Ok(None) };
+    let output = command("podman")
+        .args(["inspect", "--format", "{{.RestartCount}}"])
+        .arg(&name)
+        .output()
+        .await
+        .context("running podman inspect")?;
+    ensure_success(&output, "podman inspect")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+}
+
 /// The last `tail` lines the service's container wrote (stdout and stderr
 /// merged, bounded to `TAIL_MAX_BYTES`) - "" if it has no container.
 pub async fn service_logs(project: &str, service: &str, tail: usize) -> Result<String> {
