@@ -100,7 +100,7 @@ fn only_eight_control_message_variants_exist_and_none_carry_arbitrary_bytes() {
         ControlMessage::PullRequest,
         ControlMessage::PullResponse { accepted: true },
         ControlMessage::IncomingUpdate,
-        ControlMessage::CloudAccessRequest { google_email: "someone@example.com".to_string() },
+        ControlMessage::CloudAccessRequest { google_email: "someone@example.com".to_string(), protocol: 1 },
         ControlMessage::CloudAccessResponse { accepted: true, drive_file_id: Some("abc123".to_string()) },
         ControlMessage::CloudDownloadConfirmed,
         ControlMessage::ConnectionRequest { sender_name: "Alice's Laptop".to_string() },
@@ -109,19 +109,22 @@ fn only_eight_control_message_variants_exist_and_none_carry_arbitrary_bytes() {
         // commit ids back - ids only, no path or bytes.
         ControlMessage::BaseCheck { project_id: "p1".to_string(), sender_pubkey_hex: "ab".repeat(32) },
         ControlMessage::BaseCheckResponse { commits: Some(vec!["deadbeef".to_string()]) },
+        // The protocol version exchange: a number each way.
+        ControlMessage::Version { protocol: 1 },
     ];
     for msg in all {
         match msg {
             ControlMessage::PullRequest => {}
             ControlMessage::PullResponse { accepted: _ } => {}
             ControlMessage::IncomingUpdate => {}
-            ControlMessage::CloudAccessRequest { google_email: _ } => {}
+            ControlMessage::CloudAccessRequest { google_email: _, protocol: _ } => {}
             ControlMessage::CloudAccessResponse { accepted: _, drive_file_id: _ } => {}
             ControlMessage::CloudDownloadConfirmed => {}
             ControlMessage::ConnectionRequest { sender_name: _ } => {}
             ControlMessage::ConnectionResponse { accepted: _ } => {}
             ControlMessage::BaseCheck { project_id: _, sender_pubkey_hex: _ } => {}
             ControlMessage::BaseCheckResponse { commits: _ } => {}
+            ControlMessage::Version { protocol: _ } => {}
         }
     }
 }
@@ -137,7 +140,7 @@ fn adversarial_extra_fields_on_a_cloud_access_request_are_inert() {
     let decoded: ControlMessage = serde_json::from_str(raw).expect("expected this to still decode");
     assert_eq!(
         decoded,
-        ControlMessage::CloudAccessRequest { google_email: "real@example.com".to_string() },
+        ControlMessage::CloudAccessRequest { google_email: "real@example.com".to_string(), protocol: 0 },
         "adversarial extra fields must be dropped, not smuggled through"
     );
 }

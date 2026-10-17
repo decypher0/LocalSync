@@ -5,7 +5,10 @@
 //! - the receiver confirms it holds the marker's commits (BaseCheck) -> diff;
 //! - it holds a different version, or no longer has the project -> full,
 //!   "the receiver had a different version";
-//! - it never answers (an older LocalSync) -> full after the timeout;
+//! - it doesn't answer the BaseCheck -> full after the timeout;
+//! - it doesn't answer the protocol version question (a LocalSync from before
+//!   it, which couldn't verify what is sent) -> nothing is sent, and the
+//!   sender says the other device runs an older LocalSync;
 //! - the marker's commit was pruned from the sender's repo -> full, without
 //!   asking;
 //! - new (untracked) files show in "changes since last send", can be ticked
@@ -91,8 +94,13 @@ fn unpack(payload: &[u8]) -> HashMap<String, Vec<u8>> {
 enum Receiver {
     /// Answers BaseCheck with these commits (`None`: no such project).
     Holding(Option<Vec<String>>),
-    /// An older build: never reads the control channel before the payload.
-    Old,
+    /// Speaks the protocol but leaves the BaseCheck unanswered.
+    NoBaseCheck,
+}
+
+/// What every current receiver answers to the protocol version question.
+fn version_reply() -> ls_net::ControlMessage {
+    ls_net::ControlMessage::Version { protocol: ls_net::PROTOCOL_VERSION }
 }
 
 struct Pushed {
@@ -110,9 +118,16 @@ async fn send(sender: &tauri::AppHandle<tauri::test::MockRuntime>, url: &str, ro
         let conn = ls_net::connect_as_receiver(&r_url, &r_room).await.expect("receiver connects");
         let mut asked = false;
         let bytes = match receiver {
-            Receiver::Old => ls_net::receive_payload(&conn, |_, _| {}).await,
+            Receiver::NoBaseCheck => {
+                ls_net::receive_payload_answering(&conn, |_, _| {}, |msg| match msg {
+                    ls_net::ControlMessage::Version { .. } => Some(version_reply()),
+                    _ => None,
+                })
+                .await
+            }
             Receiver::Holding(held) => {
                 ls_net::receive_payload_answering(&conn, |_, _| {}, |msg| match msg {
+                    ls_net::ControlMessage::Version { .. } => Some(version_reply()),
                     ls_net::ControlMessage::BaseCheck { .. } => {
                         asked = true;
                         Some(ls_net::ControlMessage::BaseCheckResponse { commits: held.clone() })
@@ -203,13 +218,34 @@ async fn a_push_diffs_only_against_a_version_the_receiver_confirms_it_holds() {
     assert_eq!(pushed.sent.full_reason.as_deref(), Some(FULL_DIFFERENT_VERSION), "the receiver's session is gone");
     assert!(pushed.snapshot.manifest.git_parent_commit.is_none());
 
-    // ---- an older receiver never answers: full, after the timeout ----
+    // ---- a receiver that leaves the BaseCheck unanswered: full, after the timeout ----
     commit_change(&project, "v5\n");
-    let pushed = send(&sender, &url, "bc5", request(&sid, Some(&key), true), Receiver::Old).await;
+    let pushed = send(&sender, &url, "bc5", request(&sid, Some(&key), true), Receiver::NoBaseCheck).await;
     assert_eq!(pushed.sent.full_reason.as_deref(), Some(FULL_NO_ANSWER));
     assert!(pushed.snapshot.manifest.git_parent_commit.is_none());
     assert!(pushed.took >= Duration::from_secs(5), "waited for the BaseCheck reply: {:?}", pushed.took);
     let commit5 = marker_commit(&pushed.sent, &key);
+
+    // ---- a LocalSync from before the protocol version: nothing sent, a plain message ----
+    let (r_url, r_room) = (url.clone(), "bc-old".to_string());
+    let old = tokio::spawn(async move {
+        let conn = ls_net::connect_as_receiver(&r_url, &r_room).await.expect("receiver connects");
+        ls_net::receive_payload(&conn, |_, _| {}).await
+    });
+    let started = Instant::now();
+    let refused = session_commands::send_project_session(
+        sender.clone(),
+        sender.state::<AppState>(),
+        // Send again (no device to diff against), so it always connects.
+        SendRequest { room_code: "bc-old".into(), signaling_url: url.clone(), ..request(&sid, None, false) },
+    )
+    .await;
+    assert_eq!(refused.err().as_deref(), Some(localsync_desktop::commands::OLDER_PEER));
+    assert!(started.elapsed() >= Duration::from_secs(10), "waited for the version answer: {:?}", started.elapsed());
+    let got = tokio::time::timeout(Duration::from_secs(30), old).await.expect("the old receiver isn't left hanging").unwrap();
+    assert!(got.is_err(), "the old receiver got no payload");
+    let held = sender.state::<AppState>().project_sessions.lock().unwrap()[&sid].last_device().and_then(|d| d.marker.clone()).unwrap().commits[0].commit.clone();
+    assert_eq!(held, commit5, "nothing recorded as sent");
 
     // ---- new files: listed, tickable, secrets start unticked ----
     std::fs::write(project.join("README.md"), "v6, not committed\n").unwrap();
