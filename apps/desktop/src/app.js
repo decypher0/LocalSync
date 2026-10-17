@@ -276,51 +276,21 @@ listen("cloud-access-request", (evt) => {
   $("pull-requests").appendChild(div);
 });
 
-// ---------- snapshot updated (receiver-side: sender pushed a fresh snapshot) ----------
+// ---------- an update to a received session (receiver-side) ----------
 // Same payload shape receive_snapshot resolves with, so this reuses
 // applyReviewInfoToSession verbatim - a pushed update goes through the
-// exact same diff-review-then-Run/Reject screen as a normal receive.
-// Round 29: attaches to whichever receive session most recently connected
-// to a sender (lastReceiveSessionId) rather than a single global "the
-// receive" - matches the backend's own single-outgoing-connection model
-// (see lastReceiveSessionId's own doc comment above) rather than pretending
-// this app can already receive pushed updates from more than one sender at
-// once. Falls back to a fresh tab if that session is gone (e.g. closed, or
-// this is a restart) so the update is never silently dropped.
+// exact same diff-review screen as a normal receive. The backend files every
+// push under the session it updates (same sender, same project - see
+// receiver_session_commands::track_received_snapshot) and names it in
+// `received_session_id`, so both events route to that tab - or open it, if
+// it isn't open (e.g. after a restart) - and never guess.
 listen("snapshot-updated", (evt) => {
-  let session = lastReceiveSessionId && sessions.get(lastReceiveSessionId);
-  if (!session) {
-    startReceiveSessionFromInfo(evt.payload);
-    return;
-  }
-  // The push was filed as its own ReceivedSession; Run must target that one.
-  session = rekeySession(session, evt.payload.received_session_id);
-  applyReviewInfoToSession(session, evt.payload);
-  renderSessionTabs();
-  if (session.id === activeSessionId) renderActiveSession();
+  startReceiveSessionFromInfo(evt.payload);
 });
 
-// ---------- an armed session's next push (receiver-side) ----------
-// The counterpart to snapshot-updated above, but for a real, named, saved-
-// or-savable receive Session rather than the single-upstream-connection
-// heuristic that predates this round: the backend names exactly which
-// session_id the push landed on (only possible because that session was
-// explicitly armed - see the "Ready for update" toggle), so this always
-// routes to that tab and never guesses. Falls back to opening a fresh tab
-// from the event's own info exactly like startReceiveSessionFromInfo already
-// does for a cold push after a restart (the session was saved and closed, so
-// there's no open tab left to find) - this is precisely the case that
-// function exists for.
 listen("session-update-available", (evt) => {
   const { session_id, info } = evt.payload;
-  const session = sessions.get(session_id);
-  if (!session) {
-    startReceiveSessionFromInfo(info, session_id);
-    return;
-  }
-  applyReviewInfoToSession(session, info);
-  renderSessionTabs();
-  if (session.id === activeSessionId) renderActiveSession();
+  startReceiveSessionFromInfo(info, session_id);
 });
 
 // ---------- settings ----------
@@ -1014,11 +984,6 @@ function newSession(kind, id, title) {
     // Round: a received project is now a real, saveable Session (mirrors
     // the send side's `saved`) - see the "closing a session" section below.
     saved: false,
-    armed: false,
-    // Set once run_received_session has succeeded at least once - the
-    // gating condition for the "Ready for update" toggle (arming a session
-    // that was never even accepted doesn't mean anything).
-    hasRunBefore: false,
     // Set by the Reject button - an explicit "no", distinct from just
     // closing the tab, so closing afterwards never re-offers to save
     // something that was already declined.
@@ -3034,6 +2999,12 @@ async function runTransfer(session, tr) {
     } else {
       tr.status = "done";
       tr.resultText = `Sent as ${result.snapshot_id}`;
+      // A push the receiver couldn't take as a diff went whole - say so
+      // where Push update is, which every session page shows.
+      if (result.full_reason) {
+        tr.resultText = `Sent in full (${result.full_reason}) as ${result.snapshot_id}`;
+        $("send-push-status").textContent = `Sent in full to ${tr.deviceName} (${result.full_reason}).`;
+      }
     }
   } catch (err) {
     // A code that timed out already reads "expired"; that's the more useful
@@ -3313,9 +3284,8 @@ async function openSavedSession(sessionId) {
 }
 
 /// Reopens a saved receive session - the receive-side counterpart of
-/// openSavedSession. Lands straight in the resume panel (Run/Stop plus the
-/// arm toggle), never the diff review - it was already accepted before it
-/// was ever saved.
+/// openSavedSession. Lands straight in the resume panel (Run/Stop), never
+/// the diff review - it was already accepted before it was ever saved.
 async function openSavedReceivedSession(sessionId) {
   const existing = sessions.get(sessionId);
   if (existing) {
@@ -3332,21 +3302,10 @@ async function openSavedReceivedSession(sessionId) {
     session.dbCacheHit = view.db_cache_hit;
   }
   addSession(session);
-  lastReceiveSessionId = session.id;
 }
 
 // ---------- receive ----------
-// Round 29: the receiver-side counterpart to send-btn's session model
-// above. `lastReceiveSessionId` exists only for `snapshot-updated` (a
-// pushed update arriving on the one background `state.outgoing_conn` -
-// still a real, documented singleton on the Rust side, see
-// commands.rs::listen_for_pushed_updates's doc comment; this round's fix
-// is scoped to concurrent *sends*, per the actual bug report) - it has no
-// room-code/snapshot-id of its own to key off, so this just remembers
-// which receive tab most recently connected to a sender, matching the
-// backend's own single-upstream-connection model rather than inventing a
-// multi-upstream one the backend doesn't have.
-let lastReceiveSessionId = null;
+// Round 29: the receiver-side counterpart to send-btn's session model above.
 
 function applyReviewInfoToSession(session, info) {
   session.snapshotId = info.snapshot_id;
@@ -3357,12 +3316,10 @@ function applyReviewInfoToSession(session, info) {
   session.title = info.manifest.project_name;
   session.status = "reviewing";
   session.errorText = "";
-  // The backend consumes the arming when an update lands on it.
-  session.armed = false;
   session.endedAt = null;
   // A fresh diff to review is never a resolved state - re-arms the
   // close-tab "save?" prompt if this session had previously been rejected
-  // or run to completion (e.g. an armed session's next push arriving).
+  // or run to completion (e.g. an update landing on it).
   session.rejected = false;
 }
 
@@ -3395,7 +3352,6 @@ function renderReceiveSessionDetail(session) {
   if (session.status === "running") renderRunningPanel(session);
 
   renderReceiveSaveControls(session);
-  renderReceiveArmControls(session);
 }
 
 /// The save/discard controls for a receive session - same idea as the send
@@ -3412,22 +3368,6 @@ function renderReceiveSaveControls(session) {
     : "Not saved. Closing this tab discards it.";
   $("receive-save-btn").classList.toggle("hidden", session.saved);
   $("receive-forget-btn").classList.toggle("hidden", !session.saved);
-}
-
-/// The "Ready for update" toggle - gated on the session having actually run
-/// at least once (arming a session that was never even accepted doesn't
-/// mean anything - see hasRunBefore's own doc comment in newSession).
-function renderReceiveArmControls(session) {
-  const canArm = session.hasRunBefore || session.status === "running";
-  $("receive-arm-wrap").classList.toggle("hidden", !canArm);
-  if (!canArm) return;
-  $("receive-arm-toggle").checked = !!session.armed;
-  $("receive-arm-toggle").disabled = session.busy;
-  $("receive-arm-badge").classList.toggle("hidden", !session.armed);
-  const discoverable = $("discoverable-toggle").checked;
-  $("receive-arm-discoverable-hint").textContent = discoverable
-    ? "This device is discoverable, so arming will work."
-    : "This device isn't discoverable right now (Receive settings, above) - arming won't do anything until it is.";
 }
 
 function renderReviewPanel(session) {
@@ -3529,7 +3469,7 @@ function renderReviewPanel(session) {
 
 /// A reopened saved receive session - "resume", not "review again". There is
 /// no diff to show (it was already accepted before this session was ever
-/// saved); only enough to let Run/Stop and the arm toggle work.
+/// saved); only enough to let Run/Stop work.
 function renderResumePanel(session) {
   $("resume-project").textContent = session.title;
   $("resume-commit").textContent = session.gitCommit || "(unknown)";
@@ -3591,16 +3531,16 @@ function renderRunningPanel(session) {
 /// no known prior session to attach to (e.g. after a restart). `sessionId`
 /// overrides the tab's id (falling back to `info.snapshot_id` when omitted,
 /// the pre-session-model behavior) - required for a "session-update-available"
-/// fallback (the armed session was closed, so there's no open tab to find),
+/// fallback (the updated session isn't open, so there's no tab to find),
 /// since the real backend ReceivedSession.id is never the same value as
 /// snapshot_id (see received_session.rs) - a tab keyed by the wrong id would
-/// make a later Run/Save/Arm call fail with "no open received session".
+/// make a later Run/Save call fail with "no open received session".
 function startReceiveSessionFromInfo(info, sessionId) {
-  // The tab is keyed by the backend's ReceivedSession id - what Run/Save/arming
+  // The tab is keyed by the backend's ReceivedSession id - what Run/Save
   // look sessions up by - never the snapshot id or a room code.
   const id = sessionId || info.received_session_id || info.snapshot_id;
-  // An update that landed on a session already open (it was armed): show it
-  // there, rather than a second copy of the same session replacing it.
+  // An update that landed on a session already open: show it there, rather
+  // than a second copy of the same session replacing it.
   const existing = sessions.get(id);
   if (existing) {
     applyReviewInfoToSession(existing, info);
@@ -3611,7 +3551,6 @@ function startReceiveSessionFromInfo(info, sessionId) {
   const session = newSession("receive", id, info.manifest.project_name);
   applyReviewInfoToSession(session, info);
   addSession(session);
-  lastReceiveSessionId = session.id;
   return session;
 }
 
@@ -3662,7 +3601,7 @@ function retryCloudDrop(session) {
 
 // A receive tab opened before the backend answered (keyed by its room code or
 // a placeholder) takes the real ReceivedSession id once the info arrives.
-// Returns the session to carry on with: if that id is already open (an armed
+// Returns the session to carry on with: if that id is already open (the
 // session the update landed on), the placeholder goes and the open one stays.
 function rekeySession(session, newId) {
   if (!newId || newId === session.id) return session;
@@ -3671,12 +3610,10 @@ function rekeySession(session, newId) {
     if (session.progressUnlisten) session.progressUnlisten();
     sessions.delete(session.id);
     if (activeSessionId === session.id) activeSessionId = existing.id;
-    if (lastReceiveSessionId === session.id) lastReceiveSessionId = existing.id;
     return existing;
   }
   sessions.delete(session.id);
   const wasActive = activeSessionId === session.id;
-  if (lastReceiveSessionId === session.id) lastReceiveSessionId = newId;
   session.id = newId;
   sessions.set(session.id, session);
   if (wasActive) activeSessionId = session.id;
@@ -3819,7 +3756,6 @@ $("receive-btn").addEventListener("click", async () => {
       else renderReceiveSessionDetail(session);
     });
 
-    lastReceiveSessionId = session.id;
     // This only verifies + diffs. Nothing from the snapshot executes until
     // the user reviews it below and clicks Run.
     const info = await invoke("receive_snapshot", { roomCode: decoded.room_id, signalingUrl: decoded.signaling_url });
@@ -3952,7 +3888,6 @@ async function runReceiveSession(session, workDir, ids) {
     session.status = "running";
     session.endedAt = null; // endSession ignores a session that already ended once
     session.runInProgress = false;
-    session.hasRunBefore = true;
     session.workDir = workDir;
     renderSessionTabs();
     if (session.id === activeSessionId) renderActiveSession();
@@ -4052,26 +3987,6 @@ $("receive-forget-btn").addEventListener("click", async () => {
     renderActiveSession();
   } catch (err) {
     $("receive-save-status").textContent = `Couldn't remove the saved copy: ${err}`;
-  }
-});
-
-// ---------- "Ready for update": arm this receive session so a future push
-// from the same sender, over discovery, lands right back on it ----------
-$("receive-arm-toggle").addEventListener("change", async () => {
-  const session = activeSession();
-  if (!session) return;
-  const enabled = $("receive-arm-toggle").checked;
-  $("receive-arm-error").textContent = "";
-  $("receive-arm-toggle").disabled = true;
-  try {
-    await invoke(enabled ? "arm_received_session_for_update" : "disarm_received_session_for_update", { sessionId: session.id });
-    session.armed = enabled;
-    renderActiveSession();
-  } catch (err) {
-    $("receive-arm-error").textContent = String(err);
-    $("receive-arm-toggle").checked = !enabled; // the backend call failed - never show a state that isn't real
-  } finally {
-    $("receive-arm-toggle").disabled = false;
   }
 });
 

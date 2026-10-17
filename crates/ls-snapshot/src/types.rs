@@ -78,8 +78,16 @@ pub struct Manifest {
     pub database_dumps: Vec<DatabaseDumpEntry>,
     /// Files or folders outside the project that a config value points at,
     /// bundled under `external/<id>/` (see the desktop app's `externals.rs`).
-    #[serde(default)]
+    /// Left out of the JSON when empty, so snapshots without any keep
+    /// their signed bytes (the signature covers the re-serialized manifest).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub externals: Vec<ExternalFile>,
+    /// The sender's project-session id: what lets a receiver recognize a
+    /// later snapshot as an update to a session it already has. `None` for
+    /// snapshots from before this existed (matched by sender + title), and
+    /// left out of the JSON when `None` so their signed bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
