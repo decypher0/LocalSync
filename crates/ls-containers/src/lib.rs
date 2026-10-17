@@ -378,8 +378,18 @@ pub async fn wait_until_healthy(session: &RunningSession) -> std::result::Result
     let timeout = health_timeout();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut waiting = session.started_by_default.clone();
+    // A service with no health check of its own counts once it has run
+    // through one wait without its container restarting: with `restart:
+    // on-failure` a crashing app keeps coming back, and a single look can
+    // catch it in one of its brief "running" moments.
+    let mut restarts_seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    // One look past the deadline for a service that was running at its first
+    // look and only needs the second: one sweep of several services can
+    // itself take longer than a short timeout.
+    let mut overtime_used = false;
     loop {
         let mut not_yet = Vec::new();
+        let mut confirming = Vec::new();
         for service in &waiting {
             match podman::service_state(project, service).await {
                 Ok(ServiceState::Exited(0)) => continue,
@@ -392,17 +402,35 @@ pub async fn wait_until_healthy(session: &RunningSession) -> std::result::Result
                 }
                 _ => {}
             }
-            if !matches!(podman::service_health(project, service).await, Ok(podman::Health::Healthy | podman::Health::NoCheck)) {
+            let ready = match podman::service_health(project, service).await {
+                Ok(podman::Health::Healthy) => true,
+                Ok(podman::Health::NoCheck) => match podman::restart_count(project, service).await {
+                    Ok(Some(n)) => {
+                        let stable = restarts_seen.insert(service.clone(), n) == Some(n);
+                        if !stable {
+                            confirming.push(service.clone());
+                        }
+                        stable
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !ready {
                 not_yet.push(service.clone());
             }
         }
         let Some(first) = not_yet.first() else { return Ok(()) };
-        if tokio::time::Instant::now() >= deadline {
+        let only_confirming = not_yet.iter().all(|s| confirming.contains(s));
+        if tokio::time::Instant::now() >= deadline && !(only_confirming && !overtime_used) {
             let logs = podman::service_logs(project, first, 40).await.unwrap_or_default();
             return Err(with_log(
                 format!("The `{first}` service didn't pass its health check within {}s.", timeout.as_secs()),
                 logs,
             ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            overtime_used = true;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         waiting = not_yet;
