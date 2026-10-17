@@ -3,7 +3,10 @@ mod hash;
 mod sign;
 mod types;
 
-pub use bundle::{folder_tree, git_available, head_commit, run_git, snapshot_commit, GIT_MISSING};
+pub use bundle::{
+    changed_files, commit_exists, folder_tree, git_available, head_commit, looks_secret, new_files, run_git, snapshot_commit,
+    snapshot_commit_of, snapshot_commit_with, ChangedFile, NewFile, NewFileSelection, GIT_MISSING,
+};
 pub use types::{DatabaseDumpEntry, DumpSource, FolderInfo, GeneratedFiles, Manifest, PendingDump, ServiceDef, Snapshot};
 
 use anyhow::{Context, Result};
@@ -164,6 +167,26 @@ pub fn create_snapshot_multi_with(
     dumps: &[types::PendingDump],
     generated: &[Option<GeneratedFiles>],
 ) -> Result<Snapshot> {
+    create_snapshot_multi_opts(folders, dumps, generated, &SnapshotOptions::default())
+}
+
+/// What a sender session adds to [`create_snapshot_multi_with`].
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotOptions {
+    /// Goes into `Manifest::project_id`.
+    pub project_id: Option<String>,
+    /// Per folder (index-aligned with `folders`; a missing entry is the
+    /// default): which of its new files go in.
+    pub new_files: Vec<NewFileSelection>,
+}
+
+/// [`create_snapshot_multi_with`] with a sender session's [`SnapshotOptions`].
+pub fn create_snapshot_multi_opts(
+    folders: &[FolderSpec],
+    dumps: &[types::PendingDump],
+    generated: &[Option<GeneratedFiles>],
+    options: &SnapshotOptions,
+) -> Result<Snapshot> {
     anyhow::ensure!(!folders.is_empty(), "create_snapshot_multi requires at least one folder");
     for d in dumps {
         anyhow::ensure!(
@@ -183,7 +206,9 @@ pub fn create_snapshot_multi_with(
     let mut services = Vec::new();
 
     for (i, (f, label)) in folders.iter().zip(&labels).enumerate() {
-        let bundle = bundle::bundle_project_with(&f.path, f.parent_commit.as_deref(), generated.get(i).and_then(Option::as_ref))
+        let default_selection = NewFileSelection::default();
+        let selection = options.new_files.get(i).unwrap_or(&default_selection);
+        let bundle = bundle::bundle_project_with(&f.path, f.parent_commit.as_deref(), generated.get(i).and_then(Option::as_ref), selection)
             .with_context(|| format!("bundling {}", f.path.display()))?;
 
         let build_dirs: Vec<std::path::PathBuf> = bundle
@@ -275,7 +300,7 @@ pub fn create_snapshot_multi_with(
         created_at: time::OffsetDateTime::now_utc(),
         folders: folder_infos,
         database_dumps,
-        project_id: None,
+        project_id: options.project_id.clone(),
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &payload)?;
@@ -286,6 +311,13 @@ pub fn create_snapshot_multi_with(
         signature,
         payload,
     })
+}
+
+/// This device's sender key (`Manifest::sender_pubkey`), hex-encoded - how a
+/// receiver tells whose project a `BaseCheck` asks about.
+pub fn sender_pubkey_hex() -> Result<String> {
+    let identity = sign::load_or_create_identity().context("loading sender identity")?;
+    Ok(identity.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Persists a `Snapshot` to disk as JSON. `payload` (the tar.gz bytes) rides
@@ -377,7 +409,7 @@ mod tests {
         assert_eq!(snapshot_commit(root).unwrap(), head, "a clean folder snapshots HEAD itself");
 
         fs::write(root.join("README.md"), "v2 - not committed\n").unwrap();
-        fs::write(root.join("secret.env"), "TOKEN=x\n").unwrap(); // untracked, never git-added
+        fs::write(root.join("secret.env"), "TOKEN=x\n").unwrap(); // a new, secret-looking file
         let status_before = git_output(root, &["status", "--porcelain"]);
         let wt = snapshot_commit(root).unwrap();
         assert_ne!(wt, head);
@@ -390,7 +422,7 @@ mod tests {
         let files = unpack(&snap.payload);
         // (Windows git's core.autocrlf may turn the archived \n into \r\n.)
         assert_eq!(String::from_utf8_lossy(files.get("source/README.md").unwrap()).replace("\r\n", "\n"), "v2 - not committed\n");
-        assert!(!files.contains_key("source/secret.env"), "untracked files stay out");
+        assert!(!files.contains_key("source/secret.env"), "a secret-looking new file stays out until included");
         let patch = String::from_utf8(files.get("diff.patch").unwrap().clone()).unwrap();
         assert!(patch.contains("+v2 - not committed"), "the push diff carries the edit: {patch}");
 
@@ -404,6 +436,142 @@ mod tests {
         let committed = git_output(root, &["rev-parse", "HEAD"]);
         assert_ne!(committed, wt);
         assert_eq!(folder_tree(root, &committed).unwrap(), folder_tree(root, &wt).unwrap());
+    }
+
+    /// New (untracked) files ship like edits do - built in a temporary index,
+    /// so the developer's index, branches and files stay exactly as they were -
+    /// except ignored ones, secret-looking ones the user hasn't included, and
+    /// ones the user unticked.
+    #[test]
+    fn new_files_ship_unless_ignored_excluded_or_secret_looking() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(root.join("README.md"), "v1\n").unwrap();
+        commit_all(root, "one");
+        let head = git_output(root, &["rev-parse", "HEAD"]);
+
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/new [1].rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("skip.txt"), "not this one\n").unwrap();
+        fs::write(root.join("debug.log"), "ignored\n").unwrap();
+        fs::write(root.join(".env"), "TOKEN=x\n").unwrap();
+        fs::write(root.join("id_rsa"), "key\n").unwrap();
+        fs::create_dir_all(root.join("app/node_modules/pkg")).unwrap();
+        fs::write(root.join("app/node_modules/pkg/index.js"), "x\n").unwrap();
+        // (A plain `git status` may itself rewrite the index, so it goes first.)
+        let status_before = git_output(root, &["status", "--porcelain", "--untracked-files=all"]);
+        let index_before = fs::read(root.join(".git/index")).unwrap();
+
+        let mut listed = new_files(root, &NewFileSelection::default()).unwrap();
+        listed.sort_by(|a, b| a.path.cmp(&b.path));
+        let summary: Vec<(&str, bool, bool)> = listed.iter().map(|f| (f.path.as_str(), f.secret, f.included)).collect();
+        assert_eq!(
+            summary,
+            vec![(".env", true, false), ("id_rsa", true, false), ("skip.txt", false, true), ("src/new [1].rs", false, true)],
+            "ignored files and noise directories aren't new files at all; secrets start out excluded"
+        );
+
+        let selection = NewFileSelection { excluded: vec!["skip.txt".into()], included: vec![] };
+        let commit = snapshot_commit_with(root, &selection).unwrap();
+        assert_ne!(commit, head, "a new file is a change");
+        assert_eq!(snapshot_commit_with(root, &selection).unwrap(), commit, "same content, same id");
+        let snap = create_snapshot_multi_opts(
+            &[FolderSpec { path: root.to_path_buf(), parent_commit: Some(head.clone()) }],
+            &[],
+            &[],
+            &SnapshotOptions { project_id: Some("s-123".into()), new_files: vec![selection.clone()] },
+        )
+        .unwrap();
+        assert_eq!(snap.manifest.git_commit, commit);
+        assert_eq!(snap.manifest.project_id.as_deref(), Some("s-123"));
+        assert!(sign::verify_signature(&snap.manifest, &snap.payload, &snap.signature).unwrap());
+        let label = root.file_name().unwrap().to_string_lossy().to_string();
+        let files = unpack(&snap.payload);
+        let has = |p: &str| files.contains_key(&format!("{label}/source/{p}"));
+        assert!(has("src/new [1].rs"), "{:?}", files.keys().collect::<Vec<_>>());
+        for left_out in ["skip.txt", "debug.log", ".env", "id_rsa", "app/node_modules/pkg/index.js"] {
+            assert!(!has(left_out), "{left_out} must not ship");
+        }
+        let stat: Vec<DiffStatEntry> = serde_json::from_slice(files.get(&format!("{label}/diff_stat.json")).unwrap()).unwrap();
+        assert_eq!(stat.iter().map(|e| (e.path.as_str(), e.change_type.as_str())).collect::<Vec<_>>(), vec![("src/new [1].rs", "added")]);
+
+        // Ticking the secret file in puts it in; unticking the only new file
+        // (no other change) is HEAD itself again.
+        let with_env = NewFileSelection { excluded: vec![], included: vec![".env".into()] };
+        let with_env_commit = snapshot_commit_with(root, &with_env).unwrap();
+        assert!(changed_files(root, &commit, &with_env_commit).unwrap().iter().any(|c| c.path == ".env" && c.change_type == "added"));
+        let none = NewFileSelection { excluded: vec!["skip.txt".into(), "src/new [1].rs".into()], included: vec![] };
+        assert_eq!(snapshot_commit_with(root, &none).unwrap(), head);
+
+        assert_eq!(git_output(root, &["rev-parse", "HEAD"]), head, "no branch moved");
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), index_before, "the developer's index is untouched");
+        assert_eq!(git_output(root, &["status", "--porcelain", "--untracked-files=all"]), status_before, "files untouched");
+        assert_eq!(git_output(root, &["for-each-ref"]).lines().count(), 1, "no ref was added");
+    }
+
+    #[test]
+    fn secret_looking_names_are_recognized_in_any_folder_and_case() {
+        for secret in [".env", ".env.local", "config/prod.env", "certs/server.PEM", "tls.key", "store.p12", "id_rsa", "id_rsa.pub", "Credentials.json", "secrets.yaml"] {
+            assert!(looks_secret(secret), "{secret}");
+        }
+        for plain in ["environment.ts", "src/keyboard.rs", "monkey.txt", "README.md", "docs/secret-sauce.md"] {
+            assert!(!looks_secret(plain), "{plain}");
+        }
+    }
+
+    /// The "changes since last send" list: an edit, a deletion and a new
+    /// file, relative to the folder - and a commit of exactly what was sent
+    /// has no changes.
+    #[test]
+    fn changed_files_lists_edits_deletions_and_new_files_against_the_last_sent_commit() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        fs::write(root.join("keep.txt"), "v1\n").unwrap();
+        fs::write(root.join("gone.txt"), "bye\n").unwrap();
+        commit_all(root, "one");
+        let sent = snapshot_commit(root).unwrap();
+
+        fs::write(root.join("keep.txt"), "v2\n").unwrap();
+        fs::remove_file(root.join("gone.txt")).unwrap();
+        fs::write(root.join("added.txt"), "hi\n").unwrap();
+        let now = snapshot_commit(root).unwrap();
+        let mut changes: Vec<(String, String)> = changed_files(root, &sent, &now).unwrap().into_iter().map(|c| (c.path, c.change_type)).collect();
+        changes.sort();
+        assert_eq!(
+            changes,
+            vec![("added.txt".into(), "added".into()), ("gone.txt".into(), "deleted".into()), ("keep.txt".into(), "modified".into())]
+        );
+
+        commit_all(root, "two");
+        let committed = git_output(root, &["rev-parse", "HEAD"]);
+        assert!(changed_files(root, &now, &committed).unwrap().is_empty(), "committing what was sent changes nothing");
+    }
+
+    /// The snapshot commit of uncommitted work is unreachable, so `git gc`
+    /// can prune it: then it no longer exists, and a diff against it fails -
+    /// which is why the session checks `commit_exists` and sends in full.
+    #[test]
+    fn a_pruned_snapshot_commit_no_longer_exists_and_cannot_be_diffed_against() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        fs::write(root.join("a.txt"), "v1\n").unwrap();
+        commit_all(root, "one");
+        fs::write(root.join("a.txt"), "v2 - sent, never committed\n").unwrap();
+        let sent = snapshot_commit(root).unwrap();
+        assert!(commit_exists(root, &sent));
+
+        fs::write(root.join("a.txt"), "v3\n").unwrap();
+        commit_all(root, "two");
+        git(root, &["reflog", "expire", "--expire=now", "--all"]);
+        git(root, &["gc", "--prune=now", "-q"]);
+        assert!(!commit_exists(root, &sent), "gc pruned the unreachable snapshot commit");
+        assert!(!commit_exists(root, "not-a-commit"));
+        assert!(create_snapshot(root, Some(&sent)).is_err(), "a diff against it can't be built");
+        assert!(create_snapshot(root, None).is_ok(), "the full snapshot still can");
     }
 
     #[test]
