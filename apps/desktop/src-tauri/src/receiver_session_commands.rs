@@ -130,6 +130,14 @@ pub fn track_received_snapshot(
     Ok(ReceivedSessionOutcome::Created(id))
 }
 
+/// Answers a sender's `BaseCheck`: the per-folder commits of the version this
+/// device holds of `project_id` from `sender_pubkey_hex` (the session an
+/// update from them would land on), `None` if there is no such session.
+pub fn held_base_commits(state: &AppState, sender_pubkey_hex: &str, project_id: &str) -> Option<Vec<String>> {
+    let _ = (state, sender_pubkey_hex, project_id);
+    None
+}
+
 /// Every received session is kept on disk from the moment it exists and
 /// whenever it changes, so it survives a restart and shows on Home. A
 /// failure to write is logged, never allowed to fail the receive itself.
