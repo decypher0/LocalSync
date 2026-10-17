@@ -129,7 +129,7 @@ async fn build_artifact(
             commit: info.git_commit.clone(),
             dump: dump_fingerprint(f),
             tree: ls_snapshot::folder_tree(Path::new(&f.path), &info.git_commit).ok(),
-            externals: Default::default(),
+            externals: crate::externals::externals_fingerprints(&f.externals),
         })
         .collect();
     let bytes = tauri::async_runtime::spawn_blocking(move || serde_json::to_vec(&snapshot))
