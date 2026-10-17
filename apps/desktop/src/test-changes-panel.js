@@ -90,3 +90,12 @@ test("an edited file from outside the project shows as external: <name> (modifie
   assert.deepEqual(m.folders[0].notes, ["external: company_configuration.xml (modified)"]);
   assert.match(CP.html(m), /external: company_configuration\.xml \(modified\)/);
 });
+
+test("a new file over 25 MB is listed as too large, with no tick box", () => {
+  const m = CP.model(changes({ folders: [folder({ files: [file("dump.bin", "added", { new_file: true, included: false, too_large: true })] })] }));
+  const line = m.folders[0].lines[0];
+  assert.equal(line.tickable, false);
+  const h = CP.html(m);
+  assert.match(h, /Added · too large, not included/);
+  assert.doesNotMatch(h, /data-change-file="dump\.bin"/, "nothing to tick");
+});

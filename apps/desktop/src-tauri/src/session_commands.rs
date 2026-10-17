@@ -417,6 +417,8 @@ pub struct FileChange {
     pub included: bool,
     /// Secret-looking (`ls_snapshot::looks_secret`): starts out unticked.
     pub secret: bool,
+    /// A new file over `ls_snapshot::NEW_FILE_MAX_BYTES`: listed, never sent.
+    pub too_large: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -492,6 +494,7 @@ fn file_changes(changed: Vec<ls_snapshot::ChangedFile>, new_files: &[ls_snapshot
                 new_file: new.is_some(),
                 included: new.is_none_or(|n| n.included),
                 secret: new.is_some_and(|n| n.secret),
+                too_large: new.is_some_and(|n| n.too_large),
                 path: c.path,
                 change_type: c.change_type,
             }
@@ -499,7 +502,7 @@ fn file_changes(changed: Vec<ls_snapshot::ChangedFile>, new_files: &[ls_snapshot
         .collect();
     for n in new_files.iter().filter(|n| !n.included) {
         if !files.iter().any(|f| f.path == n.path) {
-            files.push(FileChange { path: n.path.clone(), change_type: "added".into(), new_file: true, included: false, secret: n.secret });
+            files.push(FileChange { path: n.path.clone(), change_type: "added".into(), new_file: true, included: false, secret: n.secret, too_large: n.too_large });
         }
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -510,7 +513,7 @@ fn file_changes(changed: Vec<ls_snapshot::ChangedFile>, new_files: &[ls_snapshot
 fn new_file_lines(new_files: &[ls_snapshot::NewFile]) -> Vec<FileChange> {
     new_files
         .iter()
-        .map(|n| FileChange { path: n.path.clone(), change_type: "added".into(), new_file: true, included: n.included, secret: n.secret })
+        .map(|n| FileChange { path: n.path.clone(), change_type: "added".into(), new_file: true, included: n.included, secret: n.secret, too_large: n.too_large })
         .collect()
 }
 
@@ -909,7 +912,7 @@ mod tests {
     #[test]
     fn the_changes_list_marks_new_files_and_keeps_unticked_ones() {
         let changed = |path: &str, change_type: &str| ls_snapshot::ChangedFile { path: path.into(), change_type: change_type.into() };
-        let new = |path: &str, secret: bool, included: bool| ls_snapshot::NewFile { path: path.into(), secret, included };
+        let new = |path: &str, secret: bool, included: bool| ls_snapshot::NewFile { path: path.into(), secret, too_large: false, included };
         let lines = file_changes(
             vec![changed("src/app.rs", "modified"), changed("old.txt", "deleted"), changed("notes.md", "added"), changed("sent-once.txt", "deleted")],
             &[new("notes.md", false, true), new(".env", true, false), new("sent-once.txt", false, false)],

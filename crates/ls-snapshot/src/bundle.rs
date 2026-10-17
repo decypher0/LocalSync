@@ -612,6 +612,10 @@ impl NewFileSelection {
     }
 }
 
+/// A new (untracked) file bigger than this is listed but never sent: "too
+/// large, not included". Commit it (or use Git LFS) to send it.
+pub const NEW_FILE_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
 /// One of a folder's new files (see [`new_files`]).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NewFile {
@@ -619,7 +623,9 @@ pub struct NewFile {
     pub path: String,
     /// [`looks_secret`]: left out until the user includes it.
     pub secret: bool,
-    /// The snapshot includes it ([`NewFileSelection::includes`]).
+    /// Over [`NEW_FILE_MAX_BYTES`]: never included, whatever the selection.
+    pub too_large: bool,
+    /// The snapshot includes it ([`NewFileSelection::includes`], and not too large).
     pub included: bool,
 }
 
@@ -640,14 +646,17 @@ pub fn looks_secret(path: &str) -> bool {
 /// `selection` includes it. Left out entirely: an untracked nested git
 /// repository (git lists it as `dir/`, not as files), files under a
 /// [`NOISE_DIR_NAMES`] directory (never shipped anyway), and names that
-/// aren't UTF-8.
+/// aren't UTF-8. Files over [`NEW_FILE_MAX_BYTES`] are listed, never included.
 pub fn new_files(project_root: &Path, selection: &NewFileSelection) -> Result<Vec<NewFile>> {
     let out = git_bytes(project_root, &["ls-files", "--others", "--exclude-standard", "-z", "--", "."])?;
     Ok(out
         .split(|b| *b == 0)
         .filter_map(|p| std::str::from_utf8(p).ok())
         .filter(|p| !p.is_empty() && !p.ends_with('/') && !has_noise_component(Path::new(p)))
-        .map(|p| NewFile { path: p.to_string(), secret: looks_secret(p), included: selection.includes(p) })
+        .map(|p| {
+            let too_large = fs::symlink_metadata(project_root.join(p)).is_ok_and(|m| m.len() > NEW_FILE_MAX_BYTES);
+            NewFile { path: p.to_string(), secret: looks_secret(p), too_large, included: !too_large && selection.includes(p) }
+        })
         .collect())
 }
 
@@ -710,20 +719,16 @@ fn commit_with_new_files(project_root: &Path, head: &str, files: &[NewFile]) -> 
     let index_env = [("GIT_INDEX_FILE", tmp_index.as_os_str())];
     let made = (|| -> Result<String> {
         git_bytes_with(project_root, &["add", "-u", "--", "."], &index_env)?;
-        if !added.is_empty() {
-            // From a file, not the command line (which a few thousand paths
-            // would overflow on Windows); literal, so a `[` or `*` in a file
-            // name is just a character.
-            let mut list = Vec::new();
-            for path in &added {
-                list.extend_from_slice(path.as_bytes());
-                list.push(0);
+        let tree = match stage_new_files(project_root, &added, &index_env, &tmp_paths, true) {
+            Ok(tree) => tree,
+            // A remembered blob can be gone (`git gc` prunes unreferenced
+            // objects): hash everything again, once.
+            Err(e) => {
+                log::info!("re-hashing the new files of {}: {e:#}", project_root.display());
+                forget_hashed(project_root);
+                stage_new_files(project_root, &added, &index_env, &tmp_paths, false)?
             }
-            fs::write(&tmp_paths, list).with_context(|| format!("writing {}", tmp_paths.display()))?;
-            let from_file = format!("--pathspec-from-file={}", tmp_paths.display());
-            git_bytes_with(project_root, &["--literal-pathspecs", "add", &from_file, "--pathspec-file-nul"], &index_env)?;
-        }
-        let tree = String::from_utf8(git_bytes_with(project_root, &["write-tree"], &index_env)?)?;
+        };
         let fixed = std::ffi::OsStr::new;
         let author = [
             ("GIT_AUTHOR_NAME", fixed("LocalSync")),
@@ -743,6 +748,118 @@ fn commit_with_new_files(project_root: &Path, head: &str, files: &[NewFile]) -> 
     let _ = fs::remove_file(&tmp_index);
     let _ = fs::remove_file(&tmp_paths);
     made
+}
+
+/// What a new file looked like when it was last hashed: unchanged size and
+/// modified time mean the same blob, so the 5 s change poll doesn't read every
+/// new file again. Keyed by the file's full path.
+struct Hashed {
+    size: u64,
+    modified: std::time::SystemTime,
+    mode: String,
+    blob: String,
+}
+
+/// ponytail: process-wide and never trimmed - one small entry per new file
+/// ever hashed; trim it if sessions with huge numbers of new files appear.
+static HASHED: std::sync::Mutex<Option<HashMap<PathBuf, Hashed>>> = std::sync::Mutex::new(None);
+
+/// A file changed less than this long ago isn't remembered: another write
+/// within the same timestamp tick would leave size and time unchanged (git's
+/// "racy" case).
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+fn forget_hashed(project_root: &Path) {
+    if let Ok(mut map) = HASHED.lock() {
+        if let Some(map) = map.as_mut() {
+            map.retain(|path, _| !path.starts_with(project_root));
+        }
+    }
+}
+
+/// Stages `added` (new files, relative to `project_root`) in the temporary
+/// index and writes its tree. With `use_memo`, a file whose size and modified
+/// time match what [`HASHED`] remembers goes in as that blob, unread; the rest
+/// are hashed by `git add` and remembered.
+fn stage_new_files(
+    project_root: &Path,
+    added: &[&str],
+    index_env: &[(&str, &std::ffi::OsStr)],
+    tmp_paths: &Path,
+    use_memo: bool,
+) -> Result<String> {
+    // Stat first: a file changed after this and before `git add` reads it is
+    // remembered with the old size/time, so it's simply hashed again next time.
+    let stats: Vec<Option<(u64, std::time::SystemTime)>> = added
+        .iter()
+        .map(|p| fs::symlink_metadata(project_root.join(p)).ok().and_then(|m| Some((m.len(), m.modified().ok()?))))
+        .collect();
+    let mut known = Vec::new();
+    let mut fresh = Vec::new();
+    {
+        let memo = HASHED.lock().map_err(|_| anyhow::anyhow!("hash memo poisoned"))?;
+        for (path, stat) in added.iter().zip(&stats) {
+            let hit = use_memo
+                .then(|| memo.as_ref()?.get(&project_root.join(path)))
+                .flatten()
+                .filter(|h| stat.is_some_and(|(size, modified)| h.size == size && h.modified == modified));
+            match hit {
+                Some(h) => known.push(format!("{} {}\t{path}\0", h.mode, h.blob)),
+                None => fresh.push(*path),
+            }
+        }
+    }
+    if !known.is_empty() {
+        run_git_input(project_root, &["update-index", "-z", "--add", "--index-info"], index_env, GIT_TIMEOUT, Some(known.concat().into_bytes()))?;
+    }
+    if !fresh.is_empty() {
+        // From a file, not the command line (which a few thousand paths
+        // would overflow on Windows); literal, so a `[` or `*` in a file
+        // name is just a character.
+        let mut list = Vec::new();
+        for path in &fresh {
+            list.extend_from_slice(path.as_bytes());
+            list.push(0);
+        }
+        fs::write(tmp_paths, list).with_context(|| format!("writing {}", tmp_paths.display()))?;
+        let from_file = format!("--pathspec-from-file={}", tmp_paths.display());
+        git_bytes_with(project_root, &["--literal-pathspecs", "add", &from_file, "--pathspec-file-nul"], index_env)?;
+        remember_hashed(project_root, &fresh, added, &stats, index_env)?;
+    }
+    Ok(String::from_utf8(git_bytes_with(project_root, &["write-tree"], index_env)?)?.trim().to_string())
+}
+
+/// Records the blob and mode `git add` gave each of `fresh` (read back from
+/// the temporary index), with the size/time seen before it was hashed.
+fn remember_hashed(
+    project_root: &Path,
+    fresh: &[&str],
+    added: &[&str],
+    stats: &[Option<(u64, std::time::SystemTime)>],
+    index_env: &[(&str, &std::ffi::OsStr)],
+) -> Result<()> {
+    let listing = git_bytes_with(project_root, &["ls-files", "-s", "-z", "--", "."], index_env)?;
+    let staged: HashMap<&str, (&str, &str)> = listing
+        .split(|b| *b == 0)
+        .filter_map(|e| std::str::from_utf8(e).ok())
+        .filter_map(|e| {
+            let (meta, path) = e.split_once('\t')?;
+            let mut parts = meta.split(' ');
+            Some((path, (parts.next()?, parts.next()?)))
+        })
+        .collect();
+    let now = std::time::SystemTime::now();
+    let mut memo = HASHED.lock().map_err(|_| anyhow::anyhow!("hash memo poisoned"))?;
+    let memo = memo.get_or_insert_with(HashMap::new);
+    for path in fresh {
+        let Some(&(mode, blob)) = staged.get(path) else { continue };
+        let Some((size, modified)) = added.iter().position(|p| p == path).and_then(|i| stats[i]) else { continue };
+        if now.duration_since(modified).unwrap_or_default() < RACY_WINDOW {
+            continue;
+        }
+        memo.insert(project_root.join(path), Hashed { size, modified, mode: mode.to_string(), blob: blob.to_string() });
+    }
+    Ok(())
 }
 
 /// The id of `project_root`'s own tree (just this folder's files) at
@@ -833,6 +950,12 @@ fn git_bytes_with(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)])
 /// that write (the desktop app's "set up git for this folder": `git add -A`
 /// on a large folder can take longer than a read). Same hardening.
 pub fn run_git(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)], timeout: Duration) -> Result<Vec<u8>> {
+    run_git_input(root, args, envs, timeout, None)
+}
+
+/// [`run_git`], writing `input` to git's stdin (and closing it) instead of
+/// leaving stdin closed - for `update-index --index-info`.
+fn run_git_input(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)], timeout: Duration, input: Option<Vec<u8>>) -> Result<Vec<u8>> {
     let start = Instant::now();
     let mut child = git_command("git")
         .arg("-C")
@@ -840,11 +963,19 @@ pub fn run_git(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)], ti
         .arg("--no-pager")
         .args(args)
         .envs(envs.iter().copied())
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| spawn_error(e, args))?;
+    // Written from its own thread, so a git that answers while it reads can't
+    // fill the stdout pipe and stall both sides.
+    let stdin_writer = input.and_then(|bytes| {
+        let mut pipe = child.stdin.take()?;
+        Some(std::thread::spawn(move || {
+            let _ = pipe.write_all(&bytes);
+        }))
+    });
 
     let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
@@ -876,6 +1007,9 @@ pub fn run_git(root: &Path, args: &[&str], envs: &[(&str, &std::ffi::OsStr)], ti
 
     let stdout = stdout_reader.join().unwrap_or_default();
     let stderr = stderr_reader.join().unwrap_or_default();
+    if let Some(writer) = stdin_writer {
+        let _ = writer.join();
+    }
     let elapsed = start.elapsed();
 
     if !status.success() {
@@ -897,5 +1031,88 @@ mod git_missing_tests {
         assert!(GIT_MISSING.contains("git-scm.com"));
         let e = spawn_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied), &["archive"]);
         assert!(format!("{e:#}").starts_with("spawning git [\"archive\"]"), "{e:#}");
+    }
+}
+
+#[cfg(test)]
+mod new_file_hash_tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git").args(["-c", "user.name=T", "-c", "user.email=t@e.com"]).args(args).current_dir(dir.path()).status().unwrap();
+            assert!(ok.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    /// Writes `text` to `path` with a modified time well outside the racy window.
+    fn write_at(path: &Path, text: &str, modified: SystemTime) {
+        fs::write(path, text).unwrap();
+        fs::File::options().write(true).open(path).unwrap().set_modified(modified).unwrap();
+    }
+
+    #[test]
+    fn an_unchanged_new_file_is_not_read_again_on_the_next_poll() {
+        let dir = repo();
+        let root = dir.path();
+        let file = root.join("notes.txt");
+        let old = SystemTime::now() - Duration::from_secs(600);
+        write_at(&file, "aaaa\n", old);
+        let first = snapshot_commit(root).unwrap();
+        assert_ne!(first, head_commit(root).unwrap(), "the new file is in the snapshot");
+
+        // Same size, same modified time, different bytes: only a re-read would
+        // notice, and the poll must not re-read it.
+        write_at(&file, "bbbb\n", old);
+        assert_eq!(snapshot_commit(root).unwrap(), first, "taken from what was remembered, not hashed again");
+
+        // A real change (new size) is hashed.
+        write_at(&file, "bbbbbb\n", old);
+        let changed = snapshot_commit(root).unwrap();
+        assert_ne!(changed, first);
+        let shown = Command::new("git").args(["show", &format!("{changed}:notes.txt")]).current_dir(root).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&shown.stdout), "bbbbbb\n");
+    }
+
+    #[test]
+    fn a_remembered_blob_that_is_gone_is_hashed_again() {
+        let dir = repo();
+        let root = dir.path();
+        let file = root.join("data.txt");
+        let old = SystemTime::now() - Duration::from_secs(600);
+        write_at(&file, "real content\n", old);
+        HASHED.lock().unwrap().get_or_insert_with(HashMap::new).insert(
+            root.join("data.txt"),
+            Hashed { size: 13, modified: old, mode: "100644".into(), blob: "0123456789012345678901234567890123456789".into() },
+        );
+        let commit = snapshot_commit(root).unwrap();
+        let shown = Command::new("git").args(["show", &format!("{commit}:data.txt")]).current_dir(root).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&shown.stdout), "real content\n");
+    }
+
+    #[test]
+    fn a_new_file_over_25_mb_is_listed_but_never_included() {
+        let dir = repo();
+        let root = dir.path();
+        let big = fs::File::create(root.join("dump.bin")).unwrap();
+        big.set_len(NEW_FILE_MAX_BYTES + 1).unwrap();
+        drop(big);
+        fs::write(root.join("small.txt"), "small\n").unwrap();
+        let everything = NewFileSelection { excluded: vec![], included: vec!["dump.bin".into()] };
+        let files = new_files(root, &everything).unwrap();
+        let big = files.iter().find(|f| f.path == "dump.bin").unwrap();
+        assert!(big.too_large && !big.included, "even when ticked in");
+        assert!(files.iter().any(|f| f.path == "small.txt" && f.included && !f.too_large));
+        let commit = snapshot_commit_with(root, &everything).unwrap();
+        let listed = Command::new("git").args(["ls-tree", "--name-only", &commit]).current_dir(root).output().unwrap();
+        let names = String::from_utf8_lossy(&listed.stdout);
+        assert!(names.contains("small.txt") && !names.contains("dump.bin"), "{names}");
     }
 }
