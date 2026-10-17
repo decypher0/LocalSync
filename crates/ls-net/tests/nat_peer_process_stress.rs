@@ -57,6 +57,16 @@ fn deterministic_payload_sha256(n: usize) -> String {
 
 fn nat_peer_bin() -> PathBuf {
     // crates/ls-net -> workspace root is two levels up.
+    // Next to this test binary (<target>/<profile>/deps/) first, so a
+    // CARGO_TARGET_DIR outside the workspace works too.
+    if let Some(profile_dir) = std::env::current_exe().ok().and_then(|exe| exe.parent()?.parent().map(Path::to_path_buf)) {
+        for name in ["nat_peer", "nat_peer.exe"] {
+            let candidate = profile_dir.join("examples").join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
