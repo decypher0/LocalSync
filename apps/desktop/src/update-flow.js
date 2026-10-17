@@ -11,6 +11,9 @@
 // (test-update-flow.js); the rest only draws it and calls
 // apply_received_update / rollback_received_update.
 const UpdateFlow = (() => {
+  // Under "Replace with sender's database": the receiver's data doesn't come back.
+  const REPLACE_WARNING = "This can't be undone, even by rolling back.";
+
   "use strict";
 
   const filesChanged = (diff) => (diff && diff.entries ? diff.entries.length : 0);
@@ -68,7 +71,7 @@ const UpdateFlow = (() => {
     };
   }
 
-  return { filesChanged, headline, dbChoice, logTail, splitError, panelModel };
+  return { filesChanged, headline, dbChoice, logTail, splitError, panelModel, REPLACE_WARNING };
 })();
 
 if (typeof module !== "undefined" && module.exports) module.exports = UpdateFlow;
@@ -202,7 +205,7 @@ if (typeof window !== "undefined" && window.__TAURI__) {
           m.askDb
             ? `<fieldset class="lsv-field" id="up-db"><legend class="lsv-small">The sender's database changed.</legend>
                 <label class="lsv-small"><input type="radio" name="up-db" value="keep" ${m.choice === "keep" ? "checked" : ""}> Keep my data</label>
-                <label class="lsv-small"><input type="radio" name="up-db" value="replace" ${m.choice === "replace" ? "checked" : ""}> Replace with sender's database (my local data is lost)</label>
+                <label class="lsv-small"><input type="radio" name="up-db" value="replace" ${m.choice === "replace" ? "checked" : ""}> Replace with sender's database (my local data is lost). ${escapeHtml(UpdateFlow.REPLACE_WARNING)}</label>
               </fieldset>`
             : ""
         }

@@ -83,3 +83,9 @@ test("busy disables everything, and errors split on their first non-empty line",
   assert.deepEqual(UpdateFlow.splitError("\n first \nrest"), { message: "first", details: "rest" });
   assert.deepEqual(UpdateFlow.splitError(""), { message: "", details: "" });
 });
+
+test("the Replace choice says it can't be undone, even by rolling back", () => {
+  assert.equal(UpdateFlow.REPLACE_WARNING, "This can't be undone, even by rolling back.");
+  const src = require("fs").readFileSync(require("path").join(__dirname, "update-flow.js"), "utf8");
+  assert.match(src, /Replace with sender's database \(my local data is lost\)\. \$\{escapeHtml\(UpdateFlow\.REPLACE_WARNING\)\}/, "shown on the Replace option");
+});
