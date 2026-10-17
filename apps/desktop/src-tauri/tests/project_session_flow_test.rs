@@ -5,8 +5,9 @@
 //! - every transfer is **ephemeral** - nothing is left registered as an open
 //!   connection afterwards;
 //! - each device has its **own marker**: a push to device A diffs against
-//!   what *A* last received, not against a shared baseline, and moves only
-//!   A's marker;
+//!   what *A* last received (once A confirms it still holds that - see
+//!   `push_base_check_test.rs` for when it doesn't), not against a shared
+//!   baseline, and moves only A's marker;
 //! - a device that is already current is not sent to at all;
 //! - saving is **opt-in**: a discarded, never-saved session leaves nothing
 //!   behind, a saved one comes back whole.
@@ -95,6 +96,40 @@ async fn send_to_receiver(
     (sent, info)
 }
 
+/// A push to a receiver that answers the push's BaseCheck with `held` (the
+/// commits it holds for this project). Returns what was sent, the snapshot it
+/// got, and what the BaseCheck asked (project id, sender key).
+async fn push_to_receiver_holding(
+    sender: &tauri::AppHandle<tauri::test::MockRuntime>,
+    url: &str,
+    room: &str,
+    mut request: SendRequest,
+    held: Vec<String>,
+) -> (session_commands::SendResult, ls_snapshot::Snapshot, Option<(String, String)>) {
+    request.room_code = room.to_string();
+    request.signaling_url = url.to_string();
+    let (r_room, r_url) = (room.to_string(), url.to_string());
+    let receiver = tokio::spawn(async move {
+        let conn = ls_net::connect_as_receiver(&r_url, &r_room).await.expect("receiver connects");
+        let mut asked = None;
+        let bytes = ls_net::receive_payload_answering(&conn, |_, _| {}, |msg| match msg {
+            ls_net::ControlMessage::BaseCheck { project_id, sender_pubkey_hex } => {
+                asked = Some((project_id, sender_pubkey_hex));
+                Some(ls_net::ControlMessage::BaseCheckResponse { commits: Some(held.clone()) })
+            }
+            _ => None,
+        })
+        .await
+        .expect("receive");
+        (serde_json::from_slice::<ls_snapshot::Snapshot>(&bytes).unwrap(), asked)
+    });
+    let sent = session_commands::send_project_session(sender.clone(), sender.state::<AppState>(), request)
+        .await
+        .expect("send_project_session should succeed");
+    let (snapshot, asked) = receiver.await.unwrap();
+    (sent, snapshot, asked)
+}
+
 fn request(session_id: &str, device_key: Option<&str>, name: &str, since_last: bool) -> SendRequest {
     SendRequest {
         session_id: session_id.to_string(),
@@ -168,16 +203,24 @@ async fn a_session_is_created_once_reused_across_devices_and_retries_and_tracks_
     assert!(refreshed.devices.iter().all(|d| !d.up_to_date), "both devices are now behind");
 
     // ---- push to A: diffed against A's own marker (commit1), only A moves ----
-    let (pushed_a, info_push_a) =
-        send_to_receiver(&sender, &url, "roomA2", request(&sid, Some(&key_a), "Alice", true)).await;
+    let (pushed_a, snap_push_a, asked) =
+        push_to_receiver_holding(&sender, &url, "roomA2", request(&sid, Some(&key_a), "Alice", true), vec![commit1.clone()]).await;
     assert!(!pushed_a.up_to_date);
-    assert_eq!(info_push_a.manifest.git_commit, commit2);
+    assert_eq!(pushed_a.full_reason, None, "A holds commit1, so the diff is of use to it");
+    assert_eq!(snap_push_a.manifest.git_commit, commit2);
     assert_eq!(
-        info_push_a.manifest.git_parent_commit.as_deref(),
+        snap_push_a.manifest.git_parent_commit.as_deref(),
         Some(commit1.as_str()),
         "a push must diff against what that device last received"
     );
-    assert!(info_push_a.diff.entries.iter().any(|e| e.path.ends_with("README.md")), "the reviewed diff shows the change");
+    assert_eq!(snap_push_a.manifest.project_id.as_deref(), Some(sid.as_str()), "the manifest names the session");
+    let sender_key: String = snap_push_a.manifest.sender_pubkey.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(asked, Some((sid.clone(), sender_key)), "the push first asked which version A holds");
+    let verified = ls_security::verify(snap_push_a, &[]).unwrap();
+    assert!(
+        ls_security::diff_summary(&verified).unwrap().entries.iter().any(|e| e.path.ends_with("README.md")),
+        "the reviewed diff shows the change"
+    );
     let marker = |v: &session_commands::ProjectSessionView, k: &str| {
         v.devices.iter().find(|d| d.key == k).unwrap().marker.as_ref().unwrap().commits[0].commit.clone()
     };
@@ -186,11 +229,11 @@ async fn a_session_is_created_once_reused_across_devices_and_retries_and_tracks_
 
     // ---- B is still behind and gets its own diff point (commit1), not A's ----
     commit_change(&project, "v3\n");
-    let (_pushed_b, info_push_b) =
-        send_to_receiver(&sender, &url, "roomB2", request(&sid, Some(&key_b), "Bob", true)).await;
-    let commit3 = info_push_b.manifest.git_commit.clone();
+    let (_pushed_b, snap_push_b, _) =
+        push_to_receiver_holding(&sender, &url, "roomB2", request(&sid, Some(&key_b), "Bob", true), vec![commit1.clone()]).await;
+    let commit3 = snap_push_b.manifest.git_commit.clone();
     assert_ne!(commit3, commit2);
-    assert_eq!(info_push_b.manifest.git_parent_commit.as_deref(), Some(commit1.as_str()));
+    assert_eq!(snap_push_b.manifest.git_parent_commit.as_deref(), Some(commit1.as_str()));
 
     // ---- a device that is already current is not connected to at all ----
     // (the relay is deliberately unreachable: if this tried to connect it
