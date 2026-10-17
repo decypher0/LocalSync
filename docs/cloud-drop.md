@@ -43,8 +43,9 @@ as the project hasn't changed).
 
 The same package a P2P send carries - the session's prepared snapshot:
 
-- the project as committed in git, plus uncommitted edits to tracked files
-  (untracked files are left out unless you `git add` them);
+- the project as committed in git, plus uncommitted edits and new files
+  that `.gitignore` doesn't exclude (secret-looking new files only if ticked -
+  see [what-can-i-send.md](what-can-i-send.md));
 - the run instructions LocalSync's Setup made for a project without its own
   `docker-compose.yml` (a generated compose file and Dockerfile), or the
   project's own `docker-compose.yml`;
@@ -59,7 +60,8 @@ sending (delete once downloaded, after 24 hours, or at a set time).
 A device reached by Cloud drop is updated the same way it was reached: Push
 update uploads the new version (the whole project, not just what changed),
 shows a new code to share, and the sender approves the receiver's access
-again.
+again. The session page's **Changes since the last send** works the same way
+for a Cloud drop device.
 
 ## When something goes wrong
 
