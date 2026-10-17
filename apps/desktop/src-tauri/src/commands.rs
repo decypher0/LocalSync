@@ -974,9 +974,10 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot)?;
     log::info!("receive_snapshot: done, id={}", info.snapshot_id);
-    // An armed session's next push landed - let the frontend route it to the
-    // existing tab. A fresh session needs no extra signal: the caller's own
-    // return value already carries `info` for that case.
+    // An update to a session this device already has landed - let the
+    // frontend route it to the existing tab. A fresh session needs no extra
+    // signal: the caller's own return value already carries `info` for that
+    // case.
     if let crate::receiver_session_commands::ReceivedSessionOutcome::Updated(session_id) = &outcome {
         let _ = app.emit(
             "session-update-available",
@@ -1091,8 +1092,8 @@ pub fn finalize_received_snapshot(
 
 /// Everything `finalize_received_snapshot` does, plus filing the push under
 /// the receiver-session model (`crate::receiver_session_commands`) and
-/// reporting whether that created a fresh `ReceivedSession` or updated an
-/// armed, already-existing one.
+/// reporting whether that created a fresh `ReceivedSession` or updated the
+/// already-existing one of the same project from the same sender.
 ///
 /// Split out as its own function - rather than changing
 /// `finalize_received_snapshot`'s own signature or `IncomingSnapshotInfo`'s
@@ -1134,9 +1135,9 @@ pub fn finalize_received_snapshot_tracked(
     };
 
     // Files this push under the receiver-session model (creates a fresh
-    // ReceivedSession, or updates one that was explicitly armed for it) -
-    // never affects the diff-review-then-Run gate below, only which session
-    // the eventual Run attaches to.
+    // ReceivedSession, or updates the one this device already has of the
+    // project) - never affects the diff-review-then-Run gate below, only
+    // which session the eventual Run attaches to.
     let outcome = crate::receiver_session_commands::track_received_snapshot(state, &manifest, &snapshot_id, &sender_pubkey_hex)?;
 
     state
