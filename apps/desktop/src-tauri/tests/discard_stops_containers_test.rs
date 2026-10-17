@@ -77,7 +77,7 @@ fn app() -> Handle {
     app.handle().clone()
 }
 
-/// Sends `sid` and receives it (a fresh receive, or an armed update).
+/// Sends `sid` and receives it (a fresh receive, or an update to it).
 async fn push(sender: &Handle, receiver: &Handle, url: &str, room: &str, sid: &str) -> IncomingSnapshotInfo {
     let request = SendRequest {
         session_id: sid.to_string(),
@@ -150,11 +150,10 @@ async fn removing_a_running_session_never_leaves_its_containers_running() {
     let rid = first.received_session_id.clone();
     let (title2, old_commit) = (first.manifest.project_name.clone(), first.manifest.git_commit.clone());
     run(&receiver, &rid, work.path()).await;
-    receiver_session_commands::arm_received_session_for_update(receiver.state::<AppState>(), rid.clone()).unwrap();
     std::fs::write(project2.join("README.md"), "v2\n").unwrap();
     git(&project2, &["commit", "-qam", "two"]);
     let update = push(&sender, &receiver, &url, "closeroom2", &sid2).await;
-    assert_eq!(update.received_session_id, rid, "the update landed on the armed session");
+    assert_eq!(update.received_session_id, rid, "the update landed on the session it updates");
     assert!(ls_containers::project_running(&title2, &old_commit).unwrap(), "precondition: the old version still runs");
     session_list_commands::close_session(receiver.state::<AppState>(), rid.clone()).await.expect("close");
     assert!(

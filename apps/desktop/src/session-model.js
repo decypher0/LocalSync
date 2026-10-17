@@ -27,8 +27,9 @@ function applyView(session, view) {
 }
 
 // A RECEIVE session mirrors the backend's `ReceivedSessionView`
-// (id, title, sender_pubkey_hex, snapshot_id, git_commit, work_dir,
-// created_at, last_received_at, saved, armed, running). Unlike a send, it
+// (id, title, sender_pubkey_hex, sender_name, snapshot_id, git_commit,
+// databases, work_dir, created_at, last_received_at, last_run_at,
+// last_stopped_at, last_exit, saved, running, update). Unlike a send, it
 // starts life from a plain receive (no backend-owned view at all - see
 // newSession in app.js) and only ever meets this shape once it's been saved
 // and is being reopened, or a fresh receive is later saved. These two
@@ -44,7 +45,14 @@ function pickReceivedView(view) {
     workDir: view.work_dir,
     lastReceivedAt: view.last_received_at,
     saved: view.saved,
-    armed: view.armed,
+    // What the stopped page shows without a live receive to read it from.
+    senderName: view.sender_name || "",
+    databases: view.databases || [],
+    lastRunAt: view.last_run_at || "",
+    lastStoppedAt: view.last_stopped_at || "",
+    lastExit: view.last_exit || "",
+    // An update waiting to be applied (update-flow.js), or null.
+    update: view.update || null,
   };
 }
 
@@ -52,7 +60,7 @@ function pickReceivedView(view) {
  * Builds a session tab from a *reopened* saved receive session. This is
  * "resume", not "review again" - the diff was already accepted before, so
  * there is no manifest/diff to hold, only what's needed to show the resume
- * panel and let Run/Stop and the arm toggle work. `reportedRunning` is kept
+ * panel and let Run/Stop work. `reportedRunning` is kept
  * separate from `status` because the view has no runnable/stoppable id for
  * an already-running session (see app.js's own note on this gap) - it only
  * ever drives a hint in the UI, never which panel renders.
@@ -79,9 +87,6 @@ function receivedSessionFromView(view) {
     runInProgress: false,
     runLogText: "",
     runErrorText: "",
-    // A saved session was, by definition, accepted and run at least once -
-    // otherwise there'd have been nothing worth saving.
-    hasRunBefore: true,
     rejected: false,
     reportedRunning: view.running,
     ...pickReceivedView(view),

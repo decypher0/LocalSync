@@ -33,7 +33,7 @@ LocalSync lets a developer package their current local project — source, conta
   - **Cloud drop** — share via your own Google Drive; the sender stays in full control of who's been granted access, using Drive's own real sharing permissions, not a public link.
 - **A guided database wizard**, not a black box. Auto-detects connection details from your project's own config (e.g. Spring Boot's `application.yml`), lets you browse the real live schema before deciding what to include, supports MySQL/PostgreSQL/MongoDB, and handles projects with multiple databases across multiple folders.
 - **Fast on repeat sends.** Dependency layers, container images, and database dumps are all cached — a second send of a mostly-unchanged project is dramatically faster than the first.
-- **Multi-person sessions.** A sender can have several people connected at once, push an update to one specific person, and receivers can request a fresh copy without waiting to be pushed to.
+- **Multi-person sessions.** A sender can have several people connected at once, push an update to one specific person; it lands on the session that person already has, for review before it applies.
 - **Magic links.** Share a real `https://` link — it opens straight into the app if it's installed, or walks a new teammate through installing it if it's not.
 - **A real update path and modern UI** — auto-update, light/dark themes, and a guided step-by-step flow for sharing and receiving.
 

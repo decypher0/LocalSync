@@ -101,11 +101,81 @@ pub struct ProjectSession {
     /// RFC3339.
     pub created_at: String,
     pub devices: Vec<DeviceRecord>,
+    /// New (untracked) files the user chose not to send, as
+    /// `<folder path>/<path relative to it>`: the folder's path exactly as in
+    /// `folders`, then `/`, then git's `/`-separated path inside it.
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
+    /// Secret-looking new files (`ls_snapshot::looks_secret`) the user chose
+    /// to send anyway, same format. Any other new file is sent unless it is
+    /// in `excluded_paths`.
+    #[serde(default)]
+    pub included_paths: Vec<String>,
+}
+
+/// The receiver didn't hold what a push would diff against (or no longer has
+/// the project): the full snapshot went instead.
+pub const FULL_DIFFERENT_VERSION: &str = "the receiver had a different version";
+/// The receiver didn't say which version it holds (an older LocalSync, or no
+/// reply in time): the full snapshot went instead.
+pub const FULL_NO_ANSWER: &str = "the receiver didn't confirm which version it has";
+/// What the device last received is gone from the project's git history
+/// (pruned, or the history was rewritten): the full snapshot went instead.
+pub const FULL_BASE_GONE: &str = "the version last sent is no longer in git";
+
+/// What a push that diffs against a device's marker sends, once the receiver
+/// has answered which version it holds (`ls_net::ControlMessage::BaseCheck`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PushBase {
+    /// The receiver holds every commit the diff is against.
+    Diff,
+    /// Send the full snapshot instead, for this reason (shown to the sender).
+    Full(&'static str),
+}
+
+/// Decides [`PushBase`]. `parents` is, per folder, the commit the diff is
+/// against (`None` for a folder that goes in full anyway). `answer` is the
+/// receiver's reply: `None` for no reply, `Some(None)` for "no session for
+/// this project", `Some(Some(commits))` for the per-folder commits it holds.
+pub fn push_base(parents: &[Option<String>], answer: Option<Option<&[String]>>) -> PushBase {
+    let Some(held) = answer else { return PushBase::Full(FULL_NO_ANSWER) };
+    let Some(held) = held else { return PushBase::Full(FULL_DIFFERENT_VERSION) };
+    let holds_every_parent = parents
+        .iter()
+        .enumerate()
+        .all(|(i, parent)| parent.as_ref().map_or(true, |p| held.get(i) == Some(p)));
+    if holds_every_parent {
+        PushBase::Diff
+    } else {
+        PushBase::Full(FULL_DIFFERENT_VERSION)
+    }
 }
 
 impl ProjectSession {
     pub fn new(id: String, title: String, folders: Vec<FolderPlanDto>, created_at: String) -> Self {
-        Self { id, title, folders, created_at, devices: Vec::new() }
+        Self { id, title, folders, created_at, devices: Vec::new(), excluded_paths: Vec::new(), included_paths: Vec::new() }
+    }
+
+    /// Which of `folder`'s new files its snapshot includes.
+    pub fn new_file_selection(&self, folder: &str) -> ls_snapshot::NewFileSelection {
+        let prefix = format!("{folder}/");
+        let inside = |paths: &Vec<String>| -> Vec<String> {
+            paths.iter().filter_map(|p| p.strip_prefix(prefix.as_str())).map(str::to_string).collect()
+        };
+        ls_snapshot::NewFileSelection { excluded: inside(&self.excluded_paths), included: inside(&self.included_paths) }
+    }
+
+    /// Ticks (`include`) or unticks one of `folder`'s new files (`path`
+    /// relative to it). The last choice for a file is the one that counts.
+    pub fn set_new_file_included(&mut self, folder: &str, path: &str, include: bool) {
+        let key = format!("{folder}/{path}");
+        self.excluded_paths.retain(|p| *p != key);
+        self.included_paths.retain(|p| *p != key);
+        if include {
+            self.included_paths.push(key);
+        } else {
+            self.excluded_paths.push(key);
+        }
     }
 
     pub fn device(&self, key: &str) -> Option<&DeviceRecord> {
@@ -290,6 +360,58 @@ mod tests {
     fn a_record_saved_before_transfer_stats_still_loads() {
         let json = r#"{"key":"k","name":"n","marker":null,"history":[]}"#;
         assert_eq!(serde_json::from_str::<DeviceRecord>(json).unwrap().last_transfer, None);
+    }
+
+    #[test]
+    fn new_file_choices_are_kept_per_folder_and_the_last_one_counts() {
+        let mut s = session();
+        assert_eq!(s.new_file_selection("/a"), ls_snapshot::NewFileSelection::default());
+        s.set_new_file_included("/a", "notes.txt", false);
+        s.set_new_file_included("/a", ".env", true);
+        s.set_new_file_included("/b", "notes.txt", true);
+        let a = s.new_file_selection("/a");
+        assert_eq!(a.excluded, vec!["notes.txt".to_string()]);
+        assert_eq!(a.included, vec![".env".to_string()]);
+        assert!(!a.includes("notes.txt"), "unticked");
+        assert!(a.includes(".env"), "a secret-looking file the user ticked");
+        assert!(!a.includes("id_rsa"), "secret-looking files start unticked");
+        assert!(a.includes("src/new.rs"), "every other new file is sent");
+        assert!(s.new_file_selection("/b").includes("notes.txt"), "another folder's choice is its own");
+
+        s.set_new_file_included("/a", "notes.txt", true);
+        s.set_new_file_included("/a", ".env", false);
+        let a = s.new_file_selection("/a");
+        assert!(a.includes("notes.txt") && !a.includes(".env"));
+        assert_eq!(s.excluded_paths, vec!["/a/.env".to_string()], "one entry per file, not a growing log");
+    }
+
+    #[test]
+    fn a_session_saved_before_new_file_choices_still_loads() {
+        let mut v = serde_json::to_value(session()).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("excluded_paths");
+        obj.remove("included_paths");
+        let loaded: ProjectSession = serde_json::from_value(v).unwrap();
+        assert!(loaded.excluded_paths.is_empty() && loaded.included_paths.is_empty());
+    }
+
+    #[test]
+    fn a_push_diffs_only_when_the_receiver_holds_what_it_is_against() {
+        fn ids(c: &[&str]) -> Vec<String> {
+            c.iter().map(|s| s.to_string()).collect()
+        }
+        fn check(parents: &[Option<String>], held: Option<Vec<String>>) -> PushBase {
+            push_base(parents, Some(held.as_deref()))
+        }
+        let parents = vec![Some("a1".to_string()), None];
+        assert_eq!(check(&parents, Some(ids(&["a1", "b9"]))), PushBase::Diff, "a folder sent in full anyway needs no match");
+        assert_eq!(check(&parents, Some(ids(&["a0", "b1"]))), PushBase::Full(FULL_DIFFERENT_VERSION));
+        assert_eq!(check(&parents, Some(ids(&[]))), PushBase::Full(FULL_DIFFERENT_VERSION));
+        assert_eq!(check(&parents, None), PushBase::Full(FULL_DIFFERENT_VERSION), "the receiver's session is gone");
+        assert_eq!(push_base(&parents, None), PushBase::Full(FULL_NO_ANSWER), "an older receiver never answers");
+        let both = vec![Some("a1".to_string()), Some("b1".to_string())];
+        assert_eq!(check(&both, Some(ids(&["a1", "b1"]))), PushBase::Diff);
+        assert_eq!(check(&both, Some(ids(&["a1"]))), PushBase::Full(FULL_DIFFERENT_VERSION));
     }
 
     #[test]

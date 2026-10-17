@@ -75,6 +75,7 @@ mod tests {
             folders: vec![],
             database_dumps: vec![],
             externals: Vec::new(),
+            project_id: None,
         };
 
         let manifest_digest = Sha256::digest(serde_json::to_vec(&manifest).unwrap());
@@ -127,5 +128,42 @@ mod tests {
         let (mut snapshot, _key) = build_signed_snapshot(b"payload bytes".to_vec());
         snapshot.manifest.project_name = "evil".into();
         assert!(verify(snapshot, &[]).is_err());
+    }
+
+    /// The signature covers the manifest as re-serialized here, so a manifest
+    /// from a sender that predates `externals`/`project_id` (no such keys in
+    /// its JSON) must still verify after being read into today's struct.
+    #[test]
+    fn a_manifest_from_before_externals_and_project_id_still_verifies() {
+        let (snapshot, key) = build_signed_snapshot(b"payload bytes".to_vec());
+        // What an older sender wrote: the same fields, minus the two new keys.
+        let old_bytes = serde_json::to_vec(&snapshot.manifest).unwrap();
+        let keys: serde_json::Value = serde_json::from_slice(&old_bytes).unwrap();
+        let obj = keys.as_object().unwrap();
+        assert!(!obj.contains_key("externals") && !obj.contains_key("project_id"), "empty ones aren't written: {obj:?}");
+
+        let mut message = [0u8; 64];
+        message[..32].copy_from_slice(&Sha256::digest(&old_bytes));
+        message[32..].copy_from_slice(&Sha256::digest(&snapshot.payload));
+        let manifest: Manifest = serde_json::from_slice(&old_bytes).unwrap();
+        let old = Snapshot { manifest, signature: key.sign(&message).to_bytes(), payload: snapshot.payload.clone() };
+        assert!(verify(old, &[]).is_ok());
+
+        // And one that carries external files signs and verifies as usual.
+        let (mut with, key) = build_signed_snapshot(b"payload bytes".to_vec());
+        with.manifest.externals.push(ls_snapshot::ExternalFile {
+            id: "t1".into(),
+            key: "tenants.file".into(),
+            config_file: "app.properties".into(),
+            original_value: "C:/x/tenants.xml".into(),
+            kind: ls_snapshot::ExternalKind::File,
+            bundle_path: "external/t1/tenants.xml".into(),
+        });
+        let mut message = [0u8; 64];
+        message[..32].copy_from_slice(&Sha256::digest(serde_json::to_vec(&with.manifest).unwrap()));
+        message[32..].copy_from_slice(&Sha256::digest(&with.payload));
+        with.signature = key.sign(&message).to_bytes();
+        let round_tripped: Manifest = serde_json::from_slice(&serde_json::to_vec(&with.manifest).unwrap()).unwrap();
+        assert!(verify(Snapshot { manifest: round_tripped, ..with }, &[]).is_ok());
     }
 }

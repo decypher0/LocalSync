@@ -135,6 +135,7 @@ mod tests {
             folders: vec![],
             database_dumps: vec![],
             externals: Vec::new(),
+            project_id: None,
         };
         let manifest_digest = Sha256::digest(serde_json::to_vec(&manifest).unwrap());
         let payload_digest = Sha256::digest(&payload);
