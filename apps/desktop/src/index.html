@@ -638,8 +638,7 @@
 
       <!-- ---- A reopened saved receive session: "resume", not "review
            again" - the diff was already accepted before it was ever saved,
-           so there's nothing to re-review, only Run/Stop and the arm
-           toggle. ---- -->
+           so there's nothing to re-review, only Run/Stop. ---- -->
       <div id="resume-panel" class="hidden">
         <h2>Resume this project</h2>
         <p class="hint">
@@ -686,31 +685,6 @@
         <ul id="s-ports" class="ports-list"></ul>
         <button id="stop-btn" class="ghost-btn" type="button"><svg class="icon"><use href="#icon-stop-circle"></use></svg> Stop</button>
         <p id="stop-error" class="error"></p>
-      </div>
-
-      <!-- ---- "Ready for update": arms this session so a future push from
-           the sender, over discovery, lands right back on this same tab for
-           review instead of creating a new one. Gated on the session having
-           actually run at least once - see renderReceiveArmControls. ---- -->
-      <div id="receive-arm-wrap" class="room-code-wrap hidden">
-        <span class="inline-row receivers-header">
-          <label class="radio-label">
-            <input type="checkbox" id="receive-arm-toggle" />
-            Ready for update
-          </label>
-          <span id="receive-arm-badge" class="badge-connected hidden">
-            <svg class="icon"><use href="#icon-circle-check"></use></svg> Armed
-          </span>
-        </span>
-        <p class="hint">
-          When armed, a push the sender sends to this same device lands right back on this
-          session for review — no new tab, no re-pasting a code.
-          <strong>This only works if this device is discoverable and the sender reaches you via
-          discovery</strong> — a session received from a one-off pasted code has no persistent
-          address for a future push to find automatically.
-        </p>
-        <p id="receive-arm-discoverable-hint" class="hint-inline"></p>
-        <p id="receive-arm-error" class="error"></p>
       </div>
 
       <!-- ---- Save/discard this receive session - same idea as the send
@@ -1306,6 +1280,7 @@
   <script src="app.js"></script>
   <script src="changes-panel.js"></script>
   <script src="views.js"></script>
+  <script src="update-flow.js"></script>
   <script src="storage-view.js"></script>
 </body>
 </html>
