@@ -237,8 +237,8 @@ async fn run_tests<R: tauri::Runtime>(app: AppHandle<R>, folders: Vec<(FolderPla
             Ok(r) if r.ok => remember_pass(key),
             Ok(r) => {
                 out.ok = false;
+                out.output_tail = failure_tail(r.error.as_deref(), &r.output_tail);
                 out.error = r.error;
-                out.output_tail = r.output_tail;
                 break;
             }
             Err(e) => {
@@ -250,6 +250,19 @@ async fn run_tests<R: tauri::Runtime>(app: AppHandle<R>, folders: Vec<(FolderPla
     }
     out.secs = started.elapsed().as_secs();
     out
+}
+
+/// What the card shows under a failed test run. Only the error's first line
+/// becomes the problem; the rest is the app's own log when the crash was
+/// caught while the containers were starting (the run's output is then
+/// podman-compose's), so it goes first.
+fn failure_tail(error: Option<&str>, output: &str) -> String {
+    let rest = error.and_then(|e| e.split_once('\n')).map(|(_, rest)| rest.trim()).unwrap_or_default();
+    match (rest.is_empty(), output.trim().is_empty()) {
+        (true, _) => output.to_string(),
+        (false, true) => rest.to_string(),
+        (false, false) => format!("{rest}\n\n{output}"),
+    }
 }
 
 fn folder_name(folder: &FolderPlanDto) -> String {
@@ -528,6 +541,15 @@ mod tests {
         );
         assert!(notes.iter().all(|n| !n.contains("hunter2")));
         assert!(new_secrets("app.properties", new, new).is_empty(), "already there last time");
+    }
+
+    #[test]
+    fn a_failed_runs_app_log_reaches_the_card_whichever_way_the_crash_was_caught() {
+        let caught_starting = "The `app` service stopped (exit code 1) right after starting.\n\nIts log:\nSyntaxError: invalid syntax";
+        let tail = failure_tail(Some(caught_starting), "podman-compose up ...");
+        assert!(tail.starts_with("Its log:\nSyntaxError") && tail.ends_with("podman-compose up ..."), "{tail}");
+        assert_eq!(failure_tail(Some("The app stopped with exit code 1 right after starting."), "SyntaxError"), "SyntaxError");
+        assert_eq!(failure_tail(None, "out"), "out");
     }
 
     #[test]
