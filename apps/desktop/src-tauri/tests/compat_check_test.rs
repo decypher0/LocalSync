@@ -63,7 +63,7 @@ fn project(name: &str, port: u16) -> (tempfile::TempDir, PathBuf, ProjectSession
     session.record_send(
         "dev-a",
         "Alice",
-        DeviceMarker { snapshot_id: format!("{name}@{commit}"), commits: vec![FolderCommit { path, commit, dump: None, tree }], sent_at: "2026-01-01T00:00:00Z".into() },
+        DeviceMarker { snapshot_id: format!("{name}@{commit}"), commits: vec![FolderCommit { path, commit, dump: None, tree, externals: Default::default() }], sent_at: "2026-01-01T00:00:00Z".into() },
     );
     (base, dir, session)
 }

@@ -36,13 +36,20 @@ pub struct FolderCommit {
     /// this, and is not a change to push. `None` on markers from before this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<String>,
+    /// Content fingerprint of each file from outside the project chosen to
+    /// travel with this folder (`externals::externals_fingerprint`), by
+    /// external id: editing one is a change to push.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub externals: std::collections::BTreeMap<String, String>,
 }
 
 impl FolderCommit {
-    /// Same folder with the same content (same commit, or same tree) and dump.
+    /// Same folder with the same content (same commit, or same tree), dump
+    /// and external files.
     pub fn same_content(&self, other: &FolderCommit) -> bool {
         self.path == other.path
             && self.dump == other.dump
+            && self.externals == other.externals
             && (self.commit == other.commit || (self.tree.is_some() && self.tree == other.tree))
     }
 }
@@ -257,7 +264,7 @@ mod tests {
     }
 
     fn commits(pairs: &[(&str, &str)]) -> Vec<FolderCommit> {
-        pairs.iter().map(|(p, c)| FolderCommit { path: p.to_string(), commit: c.to_string(), dump: None, tree: None }).collect()
+        pairs.iter().map(|(p, c)| FolderCommit { path: p.to_string(), commit: c.to_string(), dump: None, tree: None, externals: Default::default() }).collect()
     }
 
     fn marker(id: &str, pairs: &[(&str, &str)]) -> DeviceMarker {
@@ -309,6 +316,7 @@ mod tests {
             commit: commit.into(),
             dump: dump.map(Into::into),
             tree: tree.map(Into::into),
+            externals: Default::default(),
         };
         let sent = DeviceMarker { snapshot_id: "p@wt".into(), commits: vec![fc("wt1", Some("t1"), Some("10:1"))], sent_at: "2026-01-01T00:00:00Z".into() };
         s.record_send("dev-a", "Alice", sent);
@@ -316,6 +324,26 @@ mod tests {
         assert!(!s.is_up_to_date("dev-a", &[fc("c3", Some("t2"), Some("10:1"))]), "new content");
         assert!(!s.is_up_to_date("dev-a", &[fc("wt1", Some("t1"), Some("11:2"))]), "a re-exported dump");
         assert!(!s.is_up_to_date("dev-a", &[fc("c2", None, Some("10:1"))]), "unknown tree: only the commit can say");
+    }
+
+    #[test]
+    fn an_edited_file_from_outside_the_project_is_a_change_to_push() {
+        let mut s = session();
+        let fc = |ext: &[(&str, &str)]| FolderCommit {
+            path: "/a".into(),
+            commit: "c1".into(),
+            dump: None,
+            tree: Some("t1".into()),
+            externals: ext.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        };
+        s.record_send("dev-a", "Alice", DeviceMarker { snapshot_id: "p@c1".into(), commits: vec![fc(&[("x1", "fp1")])], sent_at: "2026-01-01T00:00:00Z".into() });
+        assert!(s.is_up_to_date("dev-a", &[fc(&[("x1", "fp1")])]));
+        assert!(!s.is_up_to_date("dev-a", &[fc(&[("x1", "fp2")])]), "edited");
+        assert!(!s.is_up_to_date("dev-a", &[fc(&[])]), "no longer chosen");
+        // A marker saved before this existed reads back with none.
+        let old: FolderCommit = serde_json::from_str(r#"{"path":"/a","commit":"c1","tree":"t1"}"#).unwrap();
+        assert!(old.externals.is_empty());
+        assert!(!serde_json::to_string(&fc(&[])).unwrap().contains("externals"), "none: not written");
     }
 
     #[test]
