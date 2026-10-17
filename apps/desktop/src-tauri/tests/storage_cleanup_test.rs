@@ -98,7 +98,7 @@ fn app() -> Handle {
 async fn send_and_receive(sender: &Handle, receiver: &Handle, url: &str, room: &str, project: &Path) -> IncomingSnapshotInfo {
     let sid = session_commands::create_project_session(
         sender.state::<AppState>(),
-        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }],
+        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }],
         None,
     )
     .await

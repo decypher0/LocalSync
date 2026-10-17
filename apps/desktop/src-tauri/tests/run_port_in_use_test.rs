@@ -111,7 +111,7 @@ async fn a_run_whose_port_is_taken_fails_instead_of_showing_running() {
     let project = make_project(base.path(), "port-taken", 18143);
     let sid = session_commands::create_project_session(
         sender.state::<AppState>(),
-        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None }],
+        vec![FolderPlanDto { path: project.display().to_string(), dump: None, compose: None, externals: vec![] }],
         None,
     )
     .await

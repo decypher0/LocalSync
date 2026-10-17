@@ -788,7 +788,7 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(AppState::default());
         let handle = app.handle().clone();
-        let folder = FolderPlanDto { path: "/nonexistent".into(), dump: None, compose: None };
+        let folder = FolderPlanDto { path: "/nonexistent".into(), dump: None, compose: None, externals: vec![] };
         let err = test_run_compose(handle.clone(), handle.state::<AppState>(), folder).await.unwrap_err();
         assert!(err.contains("no compose settings"), "{err}");
     }

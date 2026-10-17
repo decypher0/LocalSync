@@ -584,8 +584,8 @@ mod tests {
     #[test]
     fn a_default_title_names_the_folders() {
         let folders = vec![
-            FolderPlanDto { path: "/w/xusom-admin".into(), dump: None, compose: None },
-            FolderPlanDto { path: "/w/xusom-api".into(), dump: None, compose: None },
+            FolderPlanDto { path: "/w/xusom-admin".into(), dump: None, compose: None, externals: vec![] },
+            FolderPlanDto { path: "/w/xusom-api".into(), dump: None, compose: None, externals: vec![] },
         ];
         assert_eq!(default_title(&folders), "xusom-admin, xusom-api");
     }

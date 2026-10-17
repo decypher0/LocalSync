@@ -563,6 +563,9 @@ pub struct FolderPlanDto {
     /// `None` for a project that ships its own compose file.
     #[serde(default)]
     pub compose: Option<ls_composegen::ComposeSpec>,
+    /// Files outside the project chosen in Setup (see `externals.rs`).
+    #[serde(default)]
+    pub externals: Vec<crate::externals::ExternalRef>,
 }
 
 /// Turns the wizard's folder/database plan into the inputs

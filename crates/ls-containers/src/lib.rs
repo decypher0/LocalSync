@@ -838,6 +838,7 @@ mod tests {
             created_at: time::OffsetDateTime::now_utc(),
             folders: vec![],
             database_dumps: vec![],
+            externals: Vec::new(),
         };
 
         let manifest_digest = Sha256::digest(serde_json::to_vec(&manifest).unwrap());
