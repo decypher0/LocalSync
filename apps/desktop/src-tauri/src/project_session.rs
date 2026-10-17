@@ -101,11 +101,15 @@ pub struct ProjectSession {
     /// RFC3339.
     pub created_at: String,
     pub devices: Vec<DeviceRecord>,
+    /// New (untracked) files the user chose not to send, as
+    /// `<folder path>/<path relative to it>` with `/` separators.
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
 }
 
 impl ProjectSession {
     pub fn new(id: String, title: String, folders: Vec<FolderPlanDto>, created_at: String) -> Self {
-        Self { id, title, folders, created_at, devices: Vec::new() }
+        Self { id, title, folders, created_at, devices: Vec::new(), excluded_paths: Vec::new() }
     }
 
     pub fn device(&self, key: &str) -> Option<&DeviceRecord> {
