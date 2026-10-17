@@ -332,6 +332,7 @@ pub async fn share_snapshot<R: tauri::Runtime>(
     // (which can take a while for a large snapshot) reaches completion.
     let _ = app.emit("receiver-connecting", ReceiverJoined { session_id: room_code.clone() });
 
+    check_peer_version(&conn).await?;
     let progress_session_id = room_code.clone();
     ls_net::send_payload(&conn, &bytes, |sent, total| {
         let _ = app.emit("share-progress", Progress { session_id: progress_session_id.clone(), bytes: sent, total });
@@ -738,6 +739,7 @@ pub async fn share_snapshot_wizard<R: tauri::Runtime>(
     // before the transfer itself (started right below) finishes.
     let _ = app.emit("receiver-connecting", ReceiverJoined { session_id: room_code.clone() });
 
+    check_peer_version(&conn).await?;
     let progress_session_id = room_code.clone();
     ls_net::send_payload(&conn, &bytes, |sent, total| {
         let _ = app.emit("share-progress", Progress { session_id: progress_session_id.clone(), bytes: sent, total });
@@ -967,12 +969,18 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     log::info!("receive_snapshot: data channel open, receiving payload");
 
     let progress_session_id = room_code.clone();
+    let mut sender_protocol = None;
     let bytes = ls_net::receive_payload_answering(
         &conn,
         |received, total| {
             let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
         },
-        |msg| answer_while_receiving(state.inner(), msg),
+        |msg| {
+            if let ls_net::ControlMessage::Version { protocol } = msg {
+                sender_protocol = Some(protocol);
+            }
+            answer_while_receiving(state.inner(), msg)
+        },
     )
     .await
     .map_err(|e| {
@@ -981,7 +989,7 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     })?;
 
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot)?;
+    let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot).map_err(|e| older_sender_error(e, sender_protocol))?;
     log::info!("receive_snapshot: done, id={}", info.snapshot_id);
     // An update to a session this device already has landed - let the
     // frontend route it to the existing tab. A fresh session needs no extra
@@ -1001,6 +1009,44 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     Ok(info)
 }
 
+/// Shown instead of a signature-verification error when the other device
+/// runs a build from before the current wire format.
+pub const OLDER_PEER: &str = "The other device runs an older LocalSync - update it";
+
+/// How long a sender waits for the receiver to say which protocol it speaks.
+/// A receiver from before [`ls_net::PROTOCOL_VERSION`] 1 never answers.
+const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Sender side, on a fresh connection before any payload: asks the receiver
+/// which protocol it speaks. No answer means a build from before version 1,
+/// which can't read what this one sends (it would fail the signature check),
+/// so nothing is sent and the person is told to update the other device.
+/// Not for a connection already checked: its control channel may be read by
+/// `listen_for_pull_requests`.
+pub(crate) async fn check_peer_version(conn: &ls_net::DataChannelConn) -> Result<(), String> {
+    let ask = ls_net::ControlMessage::Version { protocol: ls_net::PROTOCOL_VERSION };
+    match ls_net::request_control(conn, &ask, VERSION_TIMEOUT).await.map_err(|e| e.to_string())? {
+        Some(ls_net::ControlMessage::Version { protocol }) if protocol >= 1 => Ok(()),
+        other => {
+            log::info!("peer didn't answer the protocol version (got {other:?}): an older LocalSync");
+            // Closed, not just dropped, so the other device stops waiting.
+            conn.close().await;
+            Err(OLDER_PEER.to_string())
+        }
+    }
+}
+
+/// Receiver side: a snapshot that fails its signature from a sender that
+/// never said which protocol it speaks came from an older build - say that,
+/// not "signature verification failed".
+pub(crate) fn older_sender_error(error: String, sender_protocol: Option<u32>) -> String {
+    if sender_protocol.is_none() && error.contains("signature verification failed") {
+        OLDER_PEER.to_string()
+    } else {
+        error
+    }
+}
+
 /// The receiver's reply to a control message that arrives while it waits for
 /// a payload: a push asks which version of the project this device holds
 /// (`ControlMessage::BaseCheck`) before sending a diff against it, answered
@@ -1011,6 +1057,7 @@ fn answer_while_receiving(state: &AppState, msg: ls_net::ControlMessage) -> Opti
         ls_net::ControlMessage::BaseCheck { project_id, sender_pubkey_hex } => Some(ls_net::ControlMessage::BaseCheckResponse {
             commits: crate::receiver_session_commands::held_base_commits(state, &sender_pubkey_hex, &project_id),
         }),
+        ls_net::ControlMessage::Version { .. } => Some(ls_net::ControlMessage::Version { protocol: ls_net::PROTOCOL_VERSION }),
         other => {
             log::warn!("receive: unexpected control message from sender before its payload: {other:?}");
             None
@@ -1531,18 +1578,24 @@ pub async fn respond_to_connection_request<R: tauri::Runtime>(
     }
 
     let progress_session_id = peer_id.clone();
+    let mut sender_protocol = None;
     let bytes = ls_net::receive_payload_answering(
         &conn,
         |received, total| {
             let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
         },
-        |msg| answer_while_receiving(state.inner(), msg),
+        |msg| {
+            if let ls_net::ControlMessage::Version { protocol } = msg {
+                sender_protocol = Some(protocol);
+            }
+            answer_while_receiving(state.inner(), msg)
+        },
     )
     .await
     .map_err(|e| e.to_string())?;
 
     let snapshot: ls_snapshot::Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot)?;
+    let (info, outcome) = finalize_received_snapshot_tracked(&state, snapshot).map_err(|e| older_sender_error(e, sender_protocol))?;
     log::info!("respond_to_connection_request: accepted, id={}", info.snapshot_id);
     if let crate::receiver_session_commands::ReceivedSessionOutcome::Updated(session_id) = &outcome {
         let _ = app.emit(
@@ -2032,7 +2085,17 @@ async fn listen_for_cloud_access_requests<R: tauri::Runtime>(app: AppHandle<R>, 
         };
 
         match ls_net::recv_control(&conn).await {
-            Ok(ls_net::ControlMessage::CloudAccessRequest { google_email }) => {
+            Ok(ls_net::ControlMessage::CloudAccessRequest { protocol: 0, .. }) => {
+                // A receiver from before protocol version 1: it would fail the
+                // signature check on what this build uploaded.
+                log::info!("start_cloud_drop_session: access request from an older LocalSync, peer_id={peer_id}");
+                let decline = ls_net::ControlMessage::CloudAccessResponse { accepted: false, drive_file_id: None };
+                if let Err(e) = ls_net::send_control(&conn, &decline).await {
+                    log::warn!("start_cloud_drop_session: couldn't decline the older receiver: {e:#}");
+                }
+                let _ = app.emit("cloud-drop-failed", CloudDropFailedEvent { room_id: peer_id.clone(), message: OLDER_PEER.to_string() });
+            }
+            Ok(ls_net::ControlMessage::CloudAccessRequest { google_email, .. }) => {
                 log::info!("start_cloud_drop_session: access request from peer_id={peer_id} email={google_email}");
                 let state = app.state::<AppState>();
                 if let Ok(mut pending) = state.cloud_access_requests.lock() {
@@ -2260,7 +2323,7 @@ pub async fn request_cloud_drop_access<R: tauri::Runtime>(
         .await
         .map_err(|e| connect_error(&e, &decoded.signaling_url))?;
 
-    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: tokens.email.clone() })
+    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: tokens.email.clone(), protocol: ls_net::PROTOCOL_VERSION })
         .await
         .map_err(|e| e.to_string())?;
     // From here the sender has the request: a failure is now part of this
@@ -2356,6 +2419,19 @@ pub async fn cleanup_expired_cloud_drops() {
 #[tauri::command]
 pub fn load_session_history() -> Result<Vec<crate::session_history::SessionHistoryEntry>, String> {
     crate::session_history::load()
+}
+
+#[cfg(test)]
+mod older_peer_tests {
+    use super::{older_sender_error, OLDER_PEER};
+
+    #[test]
+    fn a_bad_signature_from_a_sender_that_never_said_its_protocol_reads_as_an_older_localsync() {
+        let bad = "signature verification failed: Verification equation was not satisfied".to_string();
+        assert_eq!(older_sender_error(bad.clone(), None), OLDER_PEER);
+        assert_eq!(older_sender_error(bad.clone(), Some(1)), bad, "a current sender with a bad signature is not 'older'");
+        assert_eq!(older_sender_error("disk full".into(), None), "disk full");
+    }
 }
 
 #[cfg(test)]

@@ -681,6 +681,7 @@ pub async fn send_project_session<R: tauri::Runtime>(
         await_recipient_consent(&conn, request.sender_name.clone()).await?;
     }
     let _ = app.emit("receiver-connecting", ReceiverJoined { session_id: request.room_code.clone() });
+    crate::commands::check_peer_version(&conn).await?;
     if diffed {
         if let PushBase::Full(reason) = check_receiver_base(&conn, &session.id, &parents).await {
             log::info!("send_project_session: sending {} in full: {reason}", session.id);

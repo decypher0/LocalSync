@@ -72,7 +72,7 @@ async fn the_code_comes_back_at_once_and_a_receiver_entering_it_is_reported() {
     assert!(sender.state::<AppState>().cloud_drop_uploads.lock().unwrap().contains_key(&info.room_id), "the upload is filed for the approval");
 
     // ---- their access request still reaches the sender (unchanged flow) ----
-    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: "bob@example.com".into() }).await.unwrap();
+    ls_net::send_control(&conn, &ls_net::ControlMessage::CloudAccessRequest { google_email: "bob@example.com".into(), protocol: ls_net::PROTOCOL_VERSION }).await.unwrap();
     until("cloud-access-request from this room", || requests.lock().unwrap().contains(&info.room_id)).await;
     assert_eq!(
         sender.state::<AppState>().cloud_access_requests.lock().unwrap().get(&info.room_id).map(String::as_str),
@@ -112,6 +112,41 @@ async fn a_receiver_who_leaves_is_reported_so_the_card_does_not_wait_forever() {
     conn.close().await;
     until("cloud-drop-ended for this room", || ended.lock().unwrap().contains(&info.room_id)).await;
     assert!(!sender.state::<AppState>().cloud_drop_uploads.lock().unwrap().contains_key(&info.room_id), "its dead connection is forgotten");
+}
+
+/// A receiver from before the protocol version sends no `protocol` (0): it
+/// couldn't verify what was uploaded, so it is declined and the sender's card
+/// says to update it - no access request to grant.
+#[tokio::test]
+async fn an_older_receiver_is_declined_with_a_plain_message() {
+    let sender = app();
+    let requests = record(&sender, "cloud-access-request");
+    let failed = Arc::new(Mutex::new(Vec::new()));
+    let sink = failed.clone();
+    sender.listen_any("cloud-drop-failed", move |e| {
+        let v: serde_json::Value = serde_json::from_str(e.payload()).unwrap_or_default();
+        sink.lock().unwrap().push(v["message"].as_str().unwrap_or_default().to_string());
+    });
+    let info = commands::begin_cloud_drop_handoff(&sender, "local".into(), None, "drive-file-4".into(), ls_clouddrop::retention::Retention::DeleteAfterDownload, delivery())
+        .await
+        .expect("handoff");
+    let decoded = commands::decode_room_code(info.room_code.clone(), None).unwrap();
+    let conn = ls_net::connect_as_receiver(&decoded.signaling_url, &decoded.room_id).await.expect("receiver joins");
+    // Exactly what an older build sends: no `protocol` key at all.
+    conn_send_raw(&conn, r#"{"type":"cloud-access-request","google_email":"old@example.com"}"#).await;
+    match tokio::time::timeout(Duration::from_secs(10), ls_net::recv_control(&conn)).await.expect("an answer").unwrap() {
+        ls_net::ControlMessage::CloudAccessResponse { accepted, drive_file_id } => assert!(!accepted && drive_file_id.is_none()),
+        other => panic!("expected a decline, got {other:?}"),
+    }
+    until("the card is told", || failed.lock().unwrap().iter().any(|m| m == commands::OLDER_PEER)).await;
+    assert!(requests.lock().unwrap().is_empty(), "no access request to grant");
+}
+
+/// Sends `json` as one control message, as a build with a different
+/// `ControlMessage` would.
+async fn conn_send_raw(conn: &ls_net::DataChannelConn, json: &str) {
+    let msg: ls_net::ControlMessage = serde_json::from_str(json).expect("today's build reads it too");
+    ls_net::send_control(conn, &msg).await.unwrap();
 }
 
 #[test]

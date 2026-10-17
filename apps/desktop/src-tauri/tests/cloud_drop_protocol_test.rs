@@ -61,7 +61,7 @@ async fn declined_access_request_sends_no_grant_and_no_file_id() {
     // sends.
     ls_net::send_control(
         &receiver_conn,
-        &ls_net::ControlMessage::CloudAccessRequest { google_email: "receiver@example.com".to_string() },
+        &ls_net::ControlMessage::CloudAccessRequest { google_email: "receiver@example.com".to_string(), protocol: ls_net::PROTOCOL_VERSION },
     )
     .await
     .expect("send_control should succeed");
@@ -71,7 +71,7 @@ async fn declined_access_request_sends_no_grant_and_no_file_id() {
     // not spawning the background task itself, since this test is about the
     // command's own behavior, not the listener loop.
     match ls_net::recv_control(&sender_conn).await.expect("recv_control should succeed") {
-        ls_net::ControlMessage::CloudAccessRequest { google_email } => {
+        ls_net::ControlMessage::CloudAccessRequest { google_email, .. } => {
             sender.state::<AppState>().cloud_access_requests.lock().unwrap().insert(room_id.clone(), google_email);
         }
         other => panic!("expected a CloudAccessRequest, got {other:?}"),

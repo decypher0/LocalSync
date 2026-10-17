@@ -137,6 +137,13 @@ const DONE_ACK_REPEATS: usize = 5;
 /// silent background timer.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The wire format this build speaks, exchanged as [`ControlMessage::Version`]
+/// before a payload. Raise it when a peer from before the change can no
+/// longer read what this build sends (as with `Manifest::project_id`, which
+/// an older receiver drops and then fails the signature on). Builds from
+/// before version 1 never answer the question at all.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// Ceiling on how long each side waits for ICE gathering to fully complete
 /// before sending its SDP anyway (see the module doc comment on "ICE
 /// strategy" for why gathering isn't trickled).
@@ -249,7 +256,14 @@ pub enum ControlMessage {
     /// is looked up server-side by the connection's own room/peer id, never
     /// sent by the receiver - a request can only ever *name who's asking*,
     /// never *what they should receive*.
-    CloudAccessRequest { google_email: String },
+    ///
+    /// `protocol` is the receiver's [`PROTOCOL_VERSION`]; a receiver from
+    /// before it sends none (0), so the sender can tell it is too old.
+    CloudAccessRequest {
+        google_email: String,
+        #[serde(default)]
+        protocol: u32,
+    },
     /// Sender -> receiver, only ever sent in reply to a `CloudAccessRequest`.
     /// `accepted: true` means the sender has already called the Drive API to
     /// grant that account real read access - by the time this arrives, the
@@ -291,6 +305,10 @@ pub enum ControlMessage {
     /// for that project, `None` if it has no such session. Only ids the
     /// sender itself produced - nothing of the receiver's.
     BaseCheckResponse { commits: Option<Vec<String>> },
+    /// Both ways, before a payload: the sender asks with its
+    /// [`PROTOCOL_VERSION`], the receiver answers with its own. A receiver
+    /// that never answers is from before version 1. Only a number.
+    Version { protocol: u32 },
 }
 
 /// Sends one [`ControlMessage`] on `conn`'s control channel. Independent of
