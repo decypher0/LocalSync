@@ -962,9 +962,13 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     log::info!("receive_snapshot: data channel open, receiving payload");
 
     let progress_session_id = room_code.clone();
-    let bytes = ls_net::receive_payload(&conn, |received, total| {
-        let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
-    })
+    let bytes = ls_net::receive_payload_answering(
+        &conn,
+        |received, total| {
+            let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
+        },
+        |msg| answer_while_receiving(state.inner(), msg),
+    )
     .await
     .map_err(|e| {
         log::warn!("receive_snapshot: receive_payload failed: {e}");
@@ -989,6 +993,23 @@ pub async fn receive_snapshot<R: tauri::Runtime>(
     tauri::async_runtime::spawn(listen_for_pushed_updates(app, conn, room_code));
 
     Ok(info)
+}
+
+/// The receiver's reply to a control message that arrives while it waits for
+/// a payload: a push asks which version of the project this device holds
+/// (`ControlMessage::BaseCheck`) before sending a diff against it, answered
+/// from the received sessions (`receiver_session_commands::
+/// held_base_commits`). An older sender asks nothing and just sends.
+fn answer_while_receiving(state: &AppState, msg: ls_net::ControlMessage) -> Option<ls_net::ControlMessage> {
+    match msg {
+        ls_net::ControlMessage::BaseCheck { project_id, sender_pubkey_hex } => Some(ls_net::ControlMessage::BaseCheckResponse {
+            commits: crate::receiver_session_commands::held_base_commits(state, &sender_pubkey_hex, &project_id),
+        }),
+        other => {
+            log::warn!("receive: unexpected control message from sender before its payload: {other:?}");
+            None
+        }
+    }
 }
 
 /// Background task (receiver side): waits for the sender to push a fresh
@@ -1041,6 +1062,14 @@ async fn listen_for_pushed_updates<R: tauri::Runtime>(
                         let _ = app.emit("snapshot-updated", info);
                     }
                     Err(e) => log::warn!("receive_snapshot: finalizing pushed update failed: {e}"),
+                }
+            }
+            Ok(msg @ ls_net::ControlMessage::BaseCheck { .. }) => {
+                let reply = answer_while_receiving(app.state::<AppState>().inner(), msg);
+                if let Some(reply) = reply {
+                    if let Err(e) = ls_net::send_control(&conn, &reply).await {
+                        log::warn!("receive_snapshot: couldn't answer the sender's BaseCheck: {e:#}");
+                    }
                 }
             }
             Ok(other) => {
@@ -1496,9 +1525,13 @@ pub async fn respond_to_connection_request<R: tauri::Runtime>(
     }
 
     let progress_session_id = peer_id.clone();
-    let bytes = ls_net::receive_payload(&conn, |received, total| {
-        let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
-    })
+    let bytes = ls_net::receive_payload_answering(
+        &conn,
+        |received, total| {
+            let _ = app.emit("receive-progress", Progress { session_id: progress_session_id.clone(), bytes: received, total });
+        },
+        |msg| answer_while_receiving(state.inner(), msg),
+    )
     .await
     .map_err(|e| e.to_string())?;
 
