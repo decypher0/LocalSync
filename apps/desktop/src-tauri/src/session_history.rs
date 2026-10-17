@@ -401,6 +401,23 @@ mod tests {
     }
 
     #[test]
+    fn what_the_stopped_page_shows_survives_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = received_session("r1");
+        session.sender_name = "Alice's laptop".to_string();
+        session.databases = vec![crate::received_session::ReceivedDatabase { engine: "mysql".into(), schema: "appdb".into() }];
+        session.record_started("2026-01-01T00:02:00Z".to_string());
+        session.record_stopped("2026-01-01T00:09:00Z".to_string());
+        save_received_in(dir.path(), &session).unwrap();
+        let reloaded = find_received_in(dir.path(), "r1").unwrap().unwrap();
+        assert_eq!(reloaded.sender_name, "Alice's laptop");
+        assert_eq!(reloaded.databases, session.databases);
+        assert_eq!(reloaded.last_run_at, "2026-01-01T00:02:00Z");
+        assert_eq!(reloaded.last_stopped_at, "2026-01-01T00:09:00Z");
+        assert_eq!(reloaded.last_exit, "stopped");
+    }
+
+    #[test]
     fn deleting_a_saved_received_session_removes_it_and_leaves_others() {
         let dir = tempfile::tempdir().unwrap();
         save_received_in(dir.path(), &received_session("r1")).unwrap();
