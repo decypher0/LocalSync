@@ -197,7 +197,7 @@ pub fn bundle_project_with(
     let mut tb = tar::Builder::new(zstd);
 
     let archive_bytes = git_bytes(project_root, &["archive", "--format=tar", &git_commit])?;
-    append_git_archive(&mut tb, &archive_bytes, "source", generated.is_some())?;
+    append_git_archive(&mut tb, &archive_bytes, "source", generated)?;
     if let Some(g) = generated {
         for (rel, bytes) in &g.files {
             append_bytes(&mut tb, &format!("source/{rel}"), bytes)?;
@@ -448,9 +448,14 @@ fn port_to_string(v: &serde_yaml::Value) -> Option<String> {
 /// `.sql` text dump for MySQL/PostgreSQL, a `.tar.gz` of MongoDB's own
 /// `mongodump` directory output for MongoDB), which this function has no
 /// reason to know about; see `create_snapshot_multi`'s `dump_file_extension`.
+///
+/// `externals` are (payload path, path on disk) for files or folders from
+/// outside the project (`ExternalFile::bundle_path`); a folder's files go
+/// under its payload path.
 pub(crate) fn merge_folder_payloads(
     bundles: &[(String, GitBundle)],
     dumps: &[(String, String, &crate::types::DumpSource)],
+    externals: &[(&str, &Path)],
 ) -> Result<Vec<u8>> {
     let zstd = zstd_encoder(Vec::new())?;
     let mut tb = tar::Builder::new(zstd);
@@ -479,6 +484,18 @@ pub(crate) fn merge_folder_payloads(
     for (folder, file_name, source) in dumps {
         let tar_path = format!("db-dumps/{folder}/{file_name}");
         append_dump_source(&mut tb, &tar_path, source)?;
+    }
+
+    for (tar_path, src) in externals {
+        if src.is_dir() {
+            for file in walk_files(src)? {
+                let rel = file.strip_prefix(src).unwrap().to_string_lossy().replace('\\', "/");
+                append_dump_source(&mut tb, &format!("{tar_path}/{rel}"), &crate::types::DumpSource::FilePath(file))?;
+            }
+        } else {
+            append_dump_source(&mut tb, tar_path, &crate::types::DumpSource::FilePath(src.to_path_buf()))
+                .with_context(|| format!("reading {}", src.display()))?;
+        }
     }
 
     let zstd = tb.into_inner().context("finalizing merged tar")?;
@@ -532,12 +549,16 @@ fn append_dump_source<W: Write>(tb: &mut tar::Builder<W>, path: &str, source: &c
 /// named file from the context - some (podman-compose on Windows) ignoring the
 /// compose file's `dockerfile:` entirely - so a second candidate could be
 /// built silently instead.
+///
+/// A project file that a generated file replaces (LocalSync's rewritten copy
+/// of a config file, say) is left out, so the payload holds one copy of it.
 fn append_git_archive<W: Write>(
     tb: &mut tar::Builder<W>,
     archive_bytes: &[u8],
     prefix: &str,
-    shadow_build_files: bool,
+    generated: Option<&crate::types::GeneratedFiles>,
 ) -> Result<()> {
+    let shadow_build_files = generated.is_some();
     let mut archive = tar::Archive::new(archive_bytes);
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -552,6 +573,10 @@ fn append_git_archive<W: Write>(
                     new_path = Path::new(prefix).join(format!("{name}.original"));
                 }
             }
+        }
+        let replaced = generated.is_some_and(|g| g.files.iter().any(|(rel, _)| Path::new(rel) == path));
+        if replaced && new_path == Path::new(prefix).join(&path) {
+            continue;
         }
         let mut header = entry.header().clone();
         tb.append_data(&mut header, &new_path, &mut entry)

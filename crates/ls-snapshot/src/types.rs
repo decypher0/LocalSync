@@ -100,7 +100,9 @@ pub struct ExternalFile {
     /// The value as the sender's config wrote it.
     pub original_value: String,
     pub kind: ExternalKind,
-    /// Where it sits inside the payload: `external/<id>/...`.
+    /// Where it sits inside the payload, from the payload root (next to
+    /// `db-dumps/`): `external/<id>/<file name>` for a file, `external/<id>`
+    /// for a folder.
     pub bundle_path: String,
 }
 
@@ -161,6 +163,10 @@ pub struct GeneratedFiles {
     /// sit if they had been committed - so a compose `build:` context of "."
     /// finds them.
     pub files: Vec<(String, Vec<u8>)>,
+    /// Files or folders from outside the project to carry at
+    /// `ExternalFile::bundle_path`, each with where it is on this computer.
+    /// Streamed from disk when the payload is built.
+    pub externals: Vec<(ExternalFile, std::path::PathBuf)>,
 }
 
 /// Where a [`PendingDump`]'s content actually lives.

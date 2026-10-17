@@ -257,7 +257,17 @@ pub fn create_snapshot_multi_with(
     }
     let db_seed_hash = hash::combine_hex_hashes(&seed_hashes);
 
-    let payload = bundle::merge_folder_payloads(&bundles, &dump_tuples)?;
+    // Files from outside the project (see `GeneratedFiles::externals`), once
+    // each: two folders pointing at the same file share one id.
+    let mut externals: Vec<(types::ExternalFile, &Path)> = Vec::new();
+    for (file, src) in generated.iter().flatten().flat_map(|g| &g.externals) {
+        if !externals.iter().any(|(e, _)| e.bundle_path == file.bundle_path) {
+            externals.push((file.clone(), src));
+        }
+    }
+    let external_sources: Vec<(&str, &Path)> = externals.iter().map(|(e, src)| (e.bundle_path.as_str(), *src)).collect();
+
+    let payload = bundle::merge_folder_payloads(&bundles, &dump_tuples, &external_sources)?;
 
     let project_name = labels.join("+");
 
@@ -275,7 +285,7 @@ pub fn create_snapshot_multi_with(
         created_at: time::OffsetDateTime::now_utc(),
         folders: folder_infos,
         database_dumps,
-        externals: Vec::new(),
+        externals: externals.into_iter().map(|(e, _)| e).collect(),
     };
 
     let signature = sign::sign_manifest(&identity, &manifest, &payload)?;
@@ -905,6 +915,7 @@ mod tests {
 ".to_string(),
             files: vec![("Dockerfile".to_string(), b"FROM scratch
 ".to_vec())],
+            externals: vec![],
         };
         let snap = create_snapshot_multi_with(
             &[FolderSpec { path: root.clone(), parent_commit: None }],
@@ -964,6 +975,7 @@ mod tests {
       dockerfile: Dockerfile
 ".to_string(),
             files: vec![("Dockerfile".to_string(), b"FROM generated".to_vec())],
+            externals: vec![],
         };
         let files = unpack(&create_snapshot_multi_with(&folders, &[], &[Some(generated)]).unwrap().payload);
         let at = |p: &str| files.get(&format!("own-dockerfile-app/source/{p}")).map(|b| String::from_utf8_lossy(b).to_string());
@@ -979,6 +991,56 @@ mod tests {
         let plain = unpack(&create_snapshot_multi(&folders, &[]).unwrap().payload);
         assert_eq!(plain.get("own-dockerfile-app/source/Dockerfile").map(|b| b.as_slice()), Some(&b"FROM openjdk:8-jdk"[..]));
         assert!(!plain.contains_key("own-dockerfile-app/source/Dockerfile.original"));
+    }
+
+    #[test]
+    fn external_files_ship_under_external_and_a_generated_config_replaces_the_committed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ext-app");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.properties"), "tenants=C:/outside/tenants.xml\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "-A"],
+            vec!["-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "-q", "-m", "init"],
+        ] {
+            assert!(std::process::Command::new("git").args(&args).current_dir(&root).status().unwrap().success());
+        }
+        let outside = dir.path().join("outside dir");
+        std::fs::create_dir_all(outside.join("logos/sub")).unwrap();
+        std::fs::write(outside.join("tenants.xml"), "<companies/>").unwrap();
+        std::fs::write(outside.join("logos/sub/a.png"), "png").unwrap();
+        let ext = |id: &str, kind, bundle_path: &str| ExternalFile {
+            id: id.into(),
+            key: "k".into(),
+            config_file: "app.properties".into(),
+            original_value: "v".into(),
+            kind,
+            bundle_path: bundle_path.into(),
+        };
+        let generated = GeneratedFiles {
+            compose_yaml: "services:\n  app:\n    image: busybox\n".into(),
+            files: vec![("app.properties".into(), b"tenants=/localsync/external/t1/tenants.xml\n".to_vec())],
+            externals: vec![
+                (ext("t1", ExternalKind::File, "external/t1/tenants.xml"), outside.join("tenants.xml")),
+                (ext("l1", ExternalKind::Dir, "external/l1"), outside.join("logos")),
+            ],
+        };
+        let snap = create_snapshot_multi_with(&[FolderSpec { path: root.clone(), parent_commit: None }], &[], &[Some(generated)]).unwrap();
+
+        let decoder = zstd::stream::read::Decoder::new(snap.payload.as_slice()).unwrap();
+        let mut names = Vec::new();
+        for entry in tar::Archive::new(decoder).entries().unwrap() {
+            names.push(entry.unwrap().path().unwrap().to_string_lossy().replace('\\', "/"));
+        }
+        assert_eq!(names.iter().filter(|n| *n == "ext-app/source/app.properties").count(), 1, "one copy of the config: {names:?}");
+        let files = unpack(&snap.payload);
+        assert_eq!(files["ext-app/source/app.properties"], b"tenants=/localsync/external/t1/tenants.xml\n");
+        assert_eq!(files["external/t1/tenants.xml"], b"<companies/>");
+        assert_eq!(files["external/l1/sub/a.png"], b"png");
+        assert_eq!(snap.manifest.externals.len(), 2);
+        assert_eq!(snap.manifest.externals[0].bundle_path, "external/t1/tenants.xml");
+        assert_eq!(std::fs::read_to_string(root.join("app.properties")).unwrap(), "tenants=C:/outside/tenants.xml\n", "the sender's file is untouched");
     }
 
     /// The real project is a subfolder of a larger repo: `.git` at the parent,
