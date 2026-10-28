@@ -1,0 +1,72 @@
+# Checks every pull request and every push to a branch other than main:
+# the Rust workspace builds, its tests pass, clippy finds no errors, and the
+# frontend's plain-node tests pass. No secrets: Cloud drop's Google client is
+# optional at build time (option_env!), so the app builds without it.
+#
+# Tests that need Podman/podman-compose (real containers) skip themselves
+# with a printed reason where those aren't installed, as on this runner -
+# they're run on a developer machine. The NAT test needs Podman too.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        # The same list release.yml's build-linux job uses (and
+        # scripts/setup-linux-deps.sh documents): what Tauri needs to compile.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The signaling server the network tests start (`node index.js`).
+      - name: Install the signaling server's dependencies
+        working-directory: apps/signaling-server
+        run: npm ci
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets --locked
+
+      - name: cargo test
+        run: |
+          cargo build --example nat_peer -p ls-net --locked
+          cargo test --workspace --locked
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Frontend tests (node test-*.js)
+        working-directory: apps/desktop/src
+        run: |
+          status=0
+          for f in test-*.js; do
+            echo "== $f"
+            node --test "$f" || status=1
+          done
+          exit $status

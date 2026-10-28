@@ -19,7 +19,7 @@ const ChangesPanel = (() => {
   /**
    * What the panel shows for one project_changes result (or { pending } /
    * { error }): { title, message, folders: [{ name, path, notes, lines, more }] }.
-   * A line is { path, kind, tickable, checked, secret }.
+   * A line is { path, kind, tickable, checked, secret, tooLarge }.
    */
   function model(changes) {
     const title = changes && changes.last_device_name ? `Changes since the last send to ${changes.last_device_name}` : "Changes since the last send";
@@ -35,9 +35,10 @@ const ChangesPanel = (() => {
       const all = (f.files || []).map((x) => ({
         path: x.path,
         kind: KIND[x.change_type] || x.change_type,
-        tickable: !!x.new_file,
+        tickable: !!x.new_file && !x.too_large,
         checked: !!x.included,
         secret: !!x.secret,
+        tooLarge: !!x.too_large,
       }));
       return { name: folderName(f.path), path: f.path, notes, lines: all.slice(0, MAX_LINES), more: Math.max(0, all.length - MAX_LINES) };
     });
@@ -56,7 +57,7 @@ const ChangesPanel = (() => {
           const box = l.tickable
             ? `<input type="checkbox" data-change-file="${esc(l.path)}" data-folder="${esc(f.path)}" ${l.checked ? "checked" : ""}> `
             : "";
-          const hint = l.tickable && l.secret && !l.checked ? " · may hold secrets, tick to send" : "";
+          const hint = l.tooLarge ? " · too large, not included" : l.tickable && l.secret && !l.checked ? " · may hold secrets, tick to send" : "";
           return `<label class="lsv-row"><span class="lsv-label">${box}${esc(l.kind)}${esc(hint)}</span><span class="lsv-val">${esc(l.path)}</span></label>`;
         })
         .join("") + (f.more ? `<p class="lsv-muted lsv-small">and ${plural(f.more, "more file")}</p>` : "");
