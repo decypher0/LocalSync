@@ -162,6 +162,11 @@ impl Drop for TestServer {
 
 #[test]
 fn live_postgres_export_round_trip() -> Result<()> {
+    // The real PostgreSQL binaries this test starts; CI runners don't have them.
+    if !Path::new(&format!("{PG_BIN}/initdb")).exists() || Command::new("psql").arg("--version").output().is_err() {
+        eprintln!("{PG_BIN}/initdb or psql not found - skipping live_postgres_export_round_trip");
+        return Ok(());
+    }
     let server = TestServer::start()?;
     eprintln!("STEP: starting server");
     eprintln!("STEP: server ready on port {}", server.port);
