@@ -13,7 +13,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [profile.dev]
 opt-level = 0
