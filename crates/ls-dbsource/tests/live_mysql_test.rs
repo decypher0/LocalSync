@@ -197,8 +197,17 @@ impl Drop for TestServer {
     }
 }
 
+/// The real MariaDB binaries these tests start; CI runners don't have them.
+fn tooling_available() -> bool {
+    ["mariadb-install-db", "mariadbd", "mysql"].iter().all(|bin| Command::new(bin).arg("--version").output().is_ok())
+}
+
 #[test]
 fn live_mysql_export_round_trip() -> Result<()> {
+    if !tooling_available() {
+        eprintln!("mariadb-install-db/mariadbd/mysql not on PATH - skipping live_mysql_export_round_trip");
+        return Ok(());
+    }
     eprintln!("STEP: starting server");
     let server = TestServer::start()?;
     eprintln!("STEP: server ready on port {}", server.port);
@@ -475,6 +484,10 @@ fn replay_dump(server: &TestServer, database: &str, dump: &[u8]) -> std::result:
 /// and again over the existing tables (DROP of a referenced table).
 #[test]
 fn live_mysql_export_imports_when_a_foreign_key_references_a_later_table() -> Result<()> {
+    if !tooling_available() {
+        eprintln!("mariadb-install-db/mariadbd/mysql not on PATH - skipping");
+        return Ok(());
+    }
     let server = TestServer::start()?;
     let mut admin = server.admin_conn()?;
     admin.query_drop("CREATE DATABASE fk_src").context("create fk_src")?;
