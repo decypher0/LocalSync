@@ -1,114 +1,146 @@
 # LocalSync
 
-**Share a running local project — code, containers, and database — with a teammate in minutes, without deploying anywhere.**
+**Hand a teammate your running local project — code, containers and database — in a few minutes, without deploying anything.**
 
 [![Release](https://img.shields.io/github/v/release/decypher0/LocalSync?include_prereleases&label=release)](https://github.com/decypher0/LocalSync/releases)
-[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#-download--install)
-[![License](https://img.shields.io/badge/license-TBD-lightgrey)](#-license)
-[![Build](https://github.com/decypher0/LocalSync/actions/workflows/release.yml/badge.svg)](https://github.com/decypher0/LocalSync/actions)
+[![CI](https://github.com/decypher0/LocalSync/actions/workflows/ci.yml/badge.svg)](https://github.com/decypher0/LocalSync/actions/workflows/ci.yml)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#install)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-LocalSync lets a developer package their current local project — source, containers, and database state — and hand it directly to a teammate's machine, where it runs in an isolated, read-only sandbox. No shared staging server, no tunnel to your live dev process, no waiting for a deploy pipeline.
+LocalSync packages a snapshot of your project (the files git tracks, your uncommitted edits, a database dump) and sends it straight to a teammate's computer. There it runs in Podman containers, isolated from their system and from your machine. You keep coding; what they run doesn't change until you push an update.
 
-**[Download](#-download--install) · [How it works](#-how-it-works) · [Features](#-features) · [Getting started](#-getting-started) · [Build from source](#-build-from-source) · [Contributing](#-contributing)**
+**[Install](#install) · [Quick start](#quick-start) · [What can I send?](docs/what-can-i-send.md) · [Troubleshooting](#troubleshooting) · [Contributing](CONTRIBUTING.md)**
 
 ---
 
-## 🧩 The problem
+## Why
 
-- **Testing a UI against a real backend API usually means waiting** — for a deploy, a shared staging environment, or someone else's schedule.
-- **Tunneling tools (ngrok and similar) share your live dev process directly** — the moment you touch your code, whoever's testing feels it too, and there's no isolation between "what I'm actively changing" and "what I'm showing someone."
-- **Tunnels alone don't solve the database problem.** A real application — especially a multi-tenant one, or one spanning several services and databases — often needs its actual seed data (default tenants, roles, parent records) just to boot. No developer can safely guess which rows are "needed" and which aren't, and a project's data can genuinely run into gigabytes.
-- **Not everyone has a server to route through**, and self-hosting a relay isn't something every small team or solo developer wants to maintain.
-- **Setting all of this up shouldn't require a terminal.** A GUI-first workflow, with sane defaults, matters as much as the underlying transport.
+- **Testing against a real backend usually means waiting** for a deploy or a shared staging server.
+- **Tunnels (ngrok and similar) expose your live dev process.** Every edit you make hits whoever is testing.
+- **Tunnels don't carry the database.** Many apps can't even boot without their seed data.
+- **Not everyone has a server**, and nobody should need a terminal to share a project.
 
-## ✅ Features
+LocalSync sends a point-in-time copy instead: signed, reviewed by the receiver before it runs, and complete with its database.
 
-- **Snapshot-based sharing, not a live tunnel.** Your project is diffed (`.gitignore`-aware), signed, and packaged as a point-in-time snapshot — editing your code afterward never affects what the receiver is running.
-- **A real consent gate, enforced at the type level.** Nothing runs on the receiver's machine until they've reviewed the incoming diff and explicitly clicked Run — this isn't just a UI convention, it's structurally impossible to bypass in the code.
-- **Read-only, sandboxed execution via containers**, using Podman — no dependency ever gets installed to the receiver's actual OS.
-- **Cross-platform**, natively — Windows, macOS, and Linux, from one codebase.
-- **Three ways to connect**, chosen per send:
-  - **Local network** — zero setup, for teammates on the same Wi-Fi/LAN.
-  - **Remote relay** — point at any self-hosted relay for cross-network use without a central server this project runs for you.
-  - **Cloud drop** — share via your own Google Drive; the sender stays in full control of who's been granted access, using Drive's own real sharing permissions, not a public link.
-- **A guided database wizard**, not a black box. Auto-detects connection details from your project's own config (e.g. Spring Boot's `application.yml`), lets you browse the real live schema before deciding what to include, supports MySQL/PostgreSQL/MongoDB, and handles projects with multiple databases across multiple folders.
-- **Fast on repeat sends.** Dependency layers, container images, and database dumps are all cached — a second send of a mostly-unchanged project is dramatically faster than the first.
-- **Multi-person sessions.** A sender can have several people connected at once, push an update to one specific person; it lands on the session that person already has, for review before it applies.
-- **Magic links.** Share a real `https://` link — it opens straight into the app if it's installed, or walks a new teammate through installing it if it's not.
-- **A real update path and modern UI** — auto-update, light/dark themes, and a guided step-by-step flow for sharing and receiving.
+## Features
 
-## 🖥️ How it works
+- **Snapshots, not a live tunnel.** Later edits on your side never affect what the receiver is running.
+- **The receiver decides.** Nothing runs until they've reviewed the incoming changes and clicked **Run**.
+- **Sandboxed.** Everything runs in Podman containers with a memory limit; nothing is installed on the receiver's OS.
+- **Database included.** A wizard detects connection details from your project's config, lets you browse tables, and dumps MySQL, PostgreSQL or MongoDB.
+- **No Docker setup needed.** Projects without a `docker-compose.yml` get one generated (Java, Node.js, Python, Go).
+- **Three ways to connect:** local network (zero setup), your own relay server, or your Google Drive.
+- **Updates, not resends.** Push an update to one person; they review it, apply it, and can roll back.
+- **Magic links**, auto-update, light and dark themes.
 
-1. **Send** — pick a project folder (or several), choose how to connect, and optionally walk through the database wizard if your project needs one.
-2. LocalSync diffs, signs, and packages a snapshot — your live code is never touched or exposed directly.
-3. **Receive** — the other person gets a room code or magic link, reviews exactly what's changed, and clicks Run.
-4. Containers spin up locally on their machine — app and database included — read-only and disposable.
+## Install
 
-## 📥 Download & Install
+Download the latest build from the **[Releases page](https://github.com/decypher0/LocalSync/releases)**.
 
-Grab the latest build from the **[Releases page](https://github.com/decypher0/LocalSync/releases)**.
+| OS | File | Notes |
+|---|---|---|
+| Windows 10/11 | `.exe` installer | SmartScreen may warn: **More info → Run anyway**. |
+| macOS | `.dmg` | Gatekeeper blocks a normal double-click: right-click the app → **Open**. |
+| Linux | `.deb` or `.AppImage` | `sudo dpkg -i LocalSync_*.deb`, or `chmod +x LocalSync_*.AppImage && ./LocalSync_*.AppImage` |
 
-> Builds are currently unsigned while the project doesn't yet have a paid code-signing certificate. Your OS will warn you the first time — this is expected, not a sign of a compromised download.
+> Builds are not code-signed yet, so the warnings above are expected.
 
-**Windows:** run the `.exe` installer. If SmartScreen shows *"Windows protected your PC,"* click **More info → Run anyway**.
+### What each side needs
 
-**macOS:** open the `.dmg`. Since it's unsigned, Gatekeeper will block a normal double-click — right-click the app → **Open**, and confirm in the dialog that appears.
+| | Sender | Receiver |
+|---|---|---|
+| **Git** ([git-scm.com](https://git-scm.com)) | Yes — the project must have at least one commit | No |
+| **Podman** | Only for the optional compatibility check | Yes — LocalSync offers to install it on first launch (on Windows this enables WSL and needs one restart) |
+| **Google account** | Only for Cloud drop | Only for Cloud drop |
 
-**Linux:** install the `.deb` (`sudo dpkg -i LocalSync_*.deb`) or run the AppImage directly (`chmod +x LocalSync_*.AppImage && ./LocalSync_*.AppImage`).
+When Windows asks whether LocalSync may use the network, choose **Allow** on private networks.
 
-## 🚀 Getting started
+## Quick start
 
-1. Open LocalSync on both machines.
-2. On the sender's side, click **Send**, choose a connectivity mode, and pick a project folder.
-3. If your project uses a database, the wizard will walk you through it — auto-detecting connection details where it can, and letting you browse real tables before deciding what to include.
-4. Share the generated code or magic link with your teammate.
-5. On the receiver's side, click **Receive**, enter the code (or just click the link), review the diff, and click **Run**.
+### Sending
 
-What each side needs: the **sender** needs [Git](https://git-scm.com) installed and the project committed (LocalSync packages what git tracks). The **receiver** needs Podman — on first launch LocalSync's setup screen checks for it and offers to install it (on Windows this includes turning on WSL, which needs one restart). The first time LocalSync connects, Windows may ask whether to allow it on your network: choose **Allow** on private networks so nearby devices can connect.
+1. Open LocalSync, click **New Session**, give it a name and choose **Send a project**.
+2. Pick your project folder (or several). A folder that isn't a git repository gets a **Set up automatically** button.
+3. If the project has no `docker-compose.yml`, answer a few questions (language, run command, port, database). LocalSync generates the container setup; nothing is written into your folder.
+4. If the project uses a database, choose what to include in the dump.
+5. Choose how to connect and click **Send**. Share the code or magic link with your teammate.
 
-## 🛠️ Build from source
+After you change your code, open the session and click **Push update**. LocalSync shows what changed since the last send and checks that the update still builds before sending it.
 
-**Prerequisites:**
-- [Rust](https://rustup.rs) (stable toolchain)
-- [Node.js](https://nodejs.org) (current LTS)
-- [Podman](https://podman.io)
-- Platform build tools: Visual Studio Build Tools (Windows, MSVC toolchain), Xcode Command Line Tools (macOS), or your distro's GTK/WebKit dev packages (Linux — see `scripts/setup-linux-deps.sh`)
+### Receiving
 
-```bash
-git clone https://github.com/decypher0/LocalSync.git
-cd LocalSync/apps/desktop
-npm install
-npm run tauri build
-```
+1. Click the magic link, or open LocalSync, click **New Session**, choose **Receive a project** and enter the code.
+2. Review the files and settings that came in.
+3. Click **Run**. The app and its database start in containers on your machine; the session page shows the address to open.
+4. When the sender pushes an update, it lands on the same session for you to review. Click **Apply & restart** (or **Run** if it was stopped), and **Roll back to previous version** if the new one fails.
 
-Run the test suite:
+### Choosing how to connect
 
-```bash
-cargo test --workspace
-```
+| Mode | Use when | Setup |
+|---|---|---|
+| **Local network** | Both computers are on the same Wi-Fi or LAN | None |
+| **Remote relay** | You're on different networks | Someone runs the small relay server — see [self-hosting a relay](docs/self-hosting-relay.md) |
+| **Cloud drop** | The computers can't reach each other, or the receiver isn't online yet | Both link a Google account — see [Cloud drop](docs/cloud-drop.md) |
 
-Two sample projects (`sample-project/`, a Spring Boot + MySQL app, and `sample-project-node/`, an Express + PostgreSQL app) are included for trying out the full send/receive flow locally without needing a real project on hand.
+Project data always goes directly between the two computers (or through the sender's own Drive with Cloud drop). A relay only passes the connection handshake.
 
-### Optional: enabling Cloud drop, code-signing, and auto-update
+## What can I send?
 
-- Cloud drop (Google Drive) mode needs a Google OAuth Client ID you register yourself — see [`docs/google-drive-setup.md`](docs/google-drive-setup.md).
-- How Cloud drop works for the people using it (both need a Google account; what is sent): [`docs/cloud-drop.md`](docs/cloud-drop.md). What kinds of projects LocalSync can send: [`docs/what-can-i-send.md`](docs/what-can-i-send.md).
-- Producing signed, warning-free installers needs a real code-signing certificate (Windows) and Apple Developer Program enrollment (macOS) — see [`docs/code-signing.md`](docs/code-signing.md).
-- Shipping update-capable installers (so "Check for updates" can find something) needs a locally-generated signing key added as a repository secret — see [`docs/auto-update-signing.md`](docs/auto-update-signing.md).
+Web apps and APIs in **Java (Maven/Gradle), Node.js, Python or Go**, optionally with a **MySQL, PostgreSQL or MongoDB** database. Projects with their own `docker-compose.yml` run as-is. Mobile apps, Rust, PHP, Ruby and .NET projects, and static-only sites aren't supported yet.
 
-None of these are required to build or use the app — all three are optional, and everything works without them beyond the warnings/limitations described in each doc.
+Files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`, …) are **left out** unless you tick them. New files over 25 MB aren't sent.
 
-## 🔒 Security model
+Details, including config files that point outside the project: **[docs/what-can-i-send.md](docs/what-can-i-send.md)**.
 
-- Every snapshot is signed; the receiver's app verifies the signature before anything can run.
-- Execution is read-only and sandboxed per snapshot — nothing installs to the receiver's host system.
-- The trust model is strictly one-way: a sender shares with a receiver, never the other way around. Pull requests and multi-receiver sessions are signaling only — no code or file changes can flow back to the sender.
-- Cloud drop mode uses Google Drive's own real, per-account sharing permissions — not a public "anyone with the link" file — so the sender always knows exactly who has access.
+## Security and privacy
 
-## 🤝 Contributing
+- Every snapshot is signed, and the receiver verifies the signature before anything runs.
+- Nothing runs until the receiver reviews it and clicks **Run**.
+- Containers run under a fixed sandbox policy with a 1 GB memory limit.
+- Sharing is one-way: nothing can flow back to the sender's machine.
+- Cloud drop shares the file with one specific Google account, never with "anyone with the link".
+- There is no LocalSync server and no account. Nothing is collected about you.
 
-Issues and pull requests are welcome. If you're picking this up for the first time, `docs/` has setup guides for the pieces that need external credentials (Google Drive, code-signing, auto-update signing), and `docs/round5-manual-test-checklist.md` has the accumulated manual-testing notes for the parts that need a real screen to verify.
+Found a security problem? Please report it privately through [GitHub security advisories](https://github.com/decypher0/LocalSync/security/advisories/new) rather than a public issue.
 
-## 📄 License
+## Troubleshooting
 
-*A license has not yet been chosen for this project.* If you're the maintainer, add a `LICENSE` file and update this section before treating this repo as fully open source — without one, default copyright law applies and others technically don't have permission to use, modify, or redistribute this code, however open the intent.
+- **Send or Receive hangs on a local network:** check that the firewall allows LocalSync (Windows: Defender Firewall inbound rules; Linux: `ufw`), and that both computers are on the same network.
+- **Every Run fails with a memory-limit error on Windows:** see [docs/troubleshooting.md](docs/troubleshooting.md) (a known WSL 3.0.1 issue).
+- **"The other device runs an older LocalSync":** update LocalSync on both computers.
+- **Logs** to attach to a bug report:
+  - Windows: `%APPDATA%\localsync\logs\`
+  - macOS: `~/Library/Application Support/localsync/logs/`
+  - Linux: `~/.local/share/localsync/logs/`
+
+  `send.log` covers sending and receiving, `provisioning.log` covers Podman setup.
+
+Still stuck? [Open an issue](https://github.com/decypher0/LocalSync/issues/new) with your OS, the LocalSync version and the relevant log lines.
+
+## Documentation
+
+| Topic | Doc |
+|---|---|
+| Supported projects, external files, how updates work | [what-can-i-send.md](docs/what-can-i-send.md) |
+| Sending through Google Drive | [cloud-drop.md](docs/cloud-drop.md) |
+| Running your own relay | [self-hosting-relay.md](docs/self-hosting-relay.md) |
+| Known problems | [troubleshooting.md](docs/troubleshooting.md) |
+| Building from source, tests, project layout | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Google OAuth client for Cloud drop (self-builds) | [google-drive-setup.md](docs/google-drive-setup.md) |
+| Code signing and update signing (maintainers) | [code-signing.md](docs/code-signing.md), [auto-update-signing.md](docs/auto-update-signing.md) |
+| Building on macOS | [macos-build.md](docs/macos-build.md) |
+
+## Contributing
+
+Bug reports, fixes and docs improvements are welcome. Start with **[CONTRIBUTING.md](CONTRIBUTING.md)**: it covers setting up the toolchain, running the app and tests, and what a pull request needs.
+
+## License
+
+LocalSync is dual-licensed under either of
+
+- [MIT License](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in LocalSync, as defined in the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.
