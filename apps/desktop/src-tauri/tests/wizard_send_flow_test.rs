@@ -289,6 +289,11 @@ fn unpack_tar_gz(payload: &[u8]) -> std::collections::HashMap<String, Vec<u8>> {
 
 #[tokio::test]
 async fn full_wizard_flow_against_a_real_local_mysql_instance() {
+    // The real MariaDB binaries TestServer starts; CI runners don't have them.
+    if !["mariadb-install-db", "mariadbd", "mysql"].iter().all(|bin| Command::new(bin).arg("--version").output().is_ok()) {
+        eprintln!("mariadb-install-db/mariadbd/mysql not on PATH - skipping");
+        return;
+    }
     let _home = isolate_sender_home();
     let server = TestServer::start();
     server.sh_sql(None, "CREATE DATABASE inventory_db");
